@@ -1,0 +1,156 @@
+{
+  "project_metadata": {
+    "name": "Remote_AI_OS_v2",
+    "description": "Local AI assistant with SQLite database for relational mapping of Agents, Tasks, and Workflows. Features a Master AI for routing and dynamic CrewAI assembly.",
+    "global_tech_stack": [
+      "Python",
+      "Streamlit",
+      "python-telegram-bot",
+      "CrewAI",
+      "SQLite3",
+      "PyYAML",
+      "python-dotenv"
+    ],
+    "architecture_rules": "CRITICAL RULE: APPEND ONLY AND PRESERVE CODE. Data source of truth is SQLite (database.sqlite). YAML files in /config are used for configuration and as portable exports. Strictly adhere to directory structure: /config, /db, /tools, /core, /ui."
+  },
+  "modules": [
+    {
+      "module_id": "M0",
+      "module_name": "Infrastructure & Database (Fase 0)",
+      "tasks": [
+        {
+          "task_id": "M0_T1",
+          "title": "Project Initialization & Folders",
+          "description": "Ensure folders exist: /config, /db, /tools, /core, /ui. Generate requirements.txt. Create `core/data_manager.py` for .env and YAML legacy support.",
+          "target_file": "core/data_manager.py",
+          "dependencies": [],
+          "status": "done"
+        },
+        {
+          "task_id": "M0_T2",
+          "title": "SQLite Schema & DB Manager",
+          "description": "Create `db/database.sqlite`. Implement `core/db_manager.py` with tables: 1) Models (id, provider, model_name), 2) Agents (id, name, role, backstory, model_id, tools_json), 3) Tasks (id, description, expected_output, agent_id), 4) Workflows (id, name, task_ids_json, requires_human_check). Implement CRUD functions for all tables.",
+          "target_file": "core/db_manager.py",
+          "dependencies": [
+            "M0_T1"
+          ],
+          "status": "done"
+        }
+      ]
+    },
+    {
+      "module_id": "M1",
+      "module_name": "Streamlit Configuration UI (Fase 1)",
+      "tasks": [
+        {
+          "task_id": "M1_T1",
+          "title": "UI: API Vault & Model Registry",
+          "description": "In `ui/dashboard.py`, create Tab 1 for API Keys. Create a sub-section 'Model Registry' to add/remove LLM models (e.g., GPT-4, Llama3 via Ollama) into the SQLite 'Models' table.",
+          "target_file": "ui/dashboard.py",
+          "dependencies": [
+            "M0_T2"
+          ],
+          "status": "done"
+        },
+        {
+          "task_id": "M1_T2",
+          "title": "UI: Agent Caserma (DB-driven)",
+          "description": "CRITICAL: Preserve Tab 1. Create Tab 2 to manage Agents. Fields: Name, Avatar, Role, Backstory. Use a dropdown to select the Model from the 'Models' table. Save all data to the SQLite 'Agents' table.",
+          "target_file": "ui/dashboard.py",
+          "dependencies": [
+            "M1_T1"
+          ],
+          "status": "done"
+        },
+        {
+          "task_id": "M1_T3",
+          "title": "UI: Task & Workflow Builder",
+          "description": "CRITICAL: Preserve Tabs 1 & 2. Create Tab 3 to define Tasks (linked to Agents) and Tab 4 to assemble Workflows (ordered list of Tasks). Save to SQLite 'Workflows' table. Add an 'Export to YAML' button for backup.",
+          "target_file": "ui/dashboard.py",
+          "dependencies": [
+            "M1_T2"
+          ],
+          "status": "done"
+        }
+      ]
+    },
+    {
+      "module_id": "M2",
+      "module_name": "Local Tools Development (Fase 3)",
+      "tasks": [
+        {
+          "task_id": "M2_T1",
+          "title": "File & Web Tools",
+          "description": "Develop `tools/local_tools.py` with functions to read/write files and perform web searches. Ensure tools return strings for CrewAI compatibility.",
+          "target_file": "tools/local_tools.py",
+          "dependencies": [],
+          "status": "todo"
+        },
+        {
+          "task_id": "M2_T2",
+          "title": "Terminal Executor Tool",
+          "description": "Develop `tools/terminal_executor.py` for safe shell command execution with strict validation.",
+          "target_file": "tools/terminal_executor.py",
+          "dependencies": [],
+          "status": "todo"
+        }
+      ]
+    },
+    {
+      "module_id": "M3",
+      "module_name": "Core Logic & Crew Builder (Fase 2)",
+      "tasks": [
+        {
+          "task_id": "M3_T1",
+          "title": "Master AI & Ethical Router",
+          "description": "Create `core/master_ai.py`. Fixed Master AI agent with ethical constraints. Logic to decode user intent and map it to existing Workflow IDs in the Database.",
+          "target_file": "core/master_ai.py",
+          "dependencies": [
+            "M0_T2"
+          ],
+          "status": "todo"
+        },
+        {
+          "task_id": "M3_T2",
+          "title": "Dynamic SQL Crew Builder",
+          "description": "Create `core/crew_builder.py`. Function `build_crew(workflow_id)`: 1) Query DB for workflow tasks. 2) Join with Agents and Models. 3) Instantiate CrewAI Agent and Task objects dynamically. 4) Return executable Crew.",
+          "target_file": "core/crew_builder.py",
+          "dependencies": [
+            "M0_T2",
+            "M2_T1",
+            "M2_T2"
+          ],
+          "status": "todo"
+        }
+      ]
+    },
+    {
+      "module_id": "M4",
+      "module_name": "Telegram Remote Control (Fase 4)",
+      "tasks": [
+        {
+          "task_id": "M4_T1",
+          "title": "Security & Dynamic DB Menus",
+          "description": "In `bot.py`, implement USER_ID whitelist. /start command queries SQLite 'Workflows' table to generate Inline Buttons dynamically.",
+          "target_file": "bot.py",
+          "dependencies": [
+            "M0_T2"
+          ],
+          "status": "todo"
+        },
+        {
+          "task_id": "M4_T2",
+          "title": "Pre-Flight Check & Execution",
+          "description": "CRITICAL: Preserve M4_T1. Implement ConversationHandler: Button Click -> Show Tasks from DB -> Capture user edits via Master AI -> Execute Crew via M3_T2 -> Return progress and final result.",
+          "target_file": "bot.py",
+          "dependencies": [
+            "M4_T1",
+            "M3_T1",
+            "M3_T2"
+          ],
+          "status": "todo"
+        }
+      ]
+    }
+  ]
+}

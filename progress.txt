@@ -1,0 +1,5 @@
+Completed: M0_T1 - Project Initialization & Folders saved in core/data_manager.py
+Completed: M0_T2 - SQLite Schema & DB Manager saved in core/db_manager.py
+Completed: M1_T1 - UI: API Vault & Model Registry saved in ui/dashboard.py
+Completed: M1_T2 - UI: Agent Caserma (DB-driven) saved in ui/dashboard.py
+Completed: M1_T3 - UI: Task & Workflow Builder saved in ui/dashboard.py
