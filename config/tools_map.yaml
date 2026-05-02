@@ -1,0 +1,21 @@
+tools_registry:
+  read_file:
+    display_name: "Local: Read File"
+    description: "Permette agli agenti di leggere file all'interno della cartella workspace/."
+    required_secrets: []
+  write_file:
+    display_name: "Local: Write File"
+    description: "Permette agli agenti di creare e modificare file all'interno della cartella workspace/."
+    required_secrets: []
+  search_web:
+    display_name: "Web: DuckDuckGo Search"
+    description: "Permette agli agenti di effettuare ricerche web gratuite."
+    required_secrets: []
+  execute_shell_command:
+    display_name: "Local: Terminal Executor"
+    description: "Permette agli agenti di lanciare comandi sicuri nel terminale del sistema operativo."
+    required_secrets: []
+  gmail_send:
+    display_name: "Google: Gmail Sender (Esempio)"
+    description: "Permette agli agenti di inviare email tramite il tuo account."
+    required_secrets: ["GMAIL_API_KEY", "GMAIL_SENDER_EMAIL"]

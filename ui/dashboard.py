@@ -7,6 +7,7 @@ import yaml
 import json
 import re
 from datetime import datetime
+import os
 
 @st.cache_resource
 def get_db_manager():
@@ -116,7 +117,7 @@ def render_api_vault():
                 st.error("Please provide both a valid Key Name and a Value.")
 
     st.divider()
-    
+
     st.subheader("Model Registry")
     
     # Load model config
@@ -214,45 +215,150 @@ def render_agent_caserma():
 
     model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
     
+    agents = db.read_all_agents()
+    
+    # --- Edit/Create Form Logic ---
+    editing_agent = None
+    if 'editing_agent_id' in st.session_state and st.session_state.editing_agent_id:
+        agent_id = st.session_state.editing_agent_id
+        editing_agent = next((a for a in agents if a['id'] == agent_id), None)
+
+    form_title = "Edit Agent" if editing_agent else "Create a New Agent"
+    submit_label = "Update Agent" if editing_agent else "Add Agent"
+
     with st.form("agent_form"):
-        st.subheader("Create a New Agent")
-        name = st.text_input("Name")
-        role = st.text_input("Role")
-        goal = st.text_area("Goal")
-        backstory = st.text_area("Backstory")
+        st.subheader(form_title)
         
-        selected_model_str = st.selectbox("Select Model", options=list(model_options.keys()))
+        default_name = editing_agent['name'] if editing_agent else ""
+        default_role = editing_agent['role'] if editing_agent else ""
         
-        submitted = st.form_submit_button("Add Agent")
+        # Logic to split Goal and Backstory if they follow the format
+        raw_backstory = editing_agent['backstory'] if editing_agent else ""
+        default_goal = ""
+        default_backstory = raw_backstory
+        
+        if editing_agent and "Goal: " in raw_backstory and "\n\nBackstory: " in raw_backstory:
+            try:
+                parts = raw_backstory.split("\n\nBackstory: ")
+                default_goal = parts[0].replace("Goal: ", "")
+                default_backstory = parts[1]
+            except Exception:
+                pass # Fallback to showing everything in backstory field
+
+        name = st.text_input("Name", value=default_name)
+        role = st.text_input("Role", value=default_role)
+        goal = st.text_area("Goal", value=default_goal)
+        backstory = st.text_area("Backstory", value=default_backstory)
+        
+        # Select model
+        default_model_id = editing_agent['model_id'] if editing_agent else None
+        model_names = list(model_options.keys())
+        model_ids = list(model_options.values())
+        default_model_index = 0
+        if default_model_id in model_ids:
+            default_model_index = model_ids.index(default_model_id)
+            
+        selected_model_str = st.selectbox("Select Model", options=model_names, index=default_model_index)
+        
+        submitted = st.form_submit_button(submit_label)
         if submitted and name and role and goal and backstory and selected_model_str:
+            # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
+            sane_name = sanitize_input(name)
+            sane_role = sanitize_input(role)
+            sane_goal = sanitize_input(goal)
+            sane_backstory = sanitize_input(backstory)
+            
             model_id = model_options[selected_model_str]
-            # DB schema accepts name, role, backstory. We merge goal into backstory.
-            combined_backstory = f"Goal: {goal}\n\nBackstory: {backstory}"
-            db.create_agent(name, role, combined_backstory, model_id, [])
-            st.success(f"Agent '{name}' has been recruited!")
-            st.rerun()
+            combined_backstory = f"Goal: {sane_goal}\n\nBackstory: {sane_backstory}"
+            
+            if editing_agent:
+                db.update_agent(editing_agent['id'], sane_name, sane_role, combined_backstory, model_id, [])
+                st.success(f"Agent '{sane_name}' updated successfully!")
+                clear_editing_state('editing_agent_id')
+            else:
+                db.create_agent(sane_name, sane_role, combined_backstory, model_id, [])
+                st.success(f"Agent '{sane_name}' has been recruited!")
+                st.rerun()
+
+    if editing_agent:
+        if st.button("Cancel Edit", key="cancel_agent_edit"):
+            clear_editing_state('editing_agent_id')
 
     st.divider()
     st.subheader("Registered Agents")
-    agents = db.read_all_agents()
     if agents:
-        for agent in agents:
-            with st.expander(f"**Agent:** {agent['name']} ({agent['role']})"):
-                st.markdown(f"**Backstory:** {agent['backstory']}")
-                model = next((m for m in models if m['id'] == agent['model_id']), None)
-                if model:
-                    st.markdown(f"**Model:** {model['provider']} / {model['model_name']}")
-                
-                if st.button("Discharge Agent", key=f"del_agent_{agent['id']}", type="primary"):
-                    db.delete_agent(agent['id'])
-                    st.toast(f"Discharged agent {agent['name']}", icon="🗑️")
-                    st.rerun()
+        import urllib.parse
+        cols_per_row = 4
+        for i in range(0, len(agents), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                if i + j < len(agents):
+                    agent = agents[i + j]
+                    with cols[j]:
+                        with st.container(border=True):
+                            import hashlib
+                            # Combiniamo nome, ruolo e backstory per un seed univoco e coerente
+                            raw_seed = f"{agent.get('name', '')}-{agent.get('role', '')}-{agent.get('backstory', '')[:50]}"
+                            safe_seed = hashlib.md5(raw_seed.encode('utf-8')).hexdigest()
+                            
+                            # DiceBear 9.x avataaars - parametri professionali verificati via schema.json
+                            avatar_params = "&".join([
+                                f"seed={safe_seed}",
+                                "style=circle",
+                                "accessoriesProbability=0",
+                                "facialHairProbability=5",
+                                # Bocca: solo espressioni sorridenti/affabili
+                                "mouth=smile", "mouth=twinkle", "mouth=default",
+                                # Occhi: amichevoli
+                                "eyes=default", "eyes=happy", "eyes=wink",
+                                # Sopracciglia: naturali e rilassate
+                                "eyebrows=defaultNatural", "eyebrows=flatNatural", "eyebrows=raisedExcitedNatural",
+                                # Vestiario: solo business/professionale
+                                "clothing=blazerAndShirt", "clothing=blazerAndSweater", "clothing=collarAndSweater", "clothing=shirtCrewNeck",
+                                # Capelli: tagli tradizionali, no cappelli/turbanti
+                                "top=shortFlat", "top=shortRound", "top=shortWaved", "top=bob", "top=straight01", "top=straight02", "top=theCaesar", "top=theCaesarAndSidePart",
+                                # Sfondo chiaro professionale
+                                "backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc",
+                            ])
+                            avatar_url = f"https://api.dicebear.com/9.x/avataaars/svg?{avatar_params}"
+                            
+                            # st.image gestisce nativamente URL esterni (no blocchi CSP)
+                            col_img = st.columns([1, 2, 1])[1]
+                            with col_img:
+                                st.image(avatar_url, width=100)
+                            
+                            st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px; font-size: 18px;'>{agent['name']}</h4>", unsafe_allow_html=True)
+                            st.markdown(f"<p style='text-align: center; color: gray; font-size: 14px; margin-top: 0px;'>{agent['role']}</p>", unsafe_allow_html=True)
+                            
+                            with st.expander("Details"):
+                                st.markdown(f"**Backstory:** {agent['backstory']}")
+                                model = next((m for m in models if m['id'] == agent['model_id']), None)
+                                if model:
+                                    st.markdown(f"**Model:** {model['provider']} / {model['model_name']}")
+                            
+                            col_mod, col_del = st.columns([1, 1])
+                            with col_mod:
+                                st.button("Edit", key=f"mod_agent_{agent['id']}", on_click=set_editing_state, args=('editing_agent_id', agent['id']), use_container_width=True)
+                            with col_del:
+                                if st.button("Del", key=f"del_agent_{agent['id']}", type="primary", use_container_width=True):
+                                    db.delete_agent(agent['id'])
+                                    st.toast(f"Discharged agent {agent['name']}", icon="🗑️")
+                                    st.rerun()
 
 def render_task_builder():
     """Renders Tab 3: UI for creating, viewing, updating, and deleting tasks."""
     db = get_db_manager()
     st.header("Task Builder")
     st.markdown("Define individual tasks and assign them to specific agents.")
+    
+    tools_map_path = os.path.join(os.getcwd(), 'config', 'tools_map.yaml')
+    AVAILABLE_TOOLS = []
+    try:
+        tools_config = DataManager.load_yaml(tools_map_path)
+        tools_registry = tools_config.get('tools_registry', {})
+        AVAILABLE_TOOLS = list(tools_registry.keys())
+    except Exception:
+        pass
 
     agents = db.read_all_agents()
     tasks = db.read_all_tasks()
@@ -277,6 +383,7 @@ def render_task_builder():
         
         default_desc = editing_task['description'] if editing_task else ""
         default_output = editing_task['expected_output'] if editing_task else ""
+        default_tools = editing_task.get('tools', []) if editing_task else []
         
         default_agent_id = editing_task['agent_id'] if editing_task else None
         agent_names = list(agent_options.keys())
@@ -286,6 +393,7 @@ def render_task_builder():
         description = st.text_area("Task Description", value=default_desc, height=100)
         expected_output = st.text_area("Expected Output", value=default_output, height=150)
         selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index)
+        selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools)
         
         submitted = st.form_submit_button(submit_label)
         if submitted:
@@ -298,11 +406,11 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools)
                     st.success(f"Task updated successfully!")
                     clear_editing_state('editing_task_id') # This will trigger a rerun
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools)
                     st.success(f"Task added successfully!")
                     st.rerun()
 
@@ -312,24 +420,69 @@ def render_task_builder():
 
     st.divider()
     st.subheader("Existing Tasks")
-    if not tasks:
-        st.info("No tasks created yet. Use the form above to add one.")
+    if not tasks and not agents:
+        st.info("No tasks or agents created yet. Use the forms above to add them.")
     else:
+        # Create a mapping for easy lookup: {agent_id: [task_list]}
+        tasks_by_agent = {agent['id']: [] for agent in agents}
         for task in tasks:
-            agent_name = next((name for name, id in agent_options.items() if id == task['agent_id']), "Unknown Agent")
-            with st.expander(f"**Task:** {task['description'][:80]}"):
-                st.markdown(f"**Assigned Agent:** `{agent_name}`")
-                st.markdown("**Expected Output:**")
-                st.code(task['expected_output'], language=None)
-                
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    st.button("Edit", key=f"edit_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
-                with col2:
-                    if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
-                        db.delete_task(task['id'])
-                        st.toast(f"Deleted task {task['id']}", icon="🗑️")
-                        st.rerun()
+            a_id = task['agent_id']
+            if a_id in tasks_by_agent:
+                tasks_by_agent[a_id].append(task)
+            else:
+                # Handle tasks assigned to agents that might have been deleted (rare)
+                if "unknown" not in tasks_by_agent:
+                    tasks_by_agent["unknown"] = []
+                tasks_by_agent["unknown"].append(task)
+
+        # Iterate through agents to create grouped dropdowns (expanders)
+        for agent in agents:
+            a_id = agent['id']
+            agent_tasks = tasks_by_agent.get(a_id, [])
+            num_tasks = len(agent_tasks)
+            
+            # Requested format: Agente (numero task)
+            with st.expander(f"👤 **{agent['name']}** ({num_tasks} tasks)"):
+                if not agent_tasks:
+                    st.info(f"No tasks currently assigned to {agent['name']}.")
+                else:
+                    for task in agent_tasks:
+                        # Use a container with border for visual grouping of individual tasks
+                        with st.container(border=True):
+                            st.markdown(f"**Task ID:** `{task['id']}`")
+                            st.markdown(f"**Description:** {task['description']}")
+                            st.markdown("**Expected Output:**")
+                            st.code(task['expected_output'], language=None)
+                            if task.get('tools'):
+                                st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
+                            
+                            col1, col2 = st.columns([1, 1])
+                            with col1:
+                                st.button("Edit", key=f"edit_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
+                            with col2:
+                                if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
+                                    db.delete_task(task['id'])
+                                    st.toast(f"Deleted task {task['id']}", icon="🗑️")
+                                    st.rerun()
+
+        # Handle tasks with no valid agent (orphaned tasks)
+        if "unknown" in tasks_by_agent and tasks_by_agent["unknown"]:
+            with st.expander(f"❓ **Orphaned Tasks** ({len(tasks_by_agent['unknown'])} tasks)"):
+                st.warning("These tasks are assigned to an agent that no longer exists.")
+                for task in tasks_by_agent["unknown"]:
+                    with st.container(border=True):
+                        st.markdown(f"**Description:** {task['description']}")
+                        st.markdown("**Expected Output:**")
+                        st.code(task['expected_output'], language=None)
+                        
+                        col1, col2 = st.columns([1, 1])
+                        with col1:
+                            st.button("Edit", key=f"edit_unk_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
+                        with col2:
+                            if st.button("Delete", key=f"delete_unk_{task['id']}", type="primary", use_container_width=True):
+                                db.delete_task(task['id'])
+                                st.toast(f"Deleted orphaned task {task['id']}", icon="🗑️")
+                                st.rerun()
 
 def render_workflow_assembler():
     """Renders Tab 4: UI for creating, viewing, and exporting workflows."""
@@ -420,15 +573,99 @@ def render_workflow_assembler():
                     )
 
 
+
+
 def main():
     """Main function to run the Streamlit dashboard."""
     st.set_page_config(page_title="AI Workflow Configurator", layout="wide")
-    st.title("🤖 AI Workflow Configurator")
-    st.caption("A secure dashboard for building and managing AI agent workflows.")
+    # --- Header with Right Popover ---
+    col_title, col_tools = st.columns([7, 3])
+    with col_title:
+        st.title("🤖 AI Workflow Configurator")
+        st.caption("A secure dashboard for building and managing AI agent workflows.")
+    
+    with col_tools:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        with st.popover("🛠️ Manage Tools Registry", use_container_width=True):
+            st.markdown("### Tool Registry")
+            st.markdown("Add new tools so they can be assigned to tasks.")
+            
+            tools_map_path = os.path.join(os.getcwd(), 'config', 'tools_map.yaml')
+            
+            with st.form("add_tool_form"):
+                new_tool_id = st.text_input("Tool ID (Function Name)", placeholder="e.g. read_pdf")
+                new_tool_name = st.text_input("Display Name", placeholder="e.g. PDF Reader")
+                new_tool_desc = st.text_input("Description")
+                new_tool_secrets = st.text_input("Required Secrets (comma separated)", placeholder="e.g. API_KEY, OTHER_KEY")
+                
+                if st.form_submit_button("Add Tool"):
+                    if new_tool_id and new_tool_name:
+                        try:
+                            # Load existing
+                            tools_config = DataManager.load_yaml(tools_map_path) if os.path.exists(tools_map_path) else {}
+                            if 'tools_registry' not in tools_config:
+                                tools_config['tools_registry'] = {}
+                            
+                            secrets_list = [s.strip() for s in new_tool_secrets.split(",")] if new_tool_secrets else []
+                            
+                            # Add new
+                            tools_config['tools_registry'][new_tool_id] = {
+                                'display_name': new_tool_name,
+                                'description': new_tool_desc,
+                                'required_secrets': secrets_list
+                            }
+                            
+                            # Save
+                            with open(tools_map_path, 'w', encoding='utf-8') as f:
+                                yaml.dump(tools_config, f, sort_keys=False, indent=2)
+                            
+                            st.success(f"Tool {new_tool_name} added!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error saving tool: {e}")
+                    else:
+                        st.error("Tool ID and Display Name are required.")
+            
+            # Show existing
+            try:
+                tools_config = DataManager.load_yaml(tools_map_path)
+                registry = tools_config.get('tools_registry', {})
+                if registry:
+                    st.divider()
+                    st.markdown("**Registered Tools:**")
+                    for t_id, t_data in registry.items():
+                        secrets_str = ", ".join(t_data.get('required_secrets', [])) or "None"
+                        st.caption(f"**{t_data.get('display_name')}** (`{t_id}`) | Secrets: {secrets_str}")
+            except Exception:
+                pass
+
+    # --- Sidebar Guide ---
+    with st.sidebar:
+        st.header("🚀 Guide & Placeholders")
+        st.markdown("""
+        Use these placeholders in your **Task Descriptions** to create dynamic and sequential workflows:
+        
+        - **`{user_input}`**: 
+          Inserts the text you send directly (e.g., via Telegram).
+          
+        - **`{previous_result}`**: 
+          Inserts the output of the *last* executed workflow. Perfect for chaining.
+          
+        - **`{flexible_input}`**: 
+          **Smart Fallback**: Uses your new input if provided, otherwise uses the previous result automatically.
+          
+        ---
+        *Tip: You can combine them!*
+        """)
+        st.divider()
+        st.info("The configuration is saved directly to your SQLite database.")
 
     # Initialize session state for editing
     if 'editing_task_id' not in st.session_state:
         st.session_state.editing_task_id = None
+    if 'editing_agent_id' not in st.session_state:
+        st.session_state.editing_agent_id = None
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Tab 1: API Vault & Model Registry",

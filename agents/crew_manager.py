@@ -90,7 +90,7 @@ def run_ralph_cycle():
         agents=[pfc_manager, systems_architect, frontend_dev, backend_dev],
         tasks=tasks,
         verbose=True,
-        max_rpm=20
+        max_rpm=100
     )
 
     # 4. EXECUTE TASK PIPELINE

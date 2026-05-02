@@ -118,6 +118,7 @@ class DBManager:
                 description TEXT NOT NULL,
                 expected_output TEXT NOT NULL,
                 agent_id INTEGER,
+                tools_json TEXT,
                 FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL
             );
             """,
@@ -127,6 +128,14 @@ class DBManager:
                 name TEXT NOT NULL UNIQUE,
                 task_ids_json TEXT,
                 requires_human_check BOOLEAN NOT NULL DEFAULT 0 CHECK (requires_human_check IN (0, 1))
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS context_memory (
+                session_id TEXT PRIMARY KEY,
+                last_output TEXT,
+                accumulated_context TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         ]
@@ -149,6 +158,13 @@ class DBManager:
             except sqlite3.OperationalError:
                 pass 
                 
+            # Migration to add tools_json to tasks if upgrading
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN tools_json TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
         except sqlite3.Error as e:
             print(f"Error creating tables: {e}")
             self.conn.rollback()
@@ -258,9 +274,11 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int]) -> int:
-        sql = "INSERT INTO tasks (description, expected_output, agent_id) VALUES (?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id))
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None) -> int:
+        tools = tools or []
+        tools_json = json.dumps(tools)
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json) VALUES (?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -268,21 +286,30 @@ class DBManager:
         sql = "SELECT * FROM tasks WHERE id = ?"
         self.cursor.execute(sql, (task_id,))
         row = self.cursor.fetchone()
-        return self._to_dict(row)
+        if not row:
+            return None
+        task_dict = self._to_dict(row)
+        return self._process_json_fields(task_dict)
 
     def read_all_tasks(self) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM tasks ORDER BY id"
         self.cursor.execute(sql)
         rows = self.cursor.fetchall()
-        return [self._to_dict(row) for row in rows]
+        processed_rows = []
+        for row in rows:
+            task_dict = self._to_dict(row)
+            processed_rows.append(self._process_json_fields(task_dict))
+        return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int]) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None) -> int:
+        tools = tools or []
+        tools_json = json.dumps(tools)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ? 
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ? 
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 
@@ -335,3 +362,34 @@ class DBManager:
         self.cursor.execute(sql, (workflow_id,))
         self.conn.commit()
         return self.cursor.rowcount
+
+    # --- Context Memory CRUD ---
+    def update_context(self, session_id: str, last_output: str, accumulated_context: str = "") -> None:
+        sql = """
+        INSERT INTO context_memory (session_id, last_output, accumulated_context, updated_at) 
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_id) DO UPDATE SET 
+            last_output=excluded.last_output, 
+            accumulated_context=excluded.accumulated_context,
+            updated_at=CURRENT_TIMESTAMP
+        """
+        self.cursor.execute(sql, (session_id, last_output, accumulated_context))
+        self.conn.commit()
+
+    def get_context(self, session_id: str) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM context_memory WHERE session_id = ?"
+        self.cursor.execute(sql, (session_id,))
+        row = self.cursor.fetchone()
+        return self._to_dict(row)
+
+    def clear_context(self, session_id: str) -> int:
+        sql = "DELETE FROM context_memory WHERE session_id = ?"
+        self.cursor.execute(sql, (session_id,))
+        self.conn.commit()
+        return self.cursor.rowcount
+        
+    def read_all_contexts(self) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM context_memory ORDER BY updated_at DESC"
+        self.cursor.execute(sql)
+        rows = self.cursor.fetchall()
+        return [self._to_dict(row) for row in rows]

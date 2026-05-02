@@ -84,7 +84,7 @@
           "description": "Develop `tools/local_tools.py` with functions to read/write files and perform web searches. Ensure tools return strings for CrewAI compatibility.",
           "target_file": "tools/local_tools.py",
           "dependencies": [],
-          "status": "todo"
+          "status": "done"
         },
         {
           "task_id": "M2_T2",
@@ -92,7 +92,7 @@
           "description": "Develop `tools/terminal_executor.py` for safe shell command execution with strict validation.",
           "target_file": "tools/terminal_executor.py",
           "dependencies": [],
-          "status": "todo"
+          "status": "done"
         }
       ]
     },
@@ -108,7 +108,7 @@
           "dependencies": [
             "M0_T2"
           ],
-          "status": "todo"
+          "status": "done"
         },
         {
           "task_id": "M3_T2",
@@ -120,7 +120,7 @@
             "M2_T1",
             "M2_T2"
           ],
-          "status": "todo"
+          "status": "done"
         }
       ]
     },
