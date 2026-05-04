@@ -38,12 +38,13 @@ class MasterAI:
         self.db_manager = DBManager()
         self.data_manager = DataManager()
         self.llm_client = None
-        self.model_name = "gpt-4o"  # Default fallback model
-        self.model_provider = "openai"  # Default fallback provider
+        self.model_name = "gemini-1.5-flash"  # Default fallback model for Gemini
+        self.model_provider = "gemini"  # Default fallback provider
+        self.fallback_model = "gemini/gemini-1.5-flash" # Absolute fallback
 
         # Attempt to get model details from DB if model_id is provided
         if model_id:
-            model_data = self.db_manager.get_model(model_id)
+            model_data = self.db_manager.read_model(model_id)
             if model_data:
                 self.model_name = model_data['model_name']
                 self.model_provider = model_data['provider']
@@ -53,8 +54,12 @@ class MasterAI:
             logger.info(f"No model_id provided for MasterAI. Using default model {self.model_name}.")
 
         # Securely retrieve API key via DataManager
-        api_key = self.data_manager.get_api_key(self.model_provider)
-        if not api_key:
+        self.api_key = self.data_manager.load_api_key(f"{self.model_provider.upper()}_API_KEY")
+        if not self.api_key:
+            # Fallback to general GEMINI_API_KEY if specific one fails
+            self.api_key = self.data_manager.load_api_key("GEMINI_API_KEY")
+            
+        if not self.api_key:
             logger.error(f"API key for {self.model_provider} not found in DataManager. Check 'ui/dashboard.py' API Vault.")
             raise ValueError(f"API key for {self.model_provider} is required but not found.")
 
@@ -70,27 +75,23 @@ class MasterAI:
         Retrieves and formats workflows from the database into a structured JSON string
         for the LLM to understand its options.
         """
-        workflows = self.db_manager.get_all_workflows()
+        workflows = self.db_manager.read_all_workflows()
         if not workflows:
             return "No workflows currently available in the system."
 
         formatted_workflows = []
         for wf in workflows:
-            # For the router, providing just ID and Name is usually sufficient.
-            # More detailed task descriptions could be added if the LLM needs deeper context.
             formatted_workflows.append(
                 {
                     "id": wf['id'],
                     "name": wf['name'],
-                    # "description": "A brief description of what this workflow does." # Placeholder for future
                 }
             )
         return json.dumps(formatted_workflows, indent=2)
 
     def _sanitize_json(self, text: str) -> str:
         """
-        Strips markdown backticks (```json) and any surrounding text from an LLM response
-        to extract a clean JSON string.
+        Strips markdown backticks (```json) and any surrounding text from an LLM response.
         """
         import re
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
@@ -103,41 +104,88 @@ class MasterAI:
             
         return text.strip()
 
+    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0) -> str:
+        """
+        Robust LLM call with Retry logic (503/429) and Fallback mechanism.
+        Mimics 'RobustLLM' logic from identities.py.
+        """
+        import time
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                response = litellm.completion(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    response_format={"type": "json_object"} if "gemini" not in model.lower() else None # Gemini handles JSON better via prompt
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                err_msg = str(e)
+                # Check for temporary errors (503 Service Unavailable, 429 Rate Limit)
+                if ("503" in err_msg or "429" in err_msg or "high demand" in err_msg.lower()) and attempt < max_retries - 1:
+                    wait = (attempt + 1) * 3
+                    logger.warning(f"MasterAI Retry {attempt+1}/{max_retries} due to: {err_msg[:50]}... Waiting {wait}s")
+                    time.sleep(wait)
+                    continue
+                
+                # If retry failed or it's a critical error, try fallback
+                if model != self.fallback_model:
+                    logger.error(f"MasterAI Critical Error with {model}: {e}. Attempting fallback to {self.fallback_model}...")
+                    try:
+                        response = litellm.completion(
+                            model=self.fallback_model,
+                            messages=messages,
+                            temperature=temperature
+                        )
+                        return response.choices[0].message.content
+                    except Exception as fe:
+                        logger.error(f"MasterAI Fallback also failed: {fe}")
+                
+                raise e
+
     def evaluate_intent(self, user_prompt: str) -> Dict[str, Any]:
         """
-        Evaluates the user's prompt, checks for ethical constraints, and maps it
-        to a workflow ID. Returns a dictionary with routing instructions.
+        Evaluates the user's prompt using robust logic and maps it to a workflow ID.
+        Also identifies which required inputs are missing.
         """
-        workflows_json = self._fetch_workflows_context()
+        workflows_json, requirements_map = self._fetch_workflows_context()
         
-        system_prompt = MASTER_PROMPT.replace("{workflows}", workflows_json)
+        extended_prompt = MASTER_PROMPT + "\n\nCRITICAL: If the selected workflow has 'required_placeholders', check if the user's message provides them. Return any missing placeholder keys in a 'missing_inputs' list in your JSON output."
+        system_prompt = extended_prompt.replace("{workflows}", workflows_json)
         
         # Prepare the LiteLLM call
         model_string = f"{self.model_provider}/{self.model_name}"
         if self.model_provider == "openai":
-            model_string = self.model_name # LiteLLM uses just the name for openai
+            model_string = self.model_name
             
         try:
-            response = litellm.completion(
+            raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.0, # Deterministic routing
-                response_format={"type": "json_object"}
+                ]
             )
             
-            raw_output = response.choices[0].message.content
             clean_json = self._sanitize_json(raw_output)
+            result = json.loads(clean_json)
             
-            return json.loads(clean_json)
+            # Post-process missing_inputs to include prompts from DB
+            wf_id = result.get("workflow_id")
+            if wf_id and wf_id in requirements_map:
+                missing_keys = result.get("missing_inputs", [])
+                all_reqs = requirements_map[wf_id]
+                result["missing_inputs_details"] = [req for req in all_reqs if req['key'] in missing_keys]
+                
+            return result
             
         except Exception as e:
-            logger.error(f"MasterAI Routing Error: {e}")
+            logger.error(f"MasterAI Final Routing Failure: {e}")
             return {
                 "status": "error",
-                "message": f"Internal routing error: {str(e)}",
+                "message": f"Critical routing error: {str(e)}",
                 "workflow_id": None,
                 "extracted_params": {}
             }

@@ -8,6 +8,10 @@ import json
 import re
 from datetime import datetime
 import os
+import hashlib
+from dotenv import dotenv_values, set_key, find_dotenv
+from core.master_ai import MasterAI
+from core.crew_builder import build_crew
 
 @st.cache_resource
 def get_db_manager():
@@ -57,6 +61,33 @@ def clear_editing_state(key):
         del st.session_state[key]
     st.rerun()
 
+def get_agent_avatar_url(agent):
+    """Generates a consistent avatar URL for an agent based on their metadata."""
+    # Combine name, role and backstory for a unique and consistent seed
+    raw_seed = f"{agent.get('name', '')}-{agent.get('role', '')}-{agent.get('backstory', '')[:50]}"
+    safe_seed = hashlib.md5(raw_seed.encode('utf-8')).hexdigest()
+    
+    # DiceBear 9.x avataaars - professional parameters
+    avatar_params = "&".join([
+        f"seed={safe_seed}",
+        "style=circle",
+        "accessoriesProbability=0",
+        "facialHairProbability=5",
+        # Mouth: friendly expressions
+        "mouth=smile", "mouth=twinkle", "mouth=default",
+        # Eyes: friendly
+        "eyes=default", "eyes=happy", "eyes=wink",
+        # Eyebrows: natural
+        "eyebrows=defaultNatural", "eyebrows=flatNatural", "eyebrows=raisedExcitedNatural",
+        # Clothing: professional/business
+        "clothing=blazerAndShirt", "clothing=blazerAndSweater", "clothing=collarAndSweater", "clothing=shirtCrewNeck",
+        # Hair: traditional cuts
+        "top=shortFlat", "top=shortRound", "top=shortWaved", "top=bob", "top=straight01", "top=straight02", "top=theCaesar", "top=theCaesarAndSidePart",
+        # Professional background colors
+        "backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc",
+    ])
+    return f"https://api.dicebear.com/9.x/avataaars/svg?{avatar_params}"
+
 # --- UI Rendering Functions for Each Tab ---
 
 def render_api_vault():
@@ -64,9 +95,6 @@ def render_api_vault():
     db = get_db_manager()
     st.header("API Vault & Model Registry")
     
-    from dotenv import dotenv_values, set_key, find_dotenv
-    import os
-
     env_path = find_dotenv()
     if not env_path:
         env_path = os.path.join(os.getcwd(), '.env')
@@ -296,31 +324,9 @@ def render_agent_caserma():
                     agent = agents[i + j]
                     with cols[j]:
                         with st.container(border=True):
-                            import hashlib
-                            # Combiniamo nome, ruolo e backstory per un seed univoco e coerente
-                            raw_seed = f"{agent.get('name', '')}-{agent.get('role', '')}-{agent.get('backstory', '')[:50]}"
-                            safe_seed = hashlib.md5(raw_seed.encode('utf-8')).hexdigest()
+                            avatar_url = get_agent_avatar_url(agent)
                             
-                            # DiceBear 9.x avataaars - parametri professionali verificati via schema.json
-                            avatar_params = "&".join([
-                                f"seed={safe_seed}",
-                                "style=circle",
-                                "accessoriesProbability=0",
-                                "facialHairProbability=5",
-                                # Bocca: solo espressioni sorridenti/affabili
-                                "mouth=smile", "mouth=twinkle", "mouth=default",
-                                # Occhi: amichevoli
-                                "eyes=default", "eyes=happy", "eyes=wink",
-                                # Sopracciglia: naturali e rilassate
-                                "eyebrows=defaultNatural", "eyebrows=flatNatural", "eyebrows=raisedExcitedNatural",
-                                # Vestiario: solo business/professionale
-                                "clothing=blazerAndShirt", "clothing=blazerAndSweater", "clothing=collarAndSweater", "clothing=shirtCrewNeck",
-                                # Capelli: tagli tradizionali, no cappelli/turbanti
-                                "top=shortFlat", "top=shortRound", "top=shortWaved", "top=bob", "top=straight01", "top=straight02", "top=theCaesar", "top=theCaesarAndSidePart",
-                                # Sfondo chiaro professionale
-                                "backgroundColor=b6e3f4,c0aede,d1d4f9,ffd5dc",
-                            ])
-                            avatar_url = f"https://api.dicebear.com/9.x/avataaars/svg?{avatar_params}"
+                            # st.image handles external URLs
                             
                             # st.image gestisce nativamente URL esterni (no blocchi CSP)
                             col_img = st.columns([1, 2, 1])[1]
@@ -395,8 +401,22 @@ def render_task_builder():
         selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index)
         selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools)
         
+        # New: Required Inputs
+        default_inputs = editing_task.get('required_inputs', []) if editing_task else []
+        default_inputs_text = "\n".join([f"{item['key']}: {item['prompt']}" for item in default_inputs])
+        required_inputs_raw = st.text_area("Required Inputs (One per line: 'key: Prompt message')", 
+                                           value=default_inputs_text, 
+                                           help="Example: idea: Qual è la tua idea di business?")
+        
         submitted = st.form_submit_button(submit_label)
         if submitted:
+            # Parse required inputs
+            required_inputs = []
+            for line in required_inputs_raw.split("\n"):
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    required_inputs.append({"key": parts[0].strip(), "prompt": parts[1].strip()})
+
             # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
             sane_description = sanitize_input(description)
             sane_expected_output = sanitize_input(expected_output)
@@ -406,11 +426,11 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, required_inputs)
                     st.success(f"Task updated successfully!")
                     clear_editing_state('editing_task_id') # This will trigger a rerun
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, required_inputs)
                     st.success(f"Task added successfully!")
                     st.rerun()
 
@@ -441,29 +461,39 @@ def render_task_builder():
             agent_tasks = tasks_by_agent.get(a_id, [])
             num_tasks = len(agent_tasks)
             
-            # Requested format: Agente (numero task)
-            with st.expander(f"👤 **{agent['name']}** ({num_tasks} tasks)"):
-                if not agent_tasks:
-                    st.info(f"No tasks currently assigned to {agent['name']}.")
-                else:
-                    for task in agent_tasks:
-                        # Use a container with border for visual grouping of individual tasks
-                        with st.container(border=True):
-                            st.markdown(f"**Task ID:** `{task['id']}`")
-                            st.markdown(f"**Description:** {task['description']}")
-                            st.markdown("**Expected Output:**")
-                            st.code(task['expected_output'], language=None)
-                            if task.get('tools'):
-                                st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
-                            
-                            col1, col2 = st.columns([1, 1])
-                            with col1:
-                                st.button("Edit", key=f"edit_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
-                            with col2:
-                                if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
-                                    db.delete_task(task['id'])
-                                    st.toast(f"Deleted task {task['id']}", icon="🗑️")
-                                    st.rerun()
+            # Use avatar and columns for a premium look
+            avatar_url = get_agent_avatar_url(agent)
+            col_avatar, col_expander = st.columns([1, 18])
+            with col_avatar:
+                st.image(avatar_url, use_container_width=True)
+            with col_expander:
+                with st.expander(f"**{agent['name']}** ({num_tasks} tasks)"):
+                    if not agent_tasks:
+                        st.info(f"No tasks currently assigned to {agent['name']}.")
+                    else:
+                        for task in agent_tasks:
+                            # Use a container with border for visual grouping of individual tasks
+                            with st.container(border=True):
+                                st.markdown(f"**Task ID:** `{task['id']}`")
+                                st.markdown(f"**Description:** {task['description']}")
+                                st.markdown("**Expected Output:**")
+                                st.code(task['expected_output'], language=None)
+                                if task.get('tools'):
+                                    st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
+                                
+                                if task.get('required_inputs'):
+                                    st.markdown("**Required Inputs:**")
+                                    for ri in task['required_inputs']:
+                                        st.markdown(f"- `{ri['key']}`: *{ri['prompt']}*")
+                                
+                                col1, col2 = st.columns([1, 1])
+                                with col1:
+                                    st.button("Edit", key=f"edit_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
+                                with col2:
+                                    if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
+                                        db.delete_task(task['id'])
+                                        st.toast(f"Deleted task {task['id']}", icon="🗑️")
+                                        st.rerun()
 
         # Handle tasks with no valid agent (orphaned tasks)
         if "unknown" in tasks_by_agent and tasks_by_agent["unknown"]:
@@ -531,10 +561,22 @@ def render_workflow_assembler():
                 # The db_manager processes task_ids_json into task_ids list automatically
                 task_ids = workflow.get('task_ids', [])
                 st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
-                st.markdown("**Task Sequence:**")
                 for i, task_id in enumerate(task_ids):
                     task = task_id_map.get(task_id)
-                    st.write(f"&nbsp;&nbsp;&nbsp;{i+1}. {task['description'] if task else f'Task ID {task_id} not found'}")
+                    if task:
+                        agent = agent_id_map.get(task['agent_id'])
+                        
+                        col_avatar, col_text = st.columns([1, 25])
+                        with col_avatar:
+                            if agent:
+                                avatar_url = get_agent_avatar_url(agent)
+                                st.image(avatar_url, use_container_width=True)
+                            else:
+                                st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                        with col_text:
+                            st.markdown(f"**Step {i+1}:** {task['description']}")
+                    else:
+                        st.error(f"Step {i+1}: Task ID {task_id} not found")
                 
                 # --- ARCHITECTURAL MANDATE M1_T3-A2 & M1_T3-A3: Secure Export Logic ---
                 # 1. Construct the data structure for YAML in-memory
@@ -572,6 +614,54 @@ def render_workflow_assembler():
                         use_container_width=True
                     )
 
+    st.divider()
+    st.subheader("🧪 Live System Test")
+    st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**.")
+    
+    test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
+    
+    if st.button("🚀 Execute Integration Test", type="primary"):
+        if not test_prompt:
+            st.error("Please enter a prompt.")
+        else:
+            with st.status("Running Integration Test...", expanded=True) as status:
+                try:
+                    # 1. Master AI Routing
+                    st.write("🧠 **Master AI** is analyzing the intent...")
+                    master = MasterAI()
+                    routing = master.evaluate_intent(test_prompt)
+                    st.json(routing)
+                    
+                    if routing.get('status') == 'success' and routing.get('workflow_id'):
+                        wf_id = routing['workflow_id']
+                        st.write(f"✅ Route found: **Workflow ID {wf_id}**")
+                        
+                        # 2. Crew Building
+                        st.write("🛠️ **Crew Builder** is assembling the agents...")
+                        crew = build_crew(wf_id)
+                        
+                        # 3. Execution
+                        st.write("⚡ **Executing Workflow...**")
+                        # Pass extracted params if available, otherwise raw prompt
+                        inputs = routing.get('extracted_params', {})
+                        if not inputs:
+                            inputs = {"user_input": test_prompt}
+                        
+                        result = crew.kickoff(inputs=inputs)
+                        
+                        st.success("✅ Execution Complete!")
+                        st.markdown("### Final Output")
+                        st.markdown(str(result))
+                    else:
+                        st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
+                    
+                    status.update(label="Test Finished", state="complete")
+                except Exception as e:
+                    st.error(f"❌ Error during test: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    status.update(label="Test Failed", state="error")
+
 
 
 
@@ -587,6 +677,8 @@ def main():
     with col_tools:
         st.write("") # Spacer
         st.write("") # Spacer
+        
+        # --- Popover 1: Manage Tools ---
         with st.popover("🛠️ Manage Tools Registry", use_container_width=True):
             st.markdown("### Tool Registry")
             st.markdown("Add new tools so they can be assigned to tasks.")
@@ -639,6 +731,37 @@ def main():
                         st.caption(f"**{t_data.get('display_name')}** (`{t_id}`) | Secrets: {secrets_str}")
             except Exception:
                 pass
+
+        # --- Popover 2: Telegram Config ---
+        with st.popover("🤖 Telegram Bot Config", use_container_width=True):
+            st.markdown("### Telegram Vault")
+            st.markdown("Configure your bot credentials for remote control.")
+            
+            env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+            current_env = dotenv_values(env_path)
+            
+            tg_token = current_env.get("TELEGRAM_BOT_TOKEN", "")
+            tg_ids = current_env.get("TELEGRAM_ALLOWED_USER_IDS", "")
+            
+            # Status Indicators
+            token_status = "🟢" if tg_token.strip() else "🔴"
+            ids_status = "🟢" if tg_ids.strip() else "🔴"
+            
+            st.markdown(f"{token_status} **Bot Token**")
+            st.markdown(f"{ids_status} **Allowed User IDs**")
+            
+            with st.form("telegram_vault_form_standalone"):
+                new_tg_token = st.text_input("Telegram Bot Token", type="password", value=tg_token, placeholder="123456789:ABCDEF...")
+                new_tg_ids = st.text_input("Allowed User IDs", value=tg_ids, placeholder="e.g. 123456789, 987654321")
+                st.caption("IDs must be comma-separated integers.")
+                
+                if st.form_submit_button("Save Telegram Config"):
+                    if new_tg_token:
+                        set_key(env_path, "TELEGRAM_BOT_TOKEN", new_tg_token.strip())
+                    if new_tg_ids:
+                        set_key(env_path, "TELEGRAM_ALLOWED_USER_IDS", new_tg_ids.strip())
+                    st.success("Telegram configuration saved to .env!")
+                    st.rerun()
 
     # --- Sidebar Guide ---
     with st.sidebar:

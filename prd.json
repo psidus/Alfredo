@@ -136,7 +136,7 @@
           "dependencies": [
             "M0_T2"
           ],
-          "status": "todo"
+          "status": "done"
         },
         {
           "task_id": "M4_T2",
@@ -148,7 +148,7 @@
             "M3_T1",
             "M3_T2"
           ],
-          "status": "todo"
+          "status": "done"
         }
       ]
     }

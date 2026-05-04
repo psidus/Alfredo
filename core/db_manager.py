@@ -118,7 +118,8 @@ class DBManager:
                 description TEXT NOT NULL,
                 expected_output TEXT NOT NULL,
                 agent_id INTEGER,
-                tools_json TEXT,
+                tools_json TEXT, -- List of tool names as JSON
+                required_inputs_json TEXT, -- List of {key, prompt} objects as JSON
                 FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL
             );
             """,
@@ -126,8 +127,8 @@ class DBManager:
             CREATE TABLE IF NOT EXISTS workflows (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                task_ids_json TEXT,
-                requires_human_check BOOLEAN NOT NULL DEFAULT 0 CHECK (requires_human_check IN (0, 1))
+                task_ids_json TEXT NOT NULL, -- List of task IDs as JSON
+                requires_human_check INTEGER DEFAULT 0
             );
             """,
             """
@@ -184,14 +185,20 @@ class DBManager:
             try:
                 data['tools'] = json.loads(data['tools_json'])
             except json.JSONDecodeError:
-                data['tools'] = [] # Gracefully handle corrupt JSON data
+                data['tools'] = [] 
             del data['tools_json']
         if 'task_ids_json' in data and data['task_ids_json']:
             try:
                 data['task_ids'] = json.loads(data['task_ids_json'])
             except json.JSONDecodeError:
-                data['task_ids'] = [] # Gracefully handle corrupt JSON data
+                data['task_ids'] = [] 
             del data['task_ids_json']
+        if 'required_inputs_json' in data and data['required_inputs_json']:
+            try:
+                data['required_inputs'] = json.loads(data['required_inputs_json'])
+            except json.JSONDecodeError:
+                data['required_inputs'] = [] 
+            del data['required_inputs_json']
         return data
 
     # --- Models CRUD ---
@@ -274,11 +281,13 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None) -> int:
         tools = tools or []
+        required_inputs = required_inputs or []
         tools_json = json.dumps(tools)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json) VALUES (?, ?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json))
+        required_inputs_json = json.dumps(required_inputs)
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json) VALUES (?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -301,15 +310,17 @@ class DBManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None) -> int:
         tools = tools or []
+        required_inputs = required_inputs or []
         tools_json = json.dumps(tools)
+        required_inputs_json = json.dumps(required_inputs)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ? 
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 

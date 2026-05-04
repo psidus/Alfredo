@@ -1,7 +1,7 @@
 import os
 import requests # Included as per plan, though duckduckgo-search abstracts HTTP.
 from duckduckgo_search import DDGS
-from crewai_tools import tool
+from crewai.tools import tool
 
 # Lead Systems & Security Architect's Validated Implementation Plan
 # File: tools/local_tools.py

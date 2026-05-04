@@ -1,0 +1,11 @@
+streamlit
+crewai
+crewai[tools]
+python-dotenv
+pyyaml
+litellm
+python-telegram-bot
+langchain-openai
+langchain-community
+duckduckgo-search>=5.1.0
+requests

@@ -6,13 +6,16 @@ from crewai import Agent, Task, Crew
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
 
-from core.db_manager import get_workflow, get_task, get_agent, get_model
-from core.data_manager import load_env
+from core.db_manager import DBManager
+from core.data_manager import DataManager
 import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Initialize DB
+db = DBManager()
 
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
@@ -28,9 +31,9 @@ def _instantiate_llm(model_id):
     Securely creates an LLM object (ChatOpenAI or Ollama) based on model_id.
     Ensures environment variables are loaded and API keys are present for OpenAI.
     """
-    load_env() # Ensure environment variables are loaded
+    DataManager.load_env() # Ensure environment variables are loaded
 
-    model_record = get_model(model_id)
+    model_record = db.read_model(model_id)
     if not model_record:
         raise ValueError(f"Model ID {model_id} not found in database.")
 
@@ -41,27 +44,23 @@ def _instantiate_llm(model_id):
     if provider == 'openai':
         if not os.getenv("OPENAI_API_KEY"):
             raise EnvironmentError("OPENAI_API_KEY is missing from .env. Cannot instantiate OpenAI LLM.")
-        llm = ChatOpenAI(model_name=model_name, temperature=0.7)
+        return ChatOpenAI(model_name=model_name, temperature=0.7)
     elif provider == 'ollama':
-        llm = Ollama(model=model_name)
+        # For Ollama, CrewAI/LiteLLM expects 'ollama/model_name'
+        return f"ollama/{model_name}"
+    elif provider == 'gemini':
+        # For Gemini, LiteLLM expects 'gemini/model_name'
+        return f"gemini/{model_name}"
     else:
-        raise ValueError(f"Unsupported LLM provider: {provider}")
-    
-    logging.info(f"Instantiated LLM: {model_name} from {provider}")
-    return llm
+        # Generic fallback
+        return f"{provider}/{model_name}"
 
-def _map_tools(tools_json_str):
+def _map_tools(tool_names):
     """
-    Safely converts a JSON string of tool names into a list of callable Python functions
+    Safely converts a list of tool names into a list of callable Python functions
     using a strict whitelist (ALLOWED_TOOLS).
     """
-    if not tools_json_str:
-        return []
-
-    try:
-        tool_names = json.loads(tools_json_str)
-    except json.JSONDecodeError:
-        logging.warning(f"Malformed tools_json_str: {tools_json_str}. Returning empty tool list.")
+    if not tool_names:
         return []
 
     instantiated_tools = []
@@ -77,12 +76,12 @@ def _build_agent(agent_id):
     """
     Constructs a CrewAI Agent object from database records.
     """
-    agent_record = get_agent(agent_id)
+    agent_record = db.read_agent(agent_id)
     if not agent_record:
         raise ValueError(f"Agent ID {agent_id} not found in database.")
 
     llm_instance = _instantiate_llm(agent_record['model_id'])
-    agent_tools = _map_tools(agent_record['tools_json'])
+    agent_tools = _map_tools(agent_record.get('tools', []))
 
     agent = Agent(
         role=agent_record['role'],
@@ -100,7 +99,7 @@ def _build_task(task_id, agents_cache):
     """
     Constructs a CrewAI Task object and ensures agents are reused via memory reference.
     """
-    task_record = get_task(task_id)
+    task_record = db.read_task(task_id)
     if not task_record:
         raise ValueError(f"Task ID {task_id} not found in database.")
 
@@ -109,11 +108,15 @@ def _build_task(task_id, agents_cache):
         agents_cache[agent_id] = _build_agent(agent_id)
     
     agent_instance = agents_cache[agent_id]
+    
+    # Task tools override agent tools if specified
+    task_tools = _map_tools(task_record.get('tools', []))
 
     task = Task(
         description=task_record['description'],
         expected_output=task_record['expected_output'],
         agent=agent_instance,
+        tools=task_tools if task_tools else None,
         # Set async=False for sequential processing in a single workflow
         async_execution=False 
     )
@@ -127,20 +130,23 @@ def build_crew(workflow_id):
     instantiates objects dynamically, and returns the Crew.
     """
     try:
-        workflow_record = get_workflow(workflow_id)
+        workflow_record = db.read_workflow(workflow_id)
         if not workflow_record:
             raise ValueError(f"Workflow ID {workflow_id} not found in database.")
 
-        task_ids_json = workflow_record['task_ids_json']
-        if not task_ids_json:
-            raise ValueError(f"Workflow ID {workflow_id} has no tasks defined.")
+        # Debug: check available keys
+        logging.info(f"Workflow record keys: {list(workflow_record.keys())}")
         
-        try:
-            task_ids = json.loads(task_ids_json)
-            if not isinstance(task_ids, list):
-                raise TypeError("task_ids_json must be a JSON list.")
-        except json.JSONDecodeError:
-            raise ValueError(f"Malformed task_ids_json for workflow {workflow_id}: {task_ids_json}")
+        task_ids = workflow_record.get('task_ids')
+        if task_ids is None:
+            # Fallback for older database records or un-processed rows
+            if 'task_ids_json' in workflow_record:
+                task_ids = json.loads(workflow_record['task_ids_json'])
+            else:
+                task_ids = []
+
+        if not task_ids:
+            raise ValueError(f"Workflow ID {workflow_id} has no tasks defined.")
 
         crew_tasks = []
         agents_cache = {} # Cache to store unique agent instances

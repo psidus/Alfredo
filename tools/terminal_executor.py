@@ -2,7 +2,7 @@ import subprocess
 import shlex
 import logging
 import re
-from crewai_tools import tool # Using crewai_tools for the decorator
+from crewai.tools import tool # Using crewai for the decorator
 import os
 
 # Configure logging for this module

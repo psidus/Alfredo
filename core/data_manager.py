@@ -21,6 +21,17 @@ class DataManager:
     """
 
     @staticmethod
+    def load_env():
+        """
+        Loads the .env file into the environment.
+        """
+        env_path = find_dotenv()
+        if env_path:
+            load_dotenv(dotenv_path=env_path)
+            return True
+        return False
+
+    @staticmethod
     def load_api_key(api_name: str) -> str | None:
         """
         Loads a specific API key from the .env file.
@@ -48,6 +59,8 @@ class DataManager:
             logging.warning(f"'{api_name}' not found in the environment or .env file.")
         
         return api_key
+
+    get_api_key = load_api_key
 
     @staticmethod
     def load_yaml(file_path: str) -> dict:
@@ -118,3 +131,7 @@ class DataManager:
             # Clean up the temporary file if it still exists after an error
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+# Export for module-level access
+load_env = DataManager.load_env
+get_api_key = DataManager.load_api_key
