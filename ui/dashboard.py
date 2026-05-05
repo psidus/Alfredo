@@ -384,7 +384,21 @@ def render_task_builder():
     form_title = "Edit Task" if editing_task else "Create a New Task"
     submit_label = "Update Task" if editing_task else "Add Task"
 
-    with st.form(key="task_form"):
+    # --- Dynamic Inputs Logic ---
+    if 'temp_required_inputs' not in st.session_state:
+        if editing_task:
+            st.session_state.temp_required_inputs = editing_task.get('required_inputs', [])
+        else:
+            st.session_state.temp_required_inputs = [{"key": "", "prompt": ""}]
+
+    def add_row():
+        st.session_state.temp_required_inputs.append({"key": "", "prompt": ""})
+
+    def remove_specific_row(index):
+        if 0 <= index < len(st.session_state.temp_required_inputs):
+            st.session_state.temp_required_inputs.pop(index)
+
+    with st.container(border=True):
         st.subheader(form_title)
         
         default_desc = editing_task['description'] if editing_task else ""
@@ -396,27 +410,65 @@ def render_task_builder():
         agent_ids = list(agent_options.values())
         default_index = agent_ids.index(default_agent_id) if default_agent_id in agent_ids else 0
 
-        description = st.text_area("Task Description", value=default_desc, height=100)
-        expected_output = st.text_area("Expected Output", value=default_output, height=150)
-        selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index)
-        selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools)
+        description = st.text_area("Task Description", value=default_desc, height=100, key="task_desc_area",
+                                    help="Use `{variable_name}` to insert dynamic values from Required Inputs. E.g. `Crea un logo con sfumature {colore}`")
+        expected_output = st.text_area("Expected Output", value=default_output, height=150, key="task_output_area",
+                                       help="You can also use `{variable_name}` placeholders here.")
         
-        # New: Required Inputs
-        default_inputs = editing_task.get('required_inputs', []) if editing_task else []
-        default_inputs_text = "\n".join([f"{item['key']}: {item['prompt']}" for item in default_inputs])
-        required_inputs_raw = st.text_area("Required Inputs (One per line: 'key: Prompt message')", 
-                                           value=default_inputs_text, 
-                                           help="Example: idea: Qual è la tua idea di business?")
+        # --- Agent Selection with Avatar Preview ---
+        # We need to peek at the session state to know which agent is selected for the preview
+        current_sel_name = st.session_state.task_agent_sel if "task_agent_sel" in st.session_state else agent_names[default_index]
+        current_agent = next((a for a in agents if a['name'] == current_sel_name), None)
         
-        submitted = st.form_submit_button(submit_label)
-        if submitted:
-            # Parse required inputs
-            required_inputs = []
-            for line in required_inputs_raw.split("\n"):
-                if ":" in line:
-                    parts = line.split(":", 1)
-                    required_inputs.append({"key": parts[0].strip(), "prompt": parts[1].strip()})
+        col_av, col_sel = st.columns([1.5, 8.5])
+        with col_av:
+            if current_agent:
+                # Alignment for larger avatar
+                st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+                # Small spacer to push it slightly to the right
+                _, avatar_col = st.columns([1, 5])
+                with avatar_col:
+                    st.image(get_agent_avatar_url(current_agent), width=80)
+        with col_sel:
+            selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index, key="task_agent_sel")
+        
+        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+        selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools, key="task_tools_sel")
+        
+        # --- Guided Required Inputs ---
+        st.markdown("---")
+        st.markdown("**🔑 Required Inputs** — *Variables asked in chat before execution*")
+        st.caption("The answer will replace `{variable_name}` in the prompts.")
+        
+        # Table Header
+        if st.session_state.temp_required_inputs:
+            col_h1, col_h2, col_h3 = st.columns([1, 2, 0.4])
+            col_h1.markdown("**Variable Name**")
+            col_h2.markdown("**Chat Prompt**")
+            col_h3.markdown("") # Empty for delete icon
+        
+        # Dynamic Rows
+        input_rows = []
+        for idx, item in enumerate(st.session_state.temp_required_inputs):
+            col_var, col_prompt, col_del = st.columns([1, 2, 0.4])
+            with col_var:
+                v_key = st.text_input(f"Var {idx}", value=item['key'], key=f"ri_key_{idx}", placeholder="e.g. colors", label_visibility="collapsed")
+            with col_prompt:
+                v_prompt = st.text_input(f"Prompt {idx}", value=item['prompt'], key=f"ri_prompt_{idx}", placeholder="e.g. What color do you want?", label_visibility="collapsed")
+            with col_del:
+                st.button("🗑️", key=f"del_ri_{idx}", on_click=remove_specific_row, args=(idx,), help="Remove this variable")
+            
+            # Update state immediately so it's not lost on rerun
+            st.session_state.temp_required_inputs[idx] = {"key": v_key, "prompt": v_prompt}
+            if v_key.strip() and v_prompt.strip():
+                input_rows.append({"key": v_key.strip(), "prompt": v_prompt.strip()})
 
+        col_btn1, _ = st.columns([1, 3])
+        with col_btn1:
+            st.button("➕ Add Variable", on_click=add_row, use_container_width=True)
+
+        st.markdown("---")
+        if st.button(submit_label, type="primary", use_container_width=True):
             # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
             sane_description = sanitize_input(description)
             sane_expected_output = sanitize_input(expected_output)
@@ -426,16 +478,20 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, required_inputs)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows)
                     st.success(f"Task updated successfully!")
-                    clear_editing_state('editing_task_id') # This will trigger a rerun
+                    if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
+                    clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, required_inputs)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows)
                     st.success(f"Task added successfully!")
+                    if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     st.rerun()
 
     if editing_task:
-        if st.button("Cancel Edit"):
+        if st.button("Cancel Edit", key="cancel_task_edit", use_container_width=True):
+            if 'temp_required_inputs' in st.session_state:
+                del st.session_state.temp_required_inputs
             clear_editing_state('editing_task_id')
 
     st.divider()
@@ -482,9 +538,9 @@ def render_task_builder():
                                     st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
                                 
                                 if task.get('required_inputs'):
-                                    st.markdown("**Required Inputs:**")
+                                    st.markdown("**🔑 Required Inputs:**")
                                     for ri in task['required_inputs']:
-                                        st.markdown(f"- `{ri['key']}`: *{ri['prompt']}*")
+                                        st.markdown(f"- `{{{ri['key']}}}` → *{ri['prompt']}*")
                                 
                                 col1, col2 = st.columns([1, 1])
                                 with col1:
@@ -527,25 +583,114 @@ def render_workflow_assembler():
         st.warning("No tasks found. Please create tasks in 'Tab 3: Task Builder' first.")
         return
 
-    task_options = {task['description']: task['id'] for task in tasks}
     task_id_map = {task['id']: task for task in tasks}
+    agents = db.read_all_agents()
+    agent_id_map = {agent['id']: agent for agent in agents}
+    
+    # Build tasks grouped by agent
+    tasks_by_agent = {agent['id']: [] for agent in agents}
+    for task in tasks:
+        a_id = task.get('agent_id')
+        if a_id in tasks_by_agent:
+            tasks_by_agent[a_id].append(task)
 
-    with st.form(key="workflow_form"):
+    # --- Session state for selected tasks order ---
+    if 'wf_selected_task_ids' not in st.session_state:
+        st.session_state.wf_selected_task_ids = []
+
+    def remove_wf_task(task_id):
+        if task_id in st.session_state.wf_selected_task_ids:
+            st.session_state.wf_selected_task_ids.remove(task_id)
+
+    def move_wf_task_up(idx):
+        lst = st.session_state.wf_selected_task_ids
+        if idx > 0:
+            lst[idx], lst[idx - 1] = lst[idx - 1], lst[idx]
+
+    def move_wf_task_down(idx):
+        lst = st.session_state.wf_selected_task_ids
+        if idx < len(lst) - 1:
+            lst[idx], lst[idx + 1] = lst[idx + 1], lst[idx]
+
+    with st.container(border=True):
         st.subheader("Create a New Workflow")
-        workflow_name = st.text_input("Workflow Name")
-        selected_task_descs = st.multiselect("Select and Order Tasks", options=list(task_options.keys()))
-        requires_human_check = st.checkbox("Requires Human Check")
-
-        submitted = st.form_submit_button("Add Workflow")
-        if submitted:
-            # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize workflow name
+        workflow_name = st.text_input("Workflow Name", key="wf_name_input")
+        requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
+        
+        st.markdown("---")
+        st.markdown("**📋 Select Tasks — Grouped by Agent**")
+        
+        if not agents:
+            st.info("No agents available.")
+        else:
+            # Determine currently selected agent for the UI
+            agent_options = [f"{a['name']} - {a['role']}" for a in agents]
+            current_agent = agents[0]
+            if "wf_agent_selectbox" in st.session_state:
+                sel_val = st.session_state.wf_agent_selectbox
+                current_agent = next((a for a in agents if f"{a['name']} - {a['role']}" == sel_val), agents[0])
+            
+            col_agent, col_tasks = st.columns([1, 2])
+            
+            with col_agent:
+                # Avatar above
+                avatar_url = get_agent_avatar_url(current_agent)
+                st.markdown("<div style='display: flex; justify-content: center; margin-bottom: 10px;'>", unsafe_allow_html=True)
+                st.image(avatar_url, width=100)
+                st.markdown("</div>", unsafe_allow_html=True)
+                
+                # Dropdown below
+                st.selectbox("Select Agent", options=agent_options, key="wf_agent_selectbox")
+            
+            with col_tasks:
+                st.markdown(f"**Tasks for {current_agent['name']}**")
+                agent_tasks = tasks_by_agent.get(current_agent['id'], [])
+                if not agent_tasks:
+                    st.info("No tasks assigned to this agent.")
+                else:
+                    # Scrollable container for tasks
+                    with st.container(height=300, border=True):
+                        for task in agent_tasks:
+                            is_selected = task['id'] in st.session_state.wf_selected_task_ids
+                            label = f"**Task #{task['id']}:** {task['description'][:80]}{'...' if len(task['description']) > 80 else ''}"
+                            if st.checkbox(label, value=is_selected, key=f"wf_check_{task['id']}"):
+                                if task['id'] not in st.session_state.wf_selected_task_ids:
+                                    st.session_state.wf_selected_task_ids.append(task['id'])
+                            else:
+                                if task['id'] in st.session_state.wf_selected_task_ids:
+                                    st.session_state.wf_selected_task_ids.remove(task['id'])
+        
+        # --- Ordered Task Preview ---
+        st.markdown("---")
+        st.markdown("**⚙️ Workflow Steps (in order)**")
+        
+        if not st.session_state.wf_selected_task_ids:
+            st.info("No tasks selected yet. Expand an agent above to add tasks.")
+        else:
+            for i, t_id in enumerate(st.session_state.wf_selected_task_ids):
+                task = task_id_map.get(int(t_id))
+                agent = agent_id_map.get(task['agent_id']) if task else None
+                
+                with st.container(border=True):
+                    col_num, col_av, col_txt, col_up, col_down, col_rem = st.columns([0.5, 1, 8, 0.7, 0.7, 0.7])
+                    col_num.markdown(f"**{i+1}**")
+                    if agent:
+                        col_av.image(get_agent_avatar_url(agent), width=36)
+                    if task:
+                        col_txt.markdown(f"**{task['description'][:70]}{'...' if len(task['description']) > 70 else ''}**")
+                    col_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,), help="Move up")
+                    col_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,), help="Move down")
+                    col_rem.button("✖️", key=f"wf_rem_{i}", on_click=remove_wf_task, args=(t_id,), help="Remove")
+        
+        st.markdown("---")
+        if st.button("💾 Save Workflow", type="primary", use_container_width=True):
             sane_workflow_name = sanitize_input(workflow_name)
-            if not sane_workflow_name or not selected_task_descs:
+            if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
                 st.error("Workflow Name and at least one Task are required.")
             else:
-                ordered_task_ids = [task_options[desc] for desc in selected_task_descs]
-                db.create_workflow(sane_workflow_name, ordered_task_ids, requires_human_check)
+                db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
                 st.success(f"Workflow '{sane_workflow_name}' created successfully!")
+                del st.session_state.wf_selected_task_ids
                 st.rerun()
 
     st.divider()
@@ -557,12 +702,22 @@ def render_workflow_assembler():
         agent_id_map = {agent['id']: agent for agent in agents}
         
         for workflow in workflows:
-            with st.expander(f"**Workflow:** {workflow['name']}"):
+            wf_label = f"**Workflow:** {workflow['name']}"
+            if workflow.get('has_deletion_warning'):
+                wf_label += " ⚠️ **(one or more task deleted)**"
+            
+            with st.expander(wf_label):
+                if workflow.get('has_deletion_warning'):
+                    st.warning("One or more tasks previously associated with this workflow have been deleted. The workflow has been updated to remove them.")
+                    if st.button("Dismiss Warning", key=f"dismiss_wf_warn_{workflow['id']}", use_container_width=True):
+                        db.dismiss_workflow_warning(workflow['id'])
+                        st.rerun()
+                
                 # The db_manager processes task_ids_json into task_ids list automatically
                 task_ids = workflow.get('task_ids', [])
                 st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
                 for i, task_id in enumerate(task_ids):
-                    task = task_id_map.get(task_id)
+                    task = task_id_map.get(int(task_id))
                     if task:
                         agent = agent_id_map.get(task['agent_id'])
                         

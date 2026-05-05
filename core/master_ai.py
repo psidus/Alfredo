@@ -70,24 +70,41 @@ class MasterAI:
             
         logger.info(f"MasterAI initialized with model: {self.model_provider}/{self.model_name}")
 
-    def _fetch_workflows_context(self) -> str:
+    def _fetch_workflows_context(self):
         """
-        Retrieves and formats workflows from the database into a structured JSON string
-        for the LLM to understand its options.
+        Retrieves and formats workflows from the database.
+        Returns:
+            (str): JSON formatted list of workflows for the LLM.
+            (dict): Mapping of workflow_id to its required_inputs list.
         """
         workflows = self.db_manager.read_all_workflows()
+        tasks_list = self.db_manager.read_all_tasks()
+        task_map = {t['id']: t for t in tasks_list}
+        
         if not workflows:
-            return "No workflows currently available in the system."
+            return "No workflows currently available in the system.", {}
 
         formatted_workflows = []
+        requirements_map = {}
+        
         for wf in workflows:
-            formatted_workflows.append(
-                {
-                    "id": wf['id'],
-                    "name": wf['name'],
-                }
-            )
-        return json.dumps(formatted_workflows, indent=2)
+            wf_id = wf['id']
+            # Aggregate all required inputs from tasks in this workflow
+            all_reqs = []
+            for t_id in wf.get('task_ids', []):
+                task = task_map.get(int(t_id))
+                if task and task.get('required_inputs'):
+                    all_reqs.extend(task['required_inputs'])
+            
+            requirements_map[wf_id] = all_reqs
+            
+            formatted_workflows.append({
+                "id": wf_id,
+                "name": wf['name'],
+                "required_placeholders": [r['key'] for r in all_reqs]
+            })
+            
+        return json.dumps(formatted_workflows, indent=2), requirements_map
 
     def _sanitize_json(self, text: str) -> str:
         """
