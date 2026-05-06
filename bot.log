@@ -1,0 +1,63 @@
+2026-05-06 12:01:40,531 - INFO - Using config path: C:\Users\pietr\.config\crewai\settings.json
+2026-05-06 12:01:42,701 - INFO - No model_id provided for MasterAI. Using default model gemini-2.5-flash.
+2026-05-06 12:01:42,703 - INFO - MasterAI initialized with model: gemini/gemini-2.5-flash
+C:\Users\pietr\OneDrive\Documenti\GitHub\Alfredo\bot.py:351: PTBUserWarning: If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message. Read this FAQ entry to learn more about the per_* settings: https://github.com/python-telegram-bot/python-telegram-bot/wiki/Frequently-Asked-Questions#what-do-the-per_-settings-in-conversationhandler-do.
+  conv_handler = ConversationHandler(
+2026-05-06 12:01:44,033 - INFO - Bot started polling...
+2026-05-06 12:01:44,502 - INFO - Application started
+2026-05-06 12:01:52,596 - INFO - User Pietro (8711572556) started the bot.
+[92m12:01:54 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:01:54,867 - INFO - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:03,337 - WARNING - MasterAI Retry 1/3 due to: litellm.ServiceUnavailableError: GeminiException -... Waiting 3s
+[92m12:02:06 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:06,340 - INFO - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:10,613 - WARNING - MasterAI Retry 2/3 due to: litellm.ServiceUnavailableError: GeminiException -... Waiting 6s
+[92m12:02:16 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:16,614 - INFO - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:23,739 - ERROR - MasterAI Critical Error with gemini/gemini-2.5-flash: litellm.ServiceUnavailableError: GeminiException - {
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}
+. Attempting fallback to gemini/gemini-2.0-flash...
+[92m12:02:23 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.0-flash; provider = gemini
+2026-05-06 12:02:23,739 - INFO - 
+LiteLLM completion() model= gemini-2.0-flash; provider = gemini
+2026-05-06 12:02:23,975 - ERROR - MasterAI Fallback also failed: litellm.NotFoundError: GeminiException - {
+  "error": {
+    "code": 404,
+    "message": "This model models/gemini-2.0-flash is no longer available to new users. Please update your code to use a newer model for the latest features and improvements.",
+    "status": "NOT_FOUND"
+  }
+}
+
+2026-05-06 12:02:23,975 - ERROR - MasterAI Planning Failure: litellm.ServiceUnavailableError: GeminiException - {
+  "error": {
+    "code": 503,
+    "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.",
+    "status": "UNAVAILABLE"
+  }
+}
+
+[92m12:02:39 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:39,904 - INFO - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+[92m12:02:46 - LiteLLM:INFO[0m: utils.py:1652 - Wrapper: Completed Call, calling success_handler
+2026-05-06 12:02:46,971 - INFO - Wrapper: Completed Call, calling success_handler
+[92m12:02:52 - LiteLLM:INFO[0m: utils.py:4004 - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+2026-05-06 12:02:52,907 - INFO - 
+LiteLLM completion() model= gemini-2.5-flash; provider = gemini
+[92m12:02:59 - LiteLLM:INFO[0m: utils.py:1652 - Wrapper: Completed Call, calling success_handler
+2026-05-06 12:02:59,046 - INFO - Wrapper: Completed Call, calling success_handler
+2026-05-06 12:02:59,051 - ERROR - MasterAI Planning Failure: Expecting value: line 1 column 1 (char 0)

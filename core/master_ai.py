@@ -23,6 +23,48 @@ Rules:
 - Ensure 'extracted_params' is always a valid JSON object.
 """
 
+CHAT_PLANNER_PROMPT = """
+You are Alfredo, a Strategic Co-Pilot and Master AI Workflow Planner.
+Your goal is to help the user design a plan to achieve their objective using a team of AI agents.
+
+{base_workflow_context}
+
+You must maintain a conversational tone in your 'response'.
+If the user asks for changes, acknowledge them, update your internal plan, and ask if they agree.
+If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes"), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
+Otherwise, set the "status" to "planning", provide your conversational response in "response", and you may leave "plan" null or provide a draft.
+
+AVAILABLE TOOLS:
+- read_file
+- write_file
+- search_web
+- ask_operator
+- execute_shell_command
+
+OUTPUT FORMAT (JSON ONLY):
+{
+  "status": "planning" | "ready",
+  "response": "Your conversational reply to the user (use Markdown if needed, keep it concise and helpful).",
+  "plan": {
+    "agents": [
+      {
+        "role": "Agent Role (e.g., Senior Copywriter)",
+        "goal": "Agent Goal",
+        "backstory": "Agent backstory and expertise",
+        "tools": ["list of tool names"]
+      }
+    ],
+    "tasks": [
+      {
+        "description": "Clear and detailed task description",
+        "expected_output": "What the task should produce",
+        "agent_role": "MUST match exactly one role from the agents list"
+      }
+    ]
+  }
+}
+"""
+
 class MasterAI:
     """
     The MasterAI class acts as the intelligent gatekeeper and router for the system.
@@ -34,20 +76,38 @@ class MasterAI:
     or execute tools itself. It is strictly a read-only router and intent parser.
     """
 
-    def __init__(self, model_id: Optional[int] = None):
+    def __init__(self, model_id: Optional[int] = None, complexity: str = "simple"):
         self.db_manager = DBManager()
         self.data_manager = DataManager()
         self.llm_client = None
-        self.model_name = "gemini-1.5-flash"  # Default fallback model for Gemini
-        self.model_provider = "gemini"  # Default fallback provider
-        self.fallback_model = "gemini/gemini-1.5-flash" # Absolute fallback
+        
+        # Default Robust Configuration (Simple vs Complex)
+        if complexity == "complex":
+            self.model_name = "gemini-3.1-pro-preview"
+            self.model_provider = "gemini"
+            self.fallback_model = "gemini/gemini-3-flash-preview"
+        else:
+            self.model_name = "gemini-2.5-flash"
+            self.model_provider = "gemini"
+            self.fallback_model = "gemini/gemini-2.0-flash"
 
         # Attempt to get model details from DB if model_id is provided
         if model_id:
             model_data = self.db_manager.read_model(model_id)
             if model_data:
                 self.model_name = model_data['model_name']
-                self.model_provider = model_data['provider']
+                self.model_provider = model_data['provider'].lower()
+                
+                # --- PROVIDER & MODEL NORMALIZATION ---
+                provider_mapping = {
+                    'google': 'gemini',
+                    'mistralai': 'mistral'
+                }
+                self.model_provider = provider_mapping.get(self.model_provider, self.model_provider)
+
+                # Clean 'models/' prefix common in Google/Gemini models
+                if self.model_provider == 'gemini' and self.model_name.startswith('models/'):
+                    self.model_name = self.model_name.replace('models/', '')
             else:
                 logger.warning(f"Model ID {model_id} not found in DB. Using default model {self.model_name}.")
         else:
@@ -162,7 +222,7 @@ class MasterAI:
                 
                 raise e
 
-    def evaluate_intent(self, user_prompt: str) -> Dict[str, Any]:
+    def evaluate_intent(self, user_prompt: str, previous_context: str = None) -> Dict[str, Any]:
         """
         Evaluates the user's prompt using robust logic and maps it to a workflow ID.
         Also identifies which required inputs are missing.
@@ -170,6 +230,10 @@ class MasterAI:
         workflows_json, requirements_map = self._fetch_workflows_context()
         
         extended_prompt = MASTER_PROMPT + "\n\nCRITICAL: If the selected workflow has 'required_placeholders', check if the user's message provides them. Return any missing placeholder keys in a 'missing_inputs' list in your JSON output."
+        
+        if previous_context:
+            extended_prompt += f"\n\nPREVIOUS CONTEXT:\nThe user is continuing from a previous workflow. The previous output was:\n---\n{previous_context}\n---\nIf the new workflow requires inputs, see if this previous output provides the necessary information. Also, automatically map the 'previous_result' parameter to this context."
+
         system_prompt = extended_prompt.replace("{workflows}", workflows_json)
         
         # Prepare the LiteLLM call
@@ -205,4 +269,65 @@ class MasterAI:
                 "message": f"Critical routing error: {str(e)}",
                 "workflow_id": None,
                 "extracted_params": {}
+            }
+
+    def chat_plan(self, user_message: str, chat_history: list = None, base_workflow: dict = None) -> Dict[str, Any]:
+        """
+        Engages in a conversational planning phase with the user to dynamically build
+        or refine a crew of agents and tasks.
+        
+        Args:
+            user_message: The latest message from the user.
+            chat_history: List of dicts [{"role": "user"|"assistant", "content": "..."}]
+            base_workflow: Optional dictionary containing an existing workflow to start from.
+        """
+        chat_history = chat_history or []
+        
+        base_workflow_context = ""
+        if base_workflow:
+            base_workflow_context = f"""
+BASE WORKFLOW LOADED:
+The user has selected the following predefined workflow as a starting point:
+Name: {base_workflow.get('name')}
+Description: {base_workflow.get('description')}
+Please propose this base workflow to the user, adapt it to their specific request, and ask if they want to modify it.
+"""
+        else:
+            base_workflow_context = "No base workflow loaded. You must design a custom plan from scratch based on the user's request."
+            
+        system_prompt = CHAT_PLANNER_PROMPT.replace("{base_workflow_context}", base_workflow_context)
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(chat_history)
+        messages.append({"role": "user", "content": user_message})
+        
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+            
+        try:
+            # Use temperature 0.2 for a bit more creativity in planning while keeping JSON stable
+            raw_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=messages,
+                temperature=0.2
+            )
+            
+            clean_json = self._sanitize_json(raw_output)
+            result = json.loads(clean_json)
+            
+            # Ensure required fields exist
+            if "status" not in result:
+                result["status"] = "planning"
+            if "response" not in result:
+                result["response"] = "I'm processing the plan..."
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"MasterAI Planning Failure: {e}")
+            return {
+                "status": "planning",
+                "response": f"⚠️ Error in planning phase occurred: {str(e)}",
+                "plan": None
             }

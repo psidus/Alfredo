@@ -32,6 +32,10 @@ class WorkflowRunner:
         if model_data.get('is_local'):
             return f"ollama/{model_name}"
         
+        # Normalize provider
+        if provider == "google": provider = "gemini"
+        if provider == "google_vertex": provider = "vertex_ai"
+
         if provider == "openai":
             return model_name
         if provider == "anthropic":
@@ -39,7 +43,8 @@ class WorkflowRunner:
         if provider == "groq":
             return f"groq/{model_name}"
         if provider == "gemini":
-            return f"gemini/{model_name}"
+            clean_model = model_name.replace("models/", "")
+            return f"gemini/{clean_model}"
             
         return model_name
 

@@ -139,6 +139,17 @@ class DBManager:
                 accumulated_context TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow_id INTEGER,
+                status TEXT, -- 'running', 'completed', 'failed'
+                result TEXT,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                FOREIGN KEY (workflow_id) REFERENCES workflows (id) ON DELETE SET NULL
+            );
             """
         ]
         try:
@@ -530,5 +541,33 @@ class DBManager:
     def read_all_contexts(self) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM context_memory ORDER BY updated_at DESC"
         self.cursor.execute(sql)
+        rows = self.cursor.fetchall()
+        return [self._to_dict(row) for row in rows]
+
+    # --- Workflow Runs CRUD ---
+    def create_run(self, workflow_id: int, status: str = 'running') -> int:
+        sql = "INSERT INTO workflow_runs (workflow_id, status) VALUES (?, ?)"
+        self.cursor.execute(sql, (workflow_id, status))
+        self.conn.commit()
+        return self.cursor.lastrowid
+
+    def update_run(self, run_id: int, status: str, result: str = "") -> None:
+        sql = """
+        UPDATE workflow_runs 
+        SET status = ?, result = ?, finished_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+        """
+        self.cursor.execute(sql, (status, result, run_id))
+        self.conn.commit()
+
+    def read_run(self, run_id: int) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM workflow_runs WHERE id = ?"
+        self.cursor.execute(sql, (run_id,))
+        row = self.cursor.fetchone()
+        return self._to_dict(row)
+
+    def read_all_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM workflow_runs ORDER BY started_at DESC LIMIT ?"
+        self.cursor.execute(sql, (limit,))
         rows = self.cursor.fetchall()
         return [self._to_dict(row) for row in rows]

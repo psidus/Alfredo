@@ -108,6 +108,23 @@ def search_web(query: str) -> str:
     except Exception as e:
         return f"An error occurred during web search for '{query}': {e}"
 
+@tool("Ask Operator")
+def ask_operator(question: str) -> str:
+    """
+    Use this tool to ask the human operator a question when you need clarification,
+    when you find multiple files with the same name, or when you need permission.
+    The tool will pause your execution until the human replies.
+    Example: ask_operator('I found 3 files named report.doc. Which path should I use?')
+    """
+    from core.human_in_the_loop import request_human_input
+    
+    chat_id = os.environ.get("CURRENT_CHAT_ID")
+    if not chat_id:
+        return "Error: Cannot reach operator. Assume default or abort."
+    
+    answer = request_human_input(chat_id, question)
+    return f"Human replied: {answer}"
+
 # --- Final Instructions ---
 #
 # The `duckduckgo-search` library must be added to `requirements.txt`.

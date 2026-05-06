@@ -12,6 +12,7 @@ import hashlib
 from dotenv import dotenv_values, set_key, find_dotenv
 from core.master_ai import MasterAI
 from core.crew_builder import build_crew
+from core.notification_manager import NotificationManager
 
 @st.cache_resource
 def get_db_manager():
@@ -373,7 +374,7 @@ def render_task_builder():
         st.warning("No agents found. Please create an agent in 'Tab 2: Agent Caserma' first.")
         return
 
-    agent_options = {agent['name']: agent['id'] for agent in agents}
+    agent_options = {f"{agent['name']} ({agent['role']})": agent['id'] for agent in agents}
 
     # --- Edit/Create Form ---
     editing_task = None
@@ -418,7 +419,7 @@ def render_task_builder():
         # --- Agent Selection with Avatar Preview ---
         # We need to peek at the session state to know which agent is selected for the preview
         current_sel_name = st.session_state.task_agent_sel if "task_agent_sel" in st.session_state else agent_names[default_index]
-        current_agent = next((a for a in agents if a['name'] == current_sel_name), None)
+        current_agent = next((a for a in agents if f"{a['name']} ({a['role']})" == current_sel_name), None)
         
         col_av, col_sel = st.columns([1.5, 8.5])
         with col_av:
@@ -548,6 +549,8 @@ def render_task_builder():
                                 with col2:
                                     if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
                                         db.delete_task(task['id'])
+                                        if 'wf_selected_task_ids' in st.session_state:
+                                            del st.session_state.wf_selected_task_ids
                                         st.toast(f"Deleted task {task['id']}", icon="🗑️")
                                         st.rerun()
 
@@ -567,6 +570,8 @@ def render_task_builder():
                         with col2:
                             if st.button("Delete", key=f"delete_unk_{task['id']}", type="primary", use_container_width=True):
                                 db.delete_task(task['id'])
+                                if 'wf_selected_task_ids' in st.session_state:
+                                    del st.session_state.wf_selected_task_ids
                                 st.toast(f"Deleted orphaned task {task['id']}", icon="🗑️")
                                 st.rerun()
 
@@ -799,14 +804,27 @@ def render_workflow_assembler():
                         st.write("⚡ **Executing Workflow...**")
                         # Pass extracted params if available, otherwise raw prompt
                         inputs = routing.get('extracted_params', {})
-                        if not inputs:
-                            inputs = {"user_input": test_prompt}
+                        # Create a run record
+                        run_id = db.create_run(wf_id, status='running')
                         
-                        result = crew.kickoff(inputs=inputs)
-                        
-                        st.success("✅ Execution Complete!")
-                        st.markdown("### Final Output")
-                        st.markdown(str(result))
+                        try:
+                            result = crew.kickoff(inputs=inputs)
+                            
+                            # Update run record
+                            db.update_run(run_id, status='completed', result=str(result))
+
+                            # Send notification
+                            notifier = NotificationManager()
+                            workflow = db.read_workflow(wf_id)
+                            wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
+                            notifier.notify_workflow_completion(wf_name, result)
+
+                            st.success("✅ Execution Complete!")
+                            st.markdown("### Final Output")
+                            st.markdown(str(result))
+                        except Exception as e:
+                            db.update_run(run_id, status='failed', result=str(e))
+                            raise e
                     else:
                         st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
                     
@@ -820,14 +838,102 @@ def render_workflow_assembler():
 
 
 
+def render_history_monitoring():
+    """Renders Tab 5: Workflow Run History."""
+    db = get_db_manager()
+    st.header("History & Monitoring")
+    st.markdown("Track the execution status and results of your workflows.")
+
+    runs = db.read_all_runs(limit=50)
+    workflows = db.read_all_workflows()
+    wf_map = {wf['id']: wf['name'] for wf in workflows}
+
+    if not runs:
+        st.info("No workflow runs recorded yet.")
+        return
+
+    for run in runs:
+        wf_name = wf_map.get(run['workflow_id'], f"Workflow {run['workflow_id']}")
+        status = run['status']
+        
+        status_colors = {
+            'running': '🔵 Running',
+            'completed': '🟢 Completed',
+            'failed': '🔴 Failed'
+        }
+        status_display = status_colors.get(status, status)
+        
+        with st.expander(f"{status_display} | {wf_name} | {run['started_at']}"):
+            st.markdown(f"**Started At:** {run['started_at']}")
+            if run['finished_at']:
+                st.markdown(f"**Finished At:** {run['finished_at']}")
+            
+            st.markdown("**Result / Error:**")
+            if run['result']:
+                st.code(run['result'], language=None)
+            else:
+                st.write("No output yet.")
+
+
 def main():
     """Main function to run the Streamlit dashboard."""
     st.set_page_config(page_title="AI Workflow Configurator", layout="wide")
-    # --- Header with Right Popover ---
+    # --- Bot Process Management ---
+    import subprocess
+    import sys
+    import os
+    
+    bot_pid_file = "bot.pid"
+    
+    def is_bot_running():
+        if not os.path.exists(bot_pid_file):
+            return False
+        with open(bot_pid_file, 'r') as f:
+            try:
+                pid = int(f.read().strip())
+            except ValueError:
+                return False
+        try:
+            output = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}"]).decode()
+            return str(pid) in output
+        except Exception:
+            return False
+
+    def toggle_bot():
+        if is_bot_running():
+            # Stop bot
+            with open(bot_pid_file, 'r') as f:
+                pid = int(f.read().strip())
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+            if os.path.exists(bot_pid_file):
+                os.remove(bot_pid_file)
+        else:
+            # Start bot
+            flags = 0x08000000 # CREATE_NO_WINDOW on Windows
+            with open("bot.log", "w") as log_file:
+                p = subprocess.Popen(
+                    [sys.executable, "bot.py"], 
+                    creationflags=flags,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT
+                )
+            with open(bot_pid_file, 'w') as f:
+                f.write(str(p.pid))
+
+    # --- Header with Right Popovers ---
     col_title, col_tools = st.columns([7, 3])
     with col_title:
         st.title("🤖 AI Workflow Configurator")
         st.caption("A secure dashboard for building and managing AI agent workflows.")
+        
+        bot_running = is_bot_running()
+        btn_label = "🔴 Stop Bot Telegram" if bot_running else "🟢 Start Bot Telegram"
+        
+        col_btn, _ = st.columns([3, 7])
+        with col_btn:
+            if st.button(btn_label, use_container_width=True):
+                toggle_bot()
+                st.rerun()
     
     with col_tools:
         st.write("") # Spacer
@@ -922,19 +1028,20 @@ def main():
     with st.sidebar:
         st.header("🚀 Guide & Placeholders")
         st.markdown("""
-        Use these placeholders in your **Task Descriptions** to create dynamic and sequential workflows:
+        Customize your **Task Descriptions** using these dynamic placeholders:
         
+        - **`{variable_name}`**: 
+          **Dynamic Input**: Define custom variables in the 'Required Inputs' section. Alfredo will ask for them in chat before execution.
+          *Tip: If multiple tasks share the same `{variable_name}`, Alfredo will ask only once!*
+
         - **`{user_input}`**: 
-          Inserts the text you send directly (e.g., via Telegram).
+          Inserts the full initial message you sent to trigger the bot.
           
         - **`{previous_result}`**: 
-          Inserts the output of the *last* executed workflow. Perfect for chaining.
-          
-        - **`{flexible_input}`**: 
-          **Smart Fallback**: Uses your new input if provided, otherwise uses the previous result automatically.
+          Inserts the output of the *last* executed workflow session.
           
         ---
-        *Tip: You can combine them!*
+        *Alfredo (Master AI) handles all conversations and will automatically replace these placeholders during the planning phase.*
         """)
         st.divider()
         st.info("The configuration is saved directly to your SQLite database.")
@@ -945,11 +1052,12 @@ def main():
     if 'editing_agent_id' not in st.session_state:
         st.session_state.editing_agent_id = None
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Tab 1: API Vault & Model Registry",
         "Tab 2: Agent Caserma",
         "Tab 3: Task Builder",
-        "Tab 4: Workflow Assembler"
+        "Tab 4: Workflow Assembler",
+        "Tab 5: History & Monitoring"
     ])
 
     with tab1:
@@ -963,6 +1071,9 @@ def main():
 
     with tab4:
         render_workflow_assembler()
+
+    with tab5:
+        render_history_monitoring()
 
 
 if __name__ == "__main__":

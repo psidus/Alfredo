@@ -22,6 +22,8 @@ from core.data_manager import load_env
 from core.db_manager import DBManager
 from core.master_ai import MasterAI
 from core.crew_builder import build_crew
+from core.notification_manager import NotificationManager
+from core.human_in_the_loop import has_pending_request, provide_human_input
 
 # Load environment variables
 load_env()
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 # Initialize DB and MasterAI
 db = DBManager()
 master_ai = MasterAI()
+notifier = NotificationManager()
 
 # --- Configuration from .env ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -57,10 +60,7 @@ else:
         sys.exit(1)
 
 # --- ConversationHandler States ---
-SHOW_TASKS = 1  
-CAPTURE_EDITS = 2
-ASK_MISSING_INPUT = 3 # New state for guided prompts
-EXECUTION = 4
+PLANNING_MODE = 1
 
 
 # --- Whitelist Check Decorator ---
@@ -109,177 +109,92 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @whitelist_check
-async def workflow_selection_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """
-    Entry point for ConversationHandler.
-    Displays workflow tasks and prompts for user edits or direct execution.
-    """
+@whitelist_check
+async def workflow_selection_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
     workflow_id = int(query.data.split("_")[1])
-    context.user_data["current_workflow_id"] = workflow_id
-    logger.info(f"User {query.from_user.id} selected workflow ID: {workflow_id}")
-
     workflow = db.read_workflow(workflow_id)
     if not workflow:
         await query.edit_message_text("Error: Workflow not found.")
         return ConversationHandler.END
 
-    task_ids = workflow["task_ids"]
-    # db_manager handles individual task fetching if needed, but here we just need descriptions
-    tasks = [db.read_task(tid) for tid in task_ids if tid]
+    context.user_data["base_workflow"] = workflow
+    context.user_data["chat_history"] = []
 
-    tasks_message = f"<b>Pre-Flight Check: Workflow '{workflow['name']}'</b>\n\n<b>Tasks:</b>\n"
-    for i, task in enumerate(tasks):
-        if task:
-            tasks_message += f"{i + 1}. <i>{task['description']}</i>\n"
+    await query.edit_message_text(f"📝 <b>Initializing Planner for '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML)
 
-    tasks_message += (
-        "\n<i>Please type any specific instructions or edits for this run, "
-        "or click 'Execute As Is' to proceed with default parameters.</i>"
-    )
+    initial_prompt = f"I want to run the workflow '{workflow['name']}'. What do you need from me?"
+    result = await asyncio.to_thread(master_ai.chat_plan, initial_prompt, [], workflow)
 
-    keyboard = [[InlineKeyboardButton("🚀 Execute As Is", callback_data="execute_default")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    context.user_data["chat_history"].append({"role": "user", "content": initial_prompt})
+    context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
 
-    await query.edit_message_text(
-        tasks_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML
-    )
-
-    return CAPTURE_EDITS
-
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=result["response"])
+    return PLANNING_MODE
 
 @whitelist_check
-async def handle_user_edits(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """
-    Captures user text input for Master AI analysis.
-    """
+async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text
     chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    logger.info(f"User {user_id} provided edits: {user_input[:100]}...")
 
-    # Security Check: Sanitize input length
-    if len(user_input) > 2000:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="Your input is too long. Please keep it under 2000 characters.",
-        )
-        return CAPTURE_EDITS # Stay in the same state
-
-    await context.bot.send_message(
-        chat_id=chat_id, text="Analyzing instructions via Master AI..."
-    )
-
-    try:
-        # Master AI processes user input to derive execution context
-        routing_result = await asyncio.to_thread(master_ai.evaluate_intent, user_input)
-        
-        execution_context = routing_result.get("extracted_params", {})
-        if not execution_context and user_input:
-             execution_context = {"user_input": user_input}
-             
-        context.user_data["execution_context"] = execution_context
-        
-        # Check for missing inputs
-        missing_details = routing_result.get("missing_inputs_details", [])
-        if missing_details:
-            context.user_data["missing_inputs_queue"] = missing_details
-            return await ask_next_missing_input(update, context)
-
-    except Exception as e:
-        logger.error(f"Master AI processing failed for user {user_id}: {e}", exc_info=True)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="Master AI encountered an error. Proceeding with raw input.",
-        )
-        context.user_data["execution_context"] = {"user_input": user_input}
-
-    await execute_crew(update, context)
-    return ConversationHandler.END
-
-
-@whitelist_check
-async def execute_as_is(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Triggers crew execution with default parameters, but checks if an idea is needed first.
-    """
-    query = update.callback_query
-    await query.answer()
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    workflow_id = context.user_data.get("current_workflow_id")
-    
-    workflow = db.read_workflow(workflow_id)
-    workflow_name = workflow["name"].lower() if workflow else ""
-
-    # Logic: If it's a brainstorming/creative workflow, we SHOULD have an idea.
-    # We check if the user has provided ANY context yet.
-    if not context.user_data.get("execution_context"):
-        logger.info(f"User {user_id} chose 'As Is' for '{workflow_name}'. Checking if input is required.")
-        
-        # Heuristic: If name contains 'brainstorm' or 'crea', prompt for an idea.
-        if any(keyword in workflow_name for keyword in ["brainstorm", "crea", "idea", "progetto"]):
-             await context.bot.send_message(
-                 chat_id=chat_id,
-                 text="💡 <b>Attenzione:</b> Questo workflow richiede un'idea di partenza.\n\n<i>Per favore, scrivi qui sotto l'idea o l'argomento su cui vuoi lavorare:</i>",
-                 parse_mode=ParseMode.HTML
-             )
-             return CAPTURE_EDITS
-
-    logger.info(f"User {user_id} proceeding with execution.")
-    await context.bot.send_message(
-        chat_id=chat_id, text="🚀 Avvio esecuzione in corso..."
-    )
-    # If we already have context (e.g. from a previous message), keep it.
-    if "execution_context" not in context.user_data:
-        context.user_data["execution_context"] = {}
-
-    await execute_crew(update, context)
-    return ConversationHandler.END
-
-
-async def ask_next_missing_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Helper to ask the next question in the missing inputs queue.
-    """
-    queue = context.user_data.get("missing_inputs_queue", [])
-    if not queue:
-        await execute_crew(update, context)
+    if has_pending_request(str(chat_id)):
+        provide_human_input(str(chat_id), user_input)
+        await context.bot.send_message(chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution...")
         return ConversationHandler.END
 
-    next_input = queue.pop(0)
-    context.user_data["current_missing_input_key"] = next_input["key"]
-    
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"❓ <b>Domanda:</b> {next_input['prompt']}",
-        parse_mode=ParseMode.HTML
-    )
-    return ASK_MISSING_INPUT
+    status_msg = await update.message.reply_text("🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML)
 
+    context.user_data["base_workflow"] = None
+    context.user_data["chat_history"] = []
+
+    result = await asyncio.to_thread(master_ai.chat_plan, user_input)
+
+    context.user_data["chat_history"].append({"role": "user", "content": user_input})
+    context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
+
+    await status_msg.edit_text(result["response"])
+    return PLANNING_MODE
 
 @whitelist_check
-async def handle_missing_input_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Captures the answer for a missing input and proceeds to the next one or execution.
-    """
-    answer = update.message.text
-    key = context.user_data.get("current_missing_input_key")
-    
-    if key:
-        if "execution_context" not in context.user_data:
-            context.user_data["execution_context"] = {}
-        context.user_data["execution_context"][key] = answer
-        logger.info(f"Captured input for {key}: {answer}")
+async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_input = update.message.text
+    chat_id = update.effective_chat.id
 
-    return await ask_next_missing_input(update, context)
+    if has_pending_request(str(chat_id)):
+        provide_human_input(str(chat_id), user_input)
+        await context.bot.send_message(chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution...")
+        return PLANNING_MODE
+
+    chat_history = context.user_data.get("chat_history", [])
+    base_workflow = context.user_data.get("base_workflow")
+
+    status_msg = await update.message.reply_text("🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML)
+
+    result = await asyncio.to_thread(master_ai.chat_plan, user_input, chat_history, base_workflow)
+
+    chat_history.append({"role": "user", "content": user_input})
+    chat_history.append({"role": "assistant", "content": result["response"]})
+    context.user_data["chat_history"] = chat_history
+
+    await status_msg.edit_text(result["response"])
+
+    if result.get("status") == "ready":
+        plan = result.get("plan")
+        if plan:
+            context.user_data["final_plan"] = plan
+            await context.bot.send_message(chat_id=chat_id, text="🚀 The plan is confirmed! Starting execution...")
+            
+            if base_workflow:
+                context.user_data["current_workflow_id"] = base_workflow["id"]
+                
+            context.user_data["execution_context"] = {"user_input": " ".join([m['content'] for m in chat_history])}
+            await execute_crew(update, context)
+                
+        return ConversationHandler.END
+
+    return PLANNING_MODE
 
 
 async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,13 +205,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     workflow_id = context.user_data.get("current_workflow_id")
+    final_plan = context.user_data.get("final_plan")
     execution_context = context.user_data.get("execution_context", {})
 
-    if not workflow_id:
-        logger.error(f"User {user_id}: Workflow ID not found in user_data for execution.")
+    if not workflow_id and not final_plan:
+        logger.error(f"User {user_id}: Neither Workflow ID nor Dynamic Plan found.")
         await context.bot.send_message(
             chat_id=chat_id,
-            text="Error: Could not retrieve workflow details. Please `/start` again.",
+            text="Error: Could not retrieve execution details. Please `/start` again.",
         )
         return
 
@@ -305,30 +221,73 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         text="Assembling Crew and beginning execution. This may take a while...",
     )
 
+    # Create a run record if it's a predefined workflow
+    run_id = None
+    if workflow_id:
+        run_id = db.create_run(workflow_id, status='running')
+
     try:
-        # Build the CrewAI crew dynamically
-        crew = await asyncio.to_thread(build_crew, workflow_id)
+        from core.crew_builder import build_crew, build_dynamic_crew
+        
+        # Build the CrewAI crew
+        if final_plan:
+            logger.info(f"User {user_id}: Using Dynamic Crew Builder for execution.")
+            crew = await asyncio.to_thread(build_dynamic_crew, final_plan)
+        else:
+            logger.info(f"User {user_id}: Using Standard Crew Builder for Workflow ID {workflow_id}.")
+            crew = await asyncio.to_thread(build_crew, workflow_id)
+            
         if not crew:
-            raise ValueError(f"Failed to build crew for workflow ID {workflow_id}")
+            raise ValueError("Failed to build crew.")
+
+        # Inject chat_id for tools
+        os.environ["CURRENT_CHAT_ID"] = str(chat_id)
 
         # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
         # to prevent blocking the Telegram bot's event loop.
-        logger.info(f"User {user_id}: Kicking off CrewAI for workflow ID {workflow_id} with context: {execution_context}")
+        logger.info(f"User {user_id}: Kicking off CrewAI with context: {execution_context}")
         final_result = await asyncio.to_thread(crew.kickoff, inputs=execution_context)
 
-        logger.info(f"User {user_id}: CrewAI execution finished for workflow ID {workflow_id}.")
+        logger.info(f"User {user_id}: CrewAI execution finished.")
+        
+        # Update run record
+        if run_id:
+            db.update_run(run_id, status='completed', result=str(final_result))
+
+        # Save output to context memory for continuation
+        db.update_context(str(chat_id), str(final_result))
+
+        # Send completion notification
+        wf_name = "Dynamic Workflow"
+        if workflow_id:
+            workflow = db.read_workflow(workflow_id)
+            wf_name = workflow["name"] if workflow else "Unknown"
+            
+        notifier.notify_workflow_completion(wf_name, final_result, chat_id=chat_id)
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Continue (Use this result)", callback_data="context_continue"),
+                InlineKeyboardButton("🆕 New Conversation", callback_data="context_new")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         # Use HTML and pre tags for cleaner output without markdown escaping issues
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ <b>Execution Complete!</b>\n\n<pre>{final_result}</pre>",
+            text=f"✅ <b>Execution Complete!</b>\n\n<pre>{final_result}</pre>\n\n<i>Choose how to proceed:</i>",
             parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
         )
 
     except Exception as e:
-        logger.error(
-            f"CrewAI execution failed for user {user_id}, workflow ID {workflow_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"CrewAI execution failed: {e}", exc_info=True)
+        
+        # Update run record with failure
+        if run_id:
+            db.update_run(run_id, status='failed', result=str(e))
+
         # Security Wrapper: Do not send raw exception details to Telegram
         error_message = (
             "An error occurred during crew execution. "
@@ -342,54 +301,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data.clear()
 
 
-@whitelist_check
-async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handles natural language messages outside of a specific workflow context.
-    Uses Master AI to route the request to the best matching workflow.
-    """
-    user_input = update.message.text
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    logger.info(f"Free chat from user {user_id}: {user_input[:100]}...")
-    
-    # 1. Analyze intent via Master AI
-    status_msg = await update.message.reply_text("🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML)
-    
-    try:
-        routing_result = await asyncio.to_thread(master_ai.evaluate_intent, user_input)
-        
-        if routing_result.get("status") == "success" and routing_result.get("workflow_id"):
-            workflow_id = int(routing_result["workflow_id"])
-            workflow = db.read_workflow(workflow_id)
-            
-            if workflow:
-                await status_msg.edit_text(f"🎯 Intent matched: <b>{workflow['name']}</b>", parse_mode=ParseMode.HTML)
-                
-                context.user_data["current_workflow_id"] = workflow_id
-                context.user_data["execution_context"] = routing_result.get("extracted_params", {"user_input": user_input})
-                
-                # Check for missing inputs
-                missing_details = routing_result.get("missing_inputs_details", [])
-                if missing_details:
-                    context.user_data["missing_inputs_queue"] = missing_details
-                    await ask_next_missing_input(update, context)
-                    return # We stay in the global MessageHandler but state is managed if part of Conv
-                
-                # Execute immediately
-                await execute_crew(update, context)
-                return
-        
-        # 2. Fallback if no intent matched
-        await status_msg.edit_text(
-            "I couldn't match your request to a specific workflow. 🧐\n\n"
-            "Try being more specific or choose one from the list using /start."
-        )
-        
-    except Exception as e:
-        logger.error(f"Free chat routing failed: {e}", exc_info=True)
-        await status_msg.edit_text("Sorry, I encountered an error while processing your request.")
+# Old free_chat_handler removed as it is now an entry point in ConversationHandler
 
 @whitelist_check
 async def cancel_conversation(
@@ -397,12 +309,37 @@ async def cancel_conversation(
 ) -> int:
     """Cancels the current conversation."""
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     logger.info(f"User {user_id} canceled the conversation.")
+    
+    # Critical: Unblock any pending agent threads!
+    if has_pending_request(str(chat_id)):
+        provide_human_input(str(chat_id), "SYSTEM_ABORT")
+        logger.info(f"Aborted pending human-in-the-loop request for chat {chat_id}.")
+        
     await update.message.reply_text(
         "Operation aborted. Use /start to see available workflows."
     )
     context.user_data.clear()
     return ConversationHandler.END
+
+
+@whitelist_check
+async def handle_context_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the user's choice to continue or start a new conversation."""
+    query = update.callback_query
+    await query.answer()
+    
+    choice = query.data
+    chat_id = update.effective_chat.id
+    
+    if choice == "context_new":
+        db.clear_context(str(chat_id))
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id=chat_id, text="Memory cleared. Let's start a new conversation! 🆕")
+    elif choice == "context_continue":
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id=chat_id, text="Perfect, I will keep the last result in mind for the next workflow! 🔄")
 
 
 # --- Main Function ---
@@ -413,26 +350,27 @@ def main() -> None:
     # ConversationHandler for workflow selection and execution
     conv_handler = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(workflow_selection_callback, pattern="^workflow_"),
+            CallbackQueryHandler(workflow_selection_callback, pattern=r"^workflow_"),
             MessageHandler(filters.TEXT & ~filters.COMMAND, free_chat_handler)
         ],
         states={
-            CAPTURE_EDITS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_edits),
-                CallbackQueryHandler(execute_as_is, pattern="^execute_default$"),
+            PLANNING_MODE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_planning_chat)
             ],
-            ASK_MISSING_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_missing_input_answer)
-            ]
         },
-        fallbacks=[CommandHandler("cancel", cancel_conversation), CommandHandler("stop", cancel_conversation)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_conversation),
+            CommandHandler("stop", cancel_conversation)
+        ],
     )
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
     
     # Global handler for 'stop' command (literal word)
-    application.add_handler(MessageHandler(filters.Regex(r'^(?i)stop$') & ~filters.COMMAND, cancel_conversation))
+    application.add_handler(MessageHandler(filters.Regex(r'(?i)^stop$') & ~filters.COMMAND, cancel_conversation))
+    
+    # context handler for callback buttons at the end of a workflow
+    application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

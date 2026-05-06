@@ -15,6 +15,10 @@ tools_registry:
     display_name: "Local: Terminal Executor"
     description: "Permette agli agenti di lanciare comandi sicuri nel terminale del sistema operativo."
     required_secrets: []
+  ask_operator:
+    display_name: "Local: Ask Operator"
+    description: "Permette all'agente di fermarsi e farti una domanda su Telegram in caso di ambiguità."
+    required_secrets: []
   gmail_send:
     display_name: "Google: Gmail Sender (Esempio)"
     description: "Permette agli agenti di inviare email tramite il tuo account."
