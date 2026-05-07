@@ -17,6 +17,22 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Initialize DB
 db = DBManager()
 
+# --- GLOBAL INTER-AGENT COMMUNICATION DIRECTIVE ---
+# This is appended to EVERY task to enforce concise, structured outputs
+# optimized for AI-to-AI communication (not human-readable fluff).
+AGENT_COMMS_DIRECTIVE = """
+
+--- COMMUNICATION PROTOCOL ---
+You are part of a sequential AI agent pipeline. Your output will be read by the NEXT AI agent, not a human.
+RULES:
+1. Output ONLY the essential findings as a structured list.
+2. Use bullet points (•) for each key finding.
+3. Start with a one-line SUMMARY of your conclusion.
+4. Maximum 10 bullet points. Prioritize by relevance.
+5. NO preamble, NO "In conclusion...", NO filler phrases.
+6. If you reference data, cite it inline (source, number, date).
+"""
+
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
 ALLOWED_TOOLS = {
@@ -29,10 +45,10 @@ ALLOWED_TOOLS = {
 
 def _instantiate_llm(model_id):
     """
-    Securely creates an LLM object (ChatOpenAI or Ollama) based on model_id.
-    Ensures environment variables are loaded and API keys are present for OpenAI.
+    Securely creates an LLM string/object based on model_id from the database.
+    Ensures API keys are injected into os.environ so that LiteLLM/CrewAI can find them.
     """
-    DataManager.load_env() # Ensure environment variables are loaded
+    DataManager.load_env() # Ensure .env is loaded first
 
     model_record = db.read_model(model_id)
     if not model_record:
@@ -42,7 +58,6 @@ def _instantiate_llm(model_id):
     model_name = model_record['model_name']
     
     # --- PROVIDER & MODEL NORMALIZATION ---
-    # Normalize provider names to match LiteLLM/CrewAI expectations
     provider_mapping = {
         'google': 'gemini',
         'google_vertex': 'vertex_ai',
@@ -54,15 +69,41 @@ def _instantiate_llm(model_id):
     if provider == 'gemini' and model_name.startswith('models/'):
         model_name = model_name.replace('models/', '')
 
+    # --- CRITICAL: Inject API key into os.environ for LiteLLM/CrewAI ---
+    # LiteLLM reads keys from environment variables, not from Python objects.
+    provider_key_env_map = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+        "ollama": None,  # Ollama is local, no key needed
+    }
+    env_var_name = provider_key_env_map.get(provider, f"{provider.upper()}_API_KEY")
+    
+    if env_var_name:
+        api_key = DataManager.load_api_key(env_var_name)
+        if not api_key:
+            # Generic fallback to GEMINI_API_KEY for Google models
+            api_key = DataManager.load_api_key("GEMINI_API_KEY")
+        if api_key:
+            os.environ[env_var_name] = api_key
+            logging.info(f"API key for '{provider}' injected as '{env_var_name}'.")
+        else:
+            logging.warning(f"No API key found for provider '{provider}' (expected '{env_var_name}').")
+
+    # Build and return the LLM reference
     if provider == 'openai':
         if not os.getenv("OPENAI_API_KEY"):
-            raise EnvironmentError("OPENAI_API_KEY is missing from .env. Cannot instantiate OpenAI LLM.")
+            raise EnvironmentError("OPENAI_API_KEY is missing from .env.")
         return ChatOpenAI(model_name=model_name, temperature=0.7)
     elif provider == 'ollama':
         return f"ollama/{model_name}"
     else:
-        # Standard LiteLLM format: provider/model_name (e.g. anthropic/claude-3, groq/llama3)
-        return f"{provider}/{model_name}"
+        # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
+        model_string = f"{provider}/{model_name}"
+        logging.info(f"LLM instantiated: {model_string}")
+        return model_string
 
 def _map_tools(tool_names):
     """
@@ -84,29 +125,54 @@ def _map_tools(tool_names):
 def _build_agent(agent_id):
     """
     Constructs a CrewAI Agent object from database records.
+    Automatically disables tools for local models (Ollama/phi3, etc.)
+    that do not support the function-calling protocol.
     """
     agent_record = db.read_agent(agent_id)
     if not agent_record:
         raise ValueError(f"Agent ID {agent_id} not found in database.")
 
+    model_record = db.read_model(agent_record['model_id']) if agent_record.get('model_id') else None
     llm_instance = _instantiate_llm(agent_record['model_id'])
-    agent_tools = _map_tools(agent_record.get('tools', []))
+    
+    # --- LOCAL MODEL CHECK ---
+    # Local models (Ollama, phi3, llama, etc.) do NOT support the tools/function-calling
+    # protocol. Passing tools to them causes a 400 BadRequestError.
+    # We detect this via the is_local flag OR the ollama provider name.
+    is_local_model = False
+    if model_record:
+        is_local_model = bool(model_record.get('is_local')) or \
+                         model_record.get('provider', '').lower() == 'ollama'
+
+    if is_local_model:
+        agent_tools = []
+        logging.info(f"Agent '{agent_record['name']}' uses a local model — tools disabled.")
+    else:
+        agent_tools = _map_tools(agent_record.get('tools', []))
+
+    # --- BACKSTORY INJECTION: Enforce conciseness at identity level ---
+    conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
+                         "You never ramble. You output structured bullet points, not essays. "
+                         "Every sentence must carry unique, actionable information.")
+    enhanced_backstory = agent_record['backstory'] + conciseness_trait
 
     agent = Agent(
         role=agent_record['role'],
-        backstory=agent_record['backstory'],
-        goal=f"Act as {agent_record['name']} with the role: {agent_record['role']}", # Use name as part of goal for clarity
+        backstory=enhanced_backstory,
+        goal=f"Act as {agent_record['name']} with the role: {agent_record['role']}",
         llm=llm_instance,
         tools=agent_tools,
-        verbose=True, # Agents verbosity for debugging
-        allow_delegation=False # Prevent infinite loops in automated remote executions
+        verbose=True,
+        allow_delegation=False,
+        max_iter=5  # Prevent infinite reasoning loops
     )
-    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id})")
+    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model})")
     return agent
 
 def _build_task(task_id, agents_cache):
     """
     Constructs a CrewAI Task object and ensures agents are reused via memory reference.
+    Tool overrides at task level are also stripped for local model agents.
     """
     task_record = db.read_task(task_id)
     if not task_record:
@@ -118,16 +184,33 @@ def _build_task(task_id, agents_cache):
     
     agent_instance = agents_cache[agent_id]
     
-    # Task tools override agent tools if specified
-    task_tools = _map_tools(task_record.get('tools', []))
+    # Check if the agent's model is local — if so, strip task-level tools too
+    agent_record = db.read_agent(agent_id) if agent_id else None
+    model_record = db.read_model(agent_record['model_id']) if agent_record and agent_record.get('model_id') else None
+    is_local_model = False
+    if model_record:
+        is_local_model = bool(model_record.get('is_local')) or \
+                         model_record.get('provider', '').lower() == 'ollama'
+
+    if is_local_model:
+        task_tools = None  # No tools for local models
+    else:
+        task_tools = _map_tools(task_record.get('tools', [])) or None
+
+    # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
+    task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
+
+    # Enhance expected_output to enforce structured format
+    base_expected = task_record['expected_output']
+    if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
+        base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
 
     task = Task(
-        description=task_record['description'],
-        expected_output=task_record['expected_output'],
+        description=task_description,
+        expected_output=base_expected,
         agent=agent_instance,
-        tools=task_tools if task_tools else None,
-        # Set async=False for sequential processing in a single workflow
-        async_execution=False 
+        tools=task_tools,
+        async_execution=False
     )
     logging.info(f"Built CrewAI Task: {task_record['description'][:50]}... (ID: {task_id}) for Agent ID: {agent_id}")
     return task
@@ -203,25 +286,44 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             
     llm_instance = _instantiate_llm(default_model_id)
     
+    # Check if the default model is local
+    model_record = db.read_model(default_model_id)
+    is_local_model = False
+    if model_record:
+        is_local_model = bool(model_record.get('is_local')) or \
+                         model_record.get('provider', '').lower() == 'ollama'
+
     agents_cache = {}
     crew_agents = []
     
     for agent_data in plan['agents']:
         role = agent_data['role']
-        agent_tools = _map_tools(agent_data.get('tools', []))
+        # Strip tools if model is local
+        if is_local_model:
+            agent_tools = []
+            logging.info(f"Dynamic Agent '{role}' tools stripped (local model).")
+        else:
+            agent_tools = _map_tools(agent_data.get('tools', []))
         
+        # --- BACKSTORY INJECTION for dynamic agents ---
+        conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
+                             "You never ramble. You output structured bullet points, not essays. "
+                             "Every sentence must carry unique, actionable information.")
+        enhanced_backstory = agent_data.get('backstory', '') + conciseness_trait
+
         agent = Agent(
             role=role,
-            backstory=agent_data.get('backstory', ''),
+            backstory=enhanced_backstory,
             goal=agent_data.get('goal', ''),
             llm=llm_instance,
             tools=agent_tools,
             verbose=True,
-            allow_delegation=False
+            allow_delegation=False,
+            max_iter=5
         )
         agents_cache[role] = agent
         crew_agents.append(agent)
-        logging.info(f"Built Dynamic Agent: {role}")
+        logging.info(f"Built Dynamic Agent: {role} (local={is_local_model})")
         
     crew_tasks = []
     for task_data in plan['tasks']:
@@ -232,9 +334,16 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         else:
             agent_instance = agents_cache[agent_role]
             
+        task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+
+        # Enhance expected_output for structured format
+        base_expected = task_data.get('expected_output', 'Task Output')
+        if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
+            base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
+
         task = Task(
-            description=task_data['description'],
-            expected_output=task_data.get('expected_output', 'Task Output'),
+            description=task_description,
+            expected_output=base_expected,
             agent=agent_instance,
             async_execution=False
         )

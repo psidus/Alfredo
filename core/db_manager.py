@@ -571,3 +571,19 @@ class DBManager:
         self.cursor.execute(sql, (limit,))
         rows = self.cursor.fetchall()
         return [self._to_dict(row) for row in rows]
+
+    def delete_run(self, run_id: int) -> int:
+        """Deletes a specific workflow run record."""
+        sql = "DELETE FROM workflow_runs WHERE id = ?"
+        self.cursor.execute(sql, (run_id,))
+        self.conn.commit()
+        return self.cursor.rowcount
+
+    def clear_all_runs(self) -> int:
+        """Clears all history from the workflow_runs table."""
+        sql = "DELETE FROM workflow_runs"
+        self.cursor.execute(sql)
+        # Reset the autoincrement counter for this table
+        self.cursor.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'workflow_runs'")
+        self.conn.commit()
+        return self.cursor.rowcount

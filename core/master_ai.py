@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 from typing import Optional, Dict, Any
+
 
 from core.db_manager import DBManager
 from core.data_manager import DataManager
@@ -41,6 +43,11 @@ AVAILABLE TOOLS:
 - ask_operator
 - execute_shell_command
 
+STRATEGIC RULES FOR CONCISENESS:
+- All agents MUST be instructed in their 'backstory' to be "concise, factual, and avoid fluff".
+- All tasks MUST have an 'expected_output' that specifies a "synthesized, structured report or clear list of findings".
+- Avoid dispersion: agents should focus only on the most relevant data needed for the next step.
+
 OUTPUT FORMAT (JSON ONLY):
 {
   "status": "planning" | "ready",
@@ -65,6 +72,31 @@ OUTPUT FORMAT (JSON ONLY):
 }
 """
 
+OUTPUT_REFINER_PROMPT = """
+You are Alfredo, the Master AI Editor and Quality Controller.
+You receive the RAW output from a team of AI agents who executed a workflow.
+Your job is to transform that raw output into a polished, clear, and user-friendly final report.
+
+YOUR RESPONSIBILITIES:
+1. **Formatting & Clarity**: Fix syntax, grammar, and structure. Use clear headings, bullet points, and numbered lists. Remove any agent-internal jargon, debugging notes, or redundant reasoning.
+2. **Synthesis**: Merge overlapping sections. Remove duplicate information. Ensure the report flows logically from analysis to conclusions to recommendations.
+3. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
+4. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
+
+RULES:
+- Do NOT invent new data or analysis. Only restructure and clarify what the agents produced.
+- Use Markdown formatting for the output (headings, bold, lists).
+- Keep the total output under 3000 characters when possible.
+- If the raw output is very short or empty, acknowledge that the agents did not produce substantial results and suggest the user try again with more specific instructions.
+
+RAW AGENT OUTPUT:
+---
+{raw_output}
+---
+
+Produce the refined, user-ready report below:
+"""
+
 class MasterAI:
     """
     The MasterAI class acts as the intelligent gatekeeper and router for the system.
@@ -82,14 +114,16 @@ class MasterAI:
         self.llm_client = None
         
         # Default Robust Configuration (Simple vs Complex)
+        # Source: https://ai.google.dev/gemini-api/docs/models (May 2026)
+        # gemini-2.0-flash and gemini-2.0-flash-lite are DEPRECATED — use 2.5 series.
         if complexity == "complex":
-            self.model_name = "gemini-3.1-pro-preview"
+            self.model_name = "gemini-2.5-pro"          # Best reasoning, for complex tasks
             self.model_provider = "gemini"
-            self.fallback_model = "gemini/gemini-3-flash-preview"
+            self.fallback_model = "gemini/gemini-2.5-flash"
         else:
-            self.model_name = "gemini-2.5-flash"
+            self.model_name = "gemini-2.5-flash-lite"   # Fastest, lowest traffic, stable
             self.model_provider = "gemini"
-            self.fallback_model = "gemini/gemini-2.0-flash"
+            self.fallback_model = "gemini/gemini-2.5-flash"  # Fallback to stronger flash
 
         # Attempt to get model details from DB if model_id is provided
         if model_id:
@@ -122,6 +156,20 @@ class MasterAI:
         if not self.api_key:
             logger.error(f"API key for {self.model_provider} not found in DataManager. Check 'ui/dashboard.py' API Vault.")
             raise ValueError(f"API key for {self.model_provider} is required but not found.")
+
+        # --- CRITICAL: Inject the key into os.environ so LiteLLM can find it ---
+        # LiteLLM reads keys from environment variables, not from our internal self.api_key.
+        # We must set the correct env var name for each provider.
+        provider_key_env_map = {
+            "gemini": "GEMINI_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "mistral": "MISTRAL_API_KEY",
+        }
+        env_var_name = provider_key_env_map.get(self.model_provider, f"{self.model_provider.upper()}_API_KEY")
+        os.environ[env_var_name] = self.api_key
+        logger.info(f"API key for provider '{self.model_provider}' injected into environment as '{env_var_name}'.")
 
         # Initialize LLM routing via LiteLLM
         if not litellm:
@@ -195,7 +243,7 @@ class MasterAI:
                     model=model,
                     messages=messages,
                     temperature=temperature,
-                    response_format={"type": "json_object"} if "gemini" not in model.lower() else None # Gemini handles JSON better via prompt
+                    response_format={"type": "json_object"} # Force JSON mode for all providers
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -240,7 +288,10 @@ class MasterAI:
         model_string = f"{self.model_provider}/{self.model_name}"
         if self.model_provider == "openai":
             model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name # Already has prefix
             
+        logger.info(f"MasterAI Attempting Intent Evaluation with: {model_string}")
         try:
             raw_output = self._call_llm_with_retry(
                 model=model_string,
@@ -270,6 +321,54 @@ class MasterAI:
                 "workflow_id": None,
                 "extracted_params": {}
             }
+
+    def refine_output(self, raw_output: str) -> str:
+        """
+        Post-processing pipeline: takes the raw output from a CrewAI execution
+        and refines it through the Master AI for:
+        1. Formatting & clarity cleanup
+        2. Ethical review
+        3. Synthesis into a user-friendly report
+        
+        This runs automatically after every crew execution — no need to add 
+        it as a task in the workflow.
+        
+        Args:
+            raw_output: The raw string output from crew.kickoff().
+        Returns:
+            str: The refined, polished report ready for the end user.
+        """
+        raw_str = str(raw_output).strip()
+        if not raw_str:
+            return "⚠️ The workflow completed but produced no output. Please try again with more specific instructions."
+
+        system_prompt = OUTPUT_REFINER_PROMPT.replace("{raw_output}", raw_str)
+        
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI Refining output ({len(raw_str)} chars) with: {model_string}")
+        
+        try:
+            # Use plain text completion (no JSON mode) for the refiner
+            response = litellm.completion(
+                model=model_string,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Please refine the above raw output into a clear, polished report."}
+                ],
+                temperature=0.1  # Low creativity — focus on restructuring, not inventing
+            )
+            refined = response.choices[0].message.content.strip()
+            logger.info(f"MasterAI Output refinement complete ({len(refined)} chars).")
+            return refined
+        except Exception as e:
+            logger.error(f"MasterAI Output Refinement failed: {e}. Returning raw output.")
+            # Graceful fallback: return the raw output if refinement fails
+            return raw_str
 
     def chat_plan(self, user_message: str, chat_history: list = None, base_workflow: dict = None) -> Dict[str, Any]:
         """
@@ -304,7 +403,10 @@ Please propose this base workflow to the user, adapt it to their specific reques
         model_string = f"{self.model_provider}/{self.model_name}"
         if self.model_provider == "openai":
             model_string = self.model_name
-            
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI Attempting Planning with: {model_string}")
         try:
             # Use temperature 0.2 for a bit more creativity in planning while keeping JSON stable
             raw_output = self._call_llm_with_retry(
@@ -314,9 +416,22 @@ Please propose this base workflow to the user, adapt it to their specific reques
             )
             
             clean_json = self._sanitize_json(raw_output)
-            result = json.loads(clean_json)
+            
+            try:
+                result = json.loads(clean_json)
+            except json.JSONDecodeError:
+                # Robust Fallback: If the LLM failed to give JSON, wrap the raw text into a valid response
+                logger.warning("MasterAI failed to return valid JSON. Using fallback wrapper.")
+                result = {
+                    "status": "planning",
+                    "response": clean_json,
+                    "plan": None
+                }
             
             # Ensure required fields exist
+            if not isinstance(result, dict):
+                result = {"status": "planning", "response": str(result), "plan": None}
+                
             if "status" not in result:
                 result["status"] = "planning"
             if "response" not in result:

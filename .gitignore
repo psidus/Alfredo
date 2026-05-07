@@ -1,5 +1,44 @@
-agents_force_env/
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Environment and Secrets
 .env
+.env.*
+!.env.example
+
+# Database
 db/*.sqlite
+db/*.db
+
+# Logs and Process IDs
+*.log
+bot.pid
+
+# Project Specific
+scratch/
+prd.json
+rapid_prompt.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/

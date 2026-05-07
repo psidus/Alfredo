@@ -1,6 +1,10 @@
 # ui/dashboard.py
 
 import streamlit as st
+import importlib
+import core.db_manager
+# Force reload to ensure new methods like delete_run are picked up
+importlib.reload(core.db_manager)
 from core.db_manager import DBManager
 from core.data_manager import DataManager
 import yaml
@@ -14,7 +18,6 @@ from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
 
-@st.cache_resource
 def get_db_manager():
     return DBManager()
 
@@ -844,6 +847,13 @@ def render_history_monitoring():
     st.header("History & Monitoring")
     st.markdown("Track the execution status and results of your workflows.")
 
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🗑️ Clear All History", type="primary", use_container_width=True):
+            count = db.clear_all_runs()
+            st.toast(f"History cleared! ({count} runs removed)", icon="🗑️")
+            st.rerun()
+
     runs = db.read_all_runs(limit=50)
     workflows = db.read_all_workflows()
     wf_map = {wf['id']: wf['name'] for wf in workflows}
@@ -864,15 +874,23 @@ def render_history_monitoring():
         status_display = status_colors.get(status, status)
         
         with st.expander(f"{status_display} | {wf_name} | {run['started_at']}"):
-            st.markdown(f"**Started At:** {run['started_at']}")
-            if run['finished_at']:
-                st.markdown(f"**Finished At:** {run['finished_at']}")
+            col_data, col_actions = st.columns([8, 1])
+            with col_data:
+                st.markdown(f"**Started At:** {run['started_at']}")
+                if run['finished_at']:
+                    st.markdown(f"**Finished At:** {run['finished_at']}")
+                
+                st.markdown("**Result / Error:**")
+                if run['result']:
+                    st.code(run['result'], language=None)
+                else:
+                    st.write("No output yet.")
             
-            st.markdown("**Result / Error:**")
-            if run['result']:
-                st.code(run['result'], language=None)
-            else:
-                st.write("No output yet.")
+            with col_actions:
+                if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete this run"):
+                    db.delete_run(run['id'])
+                    st.toast(f"Run {run['id']} deleted")
+                    st.rerun()
 
 
 def main():
@@ -910,12 +928,17 @@ def main():
         else:
             # Start bot
             flags = 0x08000000 # CREATE_NO_WINDOW on Windows
-            with open("bot.log", "w") as log_file:
+            # Force UTF-8 environment for the bot process
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            
+            with open("bot.log", "w", encoding="utf-8") as log_file:
                 p = subprocess.Popen(
                     [sys.executable, "bot.py"], 
                     creationflags=flags,
                     stdout=log_file,
-                    stderr=subprocess.STDOUT
+                    stderr=subprocess.STDOUT,
+                    env=env
                 )
             with open(bot_pid_file, 'w') as f:
                 f.write(str(p.pid))
@@ -1039,6 +1062,15 @@ def main():
           
         - **`{previous_result}`**: 
           Inserts the output of the *last* executed workflow session.
+          
+        ---
+        **🛠️ Tool Support & Models**
+        
+        If a task requires **Tools** (e.g. searching the web, reading files, executing terminal commands):
+        
+        - ✅ **Cloud Models**: Use models from **OpenAI**, **Gemini**, **Anthropic**, or **Groq**. These support the "Function Calling" protocol required for tools.
+        - ❌ **Local Models (Ollama)**: Models like **phi3**, **llama**, etc., usually **do NOT support tools**. 
+          *Note: Alfredo will automatically disable tools if you assign a local model to an agent.*
           
         ---
         *Alfredo (Master AI) handles all conversations and will automatically replace these placeholders during the planning phase.*
