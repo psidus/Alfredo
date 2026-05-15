@@ -1,25 +1,57 @@
 tools_registry:
   read_file:
-    display_name: "Local: Read File"
-    description: "Permette agli agenti di leggere file all'interno della cartella workspace/."
+    display_name: "Local: Read File (Workspace)"
+    description: "Allows agents to read files inside the agent's workspace/ folder."
     required_secrets: []
   write_file:
-    display_name: "Local: Write File"
-    description: "Permette agli agenti di creare e modificare file all'interno della cartella workspace/."
+    display_name: "Local: Write File (Workspace)"
+    description: "Allows agents to create and modify files inside the agent's workspace/ folder."
+    required_secrets: []
+  read_file_anywhere:
+    display_name: "Local: Read Any File (Full PC)"
+    description: "Reads any text file at any location on the computer. Read-only — no modifications allowed."
+    required_secrets: []
+  search_files:
+    display_name: "Local: Search Files (Full PC)"
+    description: "Searches for files by name or pattern across the entire computer. Search-only, no modifications."
     required_secrets: []
   search_web:
     display_name: "Web: DuckDuckGo Search"
-    description: "Permette agli agenti di effettuare ricerche web gratuite."
+    description: "Performs free web searches via DuckDuckGo."
     required_secrets: []
   execute_shell_command:
     display_name: "Local: Terminal Executor"
-    description: "Permette agli agenti di lanciare comandi sicuri nel terminale del sistema operativo."
+    description: "Executes safe commands in the OS terminal (active blacklist enforced)."
     required_secrets: []
   ask_operator:
     display_name: "Local: Ask Operator"
-    description: "Permette all'agente di fermarsi e farti una domanda su Telegram in caso di ambiguità."
+    description: "Allows the agent to pause and ask the operator a question via Telegram in case of ambiguity."
     required_secrets: []
-  gmail_send:
-    display_name: "Google: Gmail Sender (Esempio)"
-    description: "Permette agli agenti di inviare email tramite il tuo account."
-    required_secrets: ["GMAIL_API_KEY", "GMAIL_SENDER_EMAIL"]
+  create_word_document:
+    display_name: "Office: Create Word Document (.docx)"
+    description: "Creates a Word file with a title and content. Requires Telegram confirmation before creating."
+    required_secrets: []
+  edit_word_document:
+    display_name: "Office: Edit Word Document (.docx)"
+    description: "Edits an existing Word file. Shows a preview and requires Telegram confirmation."
+    required_secrets: []
+  create_excel_document:
+    display_name: "Office: Create Excel Spreadsheet (.xlsx)"
+    description: "Creates an Excel file with headers and data rows. Requires Telegram confirmation."
+    required_secrets: []
+  take_screenshot:
+    display_name: "Local: Take Screenshot"
+    description: "Captures a screenshot of the monitor and sends it to the operator via Telegram."
+    required_secrets: []
+  manage_email:
+    display_name: "Email: Outlook Manager (Read/Send)"
+    description: "Reads, searches, and sends emails via Outlook SMTP/IMAP. Sending requires Telegram confirmation."
+    required_secrets:
+      - OUTLOOK_EMAIL
+      - OUTLOOK_APP_PASSWORD
+      - OUTLOOK_IMAP_SERVER
+      - OUTLOOK_SMTP_SERVER
+  vector_search:
+    display_name: "Local: Vector Database Search"
+    description: "Queries a local vector database to retrieve context from uploaded documents."
+    required_secrets: []

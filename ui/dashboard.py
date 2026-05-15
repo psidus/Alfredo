@@ -18,6 +18,7 @@ from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
 
+@st.cache_resource
 def get_db_manager():
     return DBManager()
 
@@ -93,6 +94,193 @@ def get_agent_avatar_url(agent):
     return f"https://api.dicebear.com/9.x/avataaars/svg?{avatar_params}"
 
 # --- UI Rendering Functions for Each Tab ---
+
+def render_knowledge_base():
+    """Renders Tab 1: Vector Knowledge Base."""
+    from core.vector_manager import VectorManager
+    import tempfile
+    
+    db = get_db_manager()
+    st.header("Add Database (Vector Knowledge Base)")
+    st.markdown("Create local vector databases from your documents to provide context to agents.")
+    
+    col_list, col_main = st.columns([1, 2.5])
+    
+    with col_list:
+        st.subheader("Existing Databases")
+        vector_dbs = db.read_all_vector_dbs()
+        if not vector_dbs:
+            st.info("No databases created yet.")
+        else:
+            for vdb in vector_dbs:
+                with st.container(border=True):
+                    st.markdown(f"**{vdb['name']}**")
+                    st.caption(f"Provider: {vdb['provider']} | Model: {vdb['model_name']}")
+                    if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
+                        vm = VectorManager()
+                        vm.delete_database(vdb['name'])
+                        db.delete_vector_db(vdb['id'])
+                        st.toast(f"Database {vdb['name']} deleted", icon="🗑️")
+                        st.rerun()
+                    
+                    if st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
+                        st.session_state.query_vdb = vdb
+
+    with col_main:
+        if "query_vdb" in st.session_state:
+            vdb = st.session_state.query_vdb
+            st.subheader(f"Query: {vdb['name']}")
+            st.caption(f"Path: {vdb['path']} | Provider: {vdb['provider']} | Model: {vdb['model_name']}")
+            
+            with st.container(border=True):
+                query_text = st.text_input("Ask a question to this database", placeholder="e.g. What is the main conclusion of the research?")
+                col_q1, col_q2 = st.columns([1, 4])
+                with col_q1:
+                    if st.button("Run Query", type="primary"):
+                        if query_text:
+                            vm = VectorManager()
+                            with st.spinner("Searching..."):
+                                response = vm.query_database(
+                                    db_path=vdb['path'],
+                                    provider=vdb['provider'],
+                                    model_name=vdb['model_name'],
+                                    query=query_text
+                                )
+                                st.session_state.last_query_result = response
+                        else:
+                            st.warning("Please enter a query.")
+                with col_q2:
+                    if st.button("Close Query", use_container_width=False):
+                        del st.session_state.query_vdb
+                        if "last_query_result" in st.session_state:
+                            del st.session_state.last_query_result
+                        st.rerun()
+            
+            if "last_query_result" in st.session_state:
+                st.markdown("### Results")
+                st.info(st.session_state.last_query_result)
+            
+            st.divider()
+
+        with st.form("create_vdb_form"):
+            st.subheader("Create New Database")
+            db_name = st.text_input("Database Name", placeholder="e.g. project_docs_2026")
+            
+            # File Uploader supports drag & drop inherently
+            uploaded_files = st.file_uploader(
+                "Drag & Drop Documents (PDF, TXT, DOCX)", 
+                accept_multiple_files=True,
+                type=['pdf', 'txt', 'md', 'csv', 'docx']
+            )
+            
+            # Model Selection
+            from dotenv import dotenv_values, find_dotenv
+            env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+            current_env = dotenv_values(env_path)
+            
+            available_embedding_models = {
+                "Local (Ollama) / nomic-embed-text": {"provider": "ollama", "model_name": "nomic-embed-text"},
+                "Local (Ollama) / mxbai-embed-large": {"provider": "ollama", "model_name": "mxbai-embed-large"},
+                "Local (Ollama) / all-minilm": {"provider": "ollama", "model_name": "all-minilm"}
+            }
+            
+            if current_env.get("OPENAI_API_KEY") and str(current_env["OPENAI_API_KEY"]).strip():
+                available_embedding_models.update({
+                    "OpenAI / text-embedding-3-small": {"provider": "openai", "model_name": "text-embedding-3-small"},
+                    "OpenAI / text-embedding-3-large": {"provider": "openai", "model_name": "text-embedding-3-large"},
+                    "OpenAI / text-embedding-ada-002": {"provider": "openai", "model_name": "text-embedding-ada-002"}
+                })
+                
+            if (current_env.get("GEMINI_API_KEY") and str(current_env["GEMINI_API_KEY"]).strip()) or \
+               (current_env.get("GOOGLE_API_KEY") and str(current_env["GOOGLE_API_KEY"]).strip()):
+                available_embedding_models.update({
+                    "Gemini / gemini-embedding-2": {"provider": "gemini", "model_name": "models/gemini-embedding-2"},
+                    "Gemini / gemini-embedding-001": {"provider": "gemini", "model_name": "models/gemini-embedding-001"}
+                })
+                
+            available_embedding_models["Other (Manual Input)"] = {"provider": "custom", "model_name": "custom"}
+                
+            selected_model_str = st.selectbox("Select Embedding Model", options=list(available_embedding_models.keys()))
+            
+            if selected_model_str == "Other (Manual Input)":
+                col_prov, col_mod = st.columns(2)
+                with col_prov:
+                    custom_provider = st.selectbox("Provider", ["ollama", "openai", "gemini"])
+                with col_mod:
+                    custom_model_name = st.text_input("Model Name", placeholder="e.g. mxbai-embed-large")
+                
+                selected_provider = custom_provider
+                selected_model_name = custom_model_name
+            else:
+                selected_provider = available_embedding_models[selected_model_str]["provider"]
+                selected_model_name = available_embedding_models[selected_model_str]["model_name"]
+            
+            # --- Advanced Parameters ---
+            with st.expander("🛠️ Advanced Parameters (Chunking & Quality)"):
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    chunk_size = st.number_input("Chunk Size (Characters)", min_value=100, max_value=10000, value=1000, step=100, 
+                                                 help="The maximum number of characters per chunk. Larger chunks provide more context but may exceed model limits.")
+                with col_c2:
+                    chunk_overlap = st.number_input("Chunk Overlap", min_value=0, max_value=2000, value=200, step=50,
+                                                    help="The number of overlapping characters between chunks to maintain context continuity.")
+            
+            submitted = st.form_submit_button("Start Embedding", type="primary")
+            
+            if submitted:
+                if not db_name or not uploaded_files or not selected_model_name:
+                    st.error("Please provide a name, select files, and choose a valid model.")
+                else:
+                    # Sanitize DB name
+                    safe_db_name = sanitize_filename(db_name)
+                    
+                    # Save files to a temporary directory for processing
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        file_paths = []
+                        for uploaded_file in uploaded_files:
+                            temp_path = os.path.join(temp_dir, uploaded_file.name)
+                            with open(temp_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                            file_paths.append(temp_path)
+                            
+                        # Process
+                        with st.status(f"Processing {len(file_paths)} files...", expanded=True) as status:
+                            st.write("Extracting text and generating embeddings...")
+                            vm = VectorManager()
+                            
+                            result = vm.create_database(
+                                db_name=safe_db_name,
+                                file_paths=file_paths,
+                                provider=selected_provider,
+                                model_name=selected_model_name,
+                                chunk_size=chunk_size,
+                                chunk_overlap=chunk_overlap
+                            )
+                            
+                            if result["status"] == "success":
+                                # Save to metadata DB
+                                db.create_vector_db(
+                                    name=safe_db_name,
+                                    path=result['db_path'],
+                                    provider=selected_provider,
+                                    model_name=selected_model_name
+                                )
+                                st.write(result["message"])
+                                if result.get("skipped_files"):
+                                    st.warning("Some files were skipped:")
+                                    for skipped in result["skipped_files"]:
+                                        st.write(f"- {skipped}")
+                                status.update(label="Embedding Complete!", state="complete")
+                                st.success(f"Database '{safe_db_name}' created successfully!")
+                                st.rerun()
+                            else:
+                                st.error(result["message"])
+                                if result.get("skipped_files"):
+                                    st.warning("Skipped files:")
+                                    for skipped in result["skipped_files"]:
+                                        st.write(f"- {skipped}")
+                                status.update(label="Embedding Failed", state="error")
+
 
 def render_api_vault():
     """Renders Tab 1: API Vault & Model Registry (as per M1_T1)."""
@@ -439,6 +627,109 @@ def render_task_builder():
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools, key="task_tools_sel")
         
+        selected_vector_dbs = []
+        if 'vector_search' in selected_tools:
+            st.markdown("---")
+            st.markdown("**📁 Vector Database Selection** — *Choose which databases this task can read from*")
+            vector_dbs = db.read_all_vector_dbs()
+            if vector_dbs:
+                db_options = {f"{vdb['name']} ({vdb['provider']})": vdb['id'] for vdb in vector_dbs}
+                default_vdb_ids = editing_task.get('vector_dbs', []) if editing_task else []
+                default_vdb_names = [name for name, v_id in db_options.items() if str(v_id) in default_vdb_ids or int(v_id) in default_vdb_ids]
+                
+                sel_names = st.multiselect("Select Vector Databases", options=list(db_options.keys()), default=default_vdb_names, key="task_vdb_sel")
+                selected_vector_dbs = [str(db_options[name]) for name in sel_names]
+            else:
+                st.warning("No vector databases available. Create one in the 'Add Database' tab.")
+
+        # --- Outlook Email Credentials Card ---
+        if 'manage_email' in selected_tools:
+            st.markdown("---")
+            st.markdown("**📧 Outlook Configuration** — *SMTP/IMAP credentials for email access*")
+
+            from dotenv import dotenv_values, set_key, find_dotenv
+            env_path_email = find_dotenv() or os.path.join(os.getcwd(), '.env')
+            current_env_email = dotenv_values(env_path_email)
+
+            # Check which secrets are configured (show status WITHOUT exposing values)
+            outlook_keys = {
+                "OUTLOOK_EMAIL": "Outlook Email Address",
+                "OUTLOOK_APP_PASSWORD": "App Password (NOT your normal password)",
+                "OUTLOOK_IMAP_SERVER": "IMAP Server (default: outlook.office365.com)",
+                "OUTLOOK_SMTP_SERVER": "SMTP Server (default: smtp.office365.com)",
+            }
+
+            with st.container(border=True):
+                st.markdown("##### Credentials Status")
+                status_col1, status_col2 = st.columns(2)
+                for i, (key, label) in enumerate(outlook_keys.items()):
+                    is_set = bool(current_env_email.get(key, "").strip())
+                    icon = "🟢" if is_set else "🔴"
+                    status_text = "Configured" if is_set else "Not configured"
+                    with (status_col1 if i % 2 == 0 else status_col2):
+                        st.markdown(f"{icon} **{label}**  \n`{status_text}`")
+
+                with st.expander("✏️ Enter / Edit Credentials", expanded=not all(
+                    bool(current_env_email.get(k, "").strip()) for k in outlook_keys
+                )):
+                    st.caption("🔒 Credentials are saved in your local `.env` file. They are never shown or shared.")
+
+                    with st.form("outlook_credentials_form"):
+                        col_e1, col_e2 = st.columns(2)
+                        with col_e1:
+                            new_email = st.text_input(
+                                "Outlook Email Address",
+                                placeholder="my.email@outlook.com",
+                                help="Your Outlook or Office 365 email address"
+                            )
+                            new_imap = st.text_input(
+                                "IMAP Server",
+                                value=current_env_email.get("OUTLOOK_IMAP_SERVER", "outlook.office365.com"),
+                                help="For Outlook.com and Office365: outlook.office365.com"
+                            )
+                        with col_e2:
+                            new_password = st.text_input(
+                                "App Password",
+                                type="password",
+                                placeholder="xxxx xxxx xxxx xxxx",
+                                help="Create an App Password at account.microsoft.com -> Security -> App passwords"
+                            )
+                            new_smtp = st.text_input(
+                                "SMTP Server",
+                                value=current_env_email.get("OUTLOOK_SMTP_SERVER", "smtp.office365.com"),
+                                help="For Outlook.com and Office365: smtp.office365.com"
+                            )
+
+                        save_outlook = st.form_submit_button("💾 Save Outlook Credentials", type="primary")
+                        if save_outlook:
+                            saved_any = False
+                            if new_email.strip():
+                                set_key(env_path_email, "OUTLOOK_EMAIL", new_email.strip())
+                                saved_any = True
+                            if new_password.strip():
+                                set_key(env_path_email, "OUTLOOK_APP_PASSWORD", new_password.strip())
+                                saved_any = True
+                            if new_imap.strip():
+                                set_key(env_path_email, "OUTLOOK_IMAP_SERVER", new_imap.strip())
+                                saved_any = True
+                            if new_smtp.strip():
+                                set_key(env_path_email, "OUTLOOK_SMTP_SERVER", new_smtp.strip())
+                                saved_any = True
+
+                            if saved_any:
+                                st.success("✅ Credentials saved to `.env`. They will not be displayed in plain text.")
+                                st.rerun()
+                            else:
+                                st.warning("No fields filled. Enter at least Email and App Password.")
+
+                st.info(
+                    "💡 **How to get a Microsoft App Password:**\n"
+                    "1. Go to [account.microsoft.com](https://account.microsoft.com) -> **Security**\n"
+                    "2. Click on **Advanced security options**\n"
+                    "3. Under *App passwords*, click **Create a new app password**\n"
+                    "4. Copy the generated password (16 characters) and paste it above."
+                )
+
         # --- Guided Required Inputs ---
         st.markdown("---")
         st.markdown("**🔑 Required Inputs** — *Variables asked in chat before execution*")
@@ -482,12 +773,12 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     st.rerun()
@@ -540,6 +831,13 @@ def render_task_builder():
                                 st.code(task['expected_output'], language=None)
                                 if task.get('tools'):
                                     st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
+                                
+                                if task.get('vector_dbs') and 'vector_search' in task.get('tools', []):
+                                    # Fetch DB names for display
+                                    all_dbs = db.read_all_vector_dbs()
+                                    db_id_to_name = {str(d['id']): d['name'] for d in all_dbs}
+                                    db_names = [db_id_to_name.get(str(vid), f"Unknown DB (ID {vid})") for vid in task['vector_dbs']]
+                                    st.markdown(f"**📁 Vector Databases:** `{', '.join(db_names)}`")
                                 
                                 if task.get('required_inputs'):
                                     st.markdown("**🔑 Required Inputs:**")
@@ -1084,27 +1382,31 @@ def main():
     if 'editing_agent_id' not in st.session_state:
         st.session_state.editing_agent_id = None
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Tab 1: API Vault & Model Registry",
-        "Tab 2: Agent Caserma",
-        "Tab 3: Task Builder",
-        "Tab 4: Workflow Assembler",
-        "Tab 5: History & Monitoring"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "Tab 1: Add Database",
+        "Tab 2: API Vault & Model Registry",
+        "Tab 3: Agent Caserma",
+        "Tab 4: Task Builder",
+        "Tab 5: Workflow Assembler",
+        "Tab 6: History & Monitoring"
     ])
 
     with tab1:
-        render_api_vault()
+        render_knowledge_base()
 
     with tab2:
+        render_api_vault()
+
+    with tab3:
         render_agent_caserma()
     
-    with tab3:
+    with tab4:
         render_task_builder()
 
-    with tab4:
+    with tab5:
         render_workflow_assembler()
 
-    with tab5:
+    with tab6:
         render_history_monitoring()
 
 

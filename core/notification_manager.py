@@ -64,3 +64,89 @@ class NotificationManager:
             f"📝 <b>Result:</b>\n<pre>{display_result}</pre>"
         )
         return self.send_telegram_notification(message, chat_id)
+
+    def send_file_notification(self, file_path: str, caption: str = "", chat_id=None) -> bool:
+        """
+        Sends a file (document or image) to the Telegram operator.
+        Automatically selects sendPhoto for images and sendDocument for other files.
+        """
+        if not self.bot_token:
+            logger.error("TELEGRAM_BOT_TOKEN not found in environment.")
+            return False
+
+        target_chat_id = chat_id or self.default_chat_id
+        if not target_chat_id:
+            logger.error("No chat_id available for file notification.")
+            return False
+
+        if not os.path.isfile(file_path):
+            logger.error(f"File not found for Telegram send: {file_path}")
+            return False
+
+        # Choose endpoint based on file type
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+        ext = os.path.splitext(file_path)[1].lower()
+        endpoint = "sendPhoto" if ext in image_extensions else "sendDocument"
+        field_name = "photo" if ext in image_extensions else "document"
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/{endpoint}"
+
+        try:
+            import urllib.parse
+            import http.client
+            import mimetypes
+
+            boundary = "----TelegramBoundary7Ma4YWxkTrZu0gW"
+            filename = os.path.basename(file_path)
+            mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            body_parts = []
+            # Add caption field
+            if caption:
+                body_parts.append(
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+                    f"{caption}\r\n"
+                )
+                body_parts.append(
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="parse_mode"\r\n\r\n'
+                    f"HTML\r\n"
+                )
+            # Add chat_id field
+            body_parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+                f"{target_chat_id}\r\n"
+            )
+
+            body_str = "".join(body_parts).encode("utf-8")
+            file_part = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+                f"Content-Type: {mime_type}\r\n\r\n"
+            ).encode("utf-8")
+            closing = f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+            body = body_str + file_part + file_data + closing
+            content_type = f"multipart/form-data; boundary={boundary}"
+
+            parsed = urllib.parse.urlparse(url)
+            conn = http.client.HTTPSConnection(parsed.netloc, timeout=30)
+            conn.request("POST", parsed.path, body=body, headers={"Content-Type": content_type})
+            response = conn.getresponse()
+
+            if response.status == 200:
+                logger.info(f"File '{filename}' sent to Telegram ({target_chat_id})")
+                return True
+            else:
+                resp_body = response.read().decode("utf-8", errors="replace")
+                logger.error(f"Telegram file send failed: HTTP {response.status} — {resp_body}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error sending file to Telegram: {e}", exc_info=True)
+            return False

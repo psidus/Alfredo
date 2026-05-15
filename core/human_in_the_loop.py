@@ -1,39 +1,59 @@
-import threading
 import logging
+import time
+from core.db_manager import DBManager
 
 logger = logging.getLogger(__name__)
 
-# Dictionary to hold pending requests: {chat_id: {"event": Event, "answer": str}}
-_pending_requests = {}
-
 def request_human_input(chat_id: str, question: str) -> str:
-    """Called by the agent tool. Blocks until an answer is provided."""
+    """
+    Called by an agent tool. 
+    1. Records the request in the shared database.
+    2. Sends a notification via Telegram.
+    3. Polls the database until an answer is found.
+    """
     from core.notification_manager import NotificationManager
     
-    event = threading.Event()
-    _pending_requests[chat_id] = {
-        "event": event,
-        "answer": None
-    }
+    # 1. Record the request in DB
+    with DBManager() as db:
+        db.create_hitl_request(chat_id, question)
     
+    # 2. Send notification
     notifier = NotificationManager()
     message = f"⚠️ <b>Agent Question:</b>\n{question}\n\n<i>Reply to this message to resume execution.</i>"
     notifier.send_telegram_notification(message, chat_id=chat_id)
     
-    logger.info(f"Agent blocking for human input from {chat_id}...")
-    event.wait() # Block the agent thread until event is set
+    logger.info(f"Agent blocking for human input (DB-backed) from {chat_id}...")
     
-    answer = _pending_requests[chat_id]["answer"]
-    del _pending_requests[chat_id]
-    return answer
+    # 3. Poll the database for the answer
+    try:
+        while True:
+            # Re-open connection each poll to ensure we see the latest data on disk (SQLite)
+            with DBManager() as db:
+                req = db.get_hitl_request(chat_id)
+                if req and req['status'] == 'replied':
+                    answer = req['answer']
+                    logger.info(f"Received human answer from DB for {chat_id}: {answer}")
+                    db.delete_hitl_request(chat_id)
+                    return answer
+            
+            time.sleep(2) 
+    except KeyboardInterrupt:
+        logger.warning("HITL polling interrupted.")
+        return "SYSTEM_ABORT"
 
 def provide_human_input(chat_id: str, answer: str) -> bool:
-    """Called by the Telegram bot when a user replies."""
-    if chat_id in _pending_requests:
-        _pending_requests[chat_id]["answer"] = answer
-        _pending_requests[chat_id]["event"].set()
-        return True
-    return False
+    """
+    Called by the Telegram bot when a user replies.
+    Updates the database record to unblock the waiting agent.
+    """
+    with DBManager() as db:
+        success = db.set_hitl_answer(chat_id, answer)
+        if success:
+            logger.info(f"Successfully provided human input to DB for {chat_id}.")
+        return success
 
 def has_pending_request(chat_id: str) -> bool:
-    return chat_id in _pending_requests
+    """Checks the database for any pending requests for this chat."""
+    with DBManager() as db:
+        req = db.get_hitl_request(chat_id)
+        return req is not None and req['status'] == 'pending'

@@ -9,3 +9,8 @@ langchain-openai
 langchain-community
 duckduckgo-search>=5.1.0
 requests
+langchain-chroma
+python-docx
+openpyxl
+mss
+Pillow

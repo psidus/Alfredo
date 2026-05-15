@@ -34,6 +34,11 @@ bot.pid
 scratch/
 prd.json
 rapid_prompt.txt
+storage/vector_dbs_test/
+test_*.txt
+test_*.py
+fix_*.py
+verify_*.py
 
 # OS
 .DS_Store

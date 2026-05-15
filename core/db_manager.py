@@ -150,6 +150,25 @@ class DBManager:
                 finished_at TIMESTAMP,
                 FOREIGN KEY (workflow_id) REFERENCES workflows (id) ON DELETE SET NULL
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS vector_databases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                path TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS hitl_requests (
+                chat_id TEXT PRIMARY KEY,
+                question TEXT,
+                answer TEXT,
+                status TEXT DEFAULT 'pending', -- 'pending', 'replied'
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             """
         ]
         try:
@@ -192,6 +211,13 @@ class DBManager:
             except sqlite3.OperationalError:
                 pass
 
+            # Migration to add vector_dbs_json to tasks if upgrading
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN vector_dbs_json TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
         except sqlite3.Error as e:
             print(f"Error creating tables: {e}")
             self.conn.rollback()
@@ -225,7 +251,32 @@ class DBManager:
             except json.JSONDecodeError:
                 data['required_inputs'] = [] 
             del data['required_inputs_json']
+        if 'vector_dbs_json' in data and data['vector_dbs_json']:
+            try:
+                data['vector_dbs'] = json.loads(data['vector_dbs_json'])
+            except json.JSONDecodeError:
+                data['vector_dbs'] = [] 
+            del data['vector_dbs_json']
         return data
+
+    # --- Vector Databases CRUD ---
+    def create_vector_db(self, name: str, path: str, provider: str, model_name: str) -> int:
+        sql = "INSERT INTO vector_databases (name, path, provider, model_name) VALUES (?, ?, ?, ?)"
+        self.cursor.execute(sql, (name, path, provider, model_name))
+        self.conn.commit()
+        return self.cursor.lastrowid
+
+    def read_all_vector_dbs(self) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM vector_databases ORDER BY created_at DESC"
+        self.cursor.execute(sql)
+        rows = self.cursor.fetchall()
+        return [self._to_dict(row) for row in rows]
+
+    def delete_vector_db(self, db_id: int) -> int:
+        sql = "DELETE FROM vector_databases WHERE id = ?"
+        self.cursor.execute(sql, (db_id,))
+        self.conn.commit()
+        return self.cursor.rowcount
 
     # --- Models CRUD ---
     # ARCHITECT'S NOTE: All CRUD methods correctly use parameterized queries (`?`),
@@ -307,13 +358,15 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
+        vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json) VALUES (?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json))
+        vector_dbs_json = json.dumps(vector_dbs)
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json) VALUES (?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -336,17 +389,19 @@ class DBManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
+        vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
+        vector_dbs_json = json.dumps(vector_dbs)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 
@@ -587,3 +642,34 @@ class DBManager:
         self.cursor.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'workflow_runs'")
         self.conn.commit()
         return self.cursor.rowcount
+
+    # --- HITL Requests CRUD ---
+    def create_hitl_request(self, chat_id: str, question: str) -> None:
+        sql = """
+        INSERT INTO hitl_requests (chat_id, question, status, answer, updated_at) 
+        VALUES (?, ?, 'pending', NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(chat_id) DO UPDATE SET 
+            question=excluded.question, 
+            status='pending', 
+            answer=NULL,
+            updated_at=CURRENT_TIMESTAMP
+        """
+        self.cursor.execute(sql, (chat_id, question))
+        self.conn.commit()
+
+    def set_hitl_answer(self, chat_id: str, answer: str) -> bool:
+        sql = "UPDATE hitl_requests SET answer = ?, status = 'replied', updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?"
+        self.cursor.execute(sql, (answer, chat_id))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    def get_hitl_request(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM hitl_requests WHERE chat_id = ?"
+        self.cursor.execute(sql, (chat_id,))
+        row = self.cursor.fetchone()
+        return self._to_dict(row)
+
+    def delete_hitl_request(self, chat_id: str) -> None:
+        sql = "DELETE FROM hitl_requests WHERE chat_id = ?"
+        self.cursor.execute(sql, (chat_id,))
+        self.conn.commit()

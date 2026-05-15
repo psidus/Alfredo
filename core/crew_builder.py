@@ -10,6 +10,9 @@ from core.db_manager import DBManager
 from core.data_manager import DataManager
 import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
+import tools.office_tool as office_tool
+import tools.email_tool as email_tool
+from tools.vector_search_tool import VectorSearchTool
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -36,11 +39,28 @@ RULES:
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
 ALLOWED_TOOLS = {
+    # Workspace (sandboxed)
     "read_file": local_tools.read_file,
     "write_file": local_tools.write_file,
+    # Full PC (read-only)
+    "read_file_anywhere": local_tools.read_file_anywhere,
+    "search_files": local_tools.search_files,
+    # Web & communication
     "search_web": local_tools.search_web,
     "ask_operator": local_tools.ask_operator,
-    "execute_shell_command": terminal_executor.execute_shell_command
+    # Terminal
+    "execute_shell_command": terminal_executor.execute_shell_command,
+    # Office (write = confirmation required)
+    "create_word_document": office_tool.create_word_document,
+    "edit_word_document": office_tool.edit_word_document,
+    "create_excel_document": office_tool.create_excel_document,
+    # Screenshot
+    "take_screenshot": office_tool.take_screenshot,
+    # Email (send = confirmation required)
+    "manage_email": None,  # Sentinel — expanded at task build time (see _build_task)
+    "read_emails": email_tool.read_emails,
+    "search_emails": email_tool.search_emails,
+    "send_email": email_tool.send_email,
 }
 
 def _instantiate_llm(model_id):
@@ -109,17 +129,28 @@ def _map_tools(tool_names):
     """
     Safely converts a list of tool names into a list of callable Python functions
     using a strict whitelist (ALLOWED_TOOLS).
+    The 'manage_email' key is a sentinel that expands into all three email tools.
     """
     if not tool_names:
         return []
 
     instantiated_tools = []
     for tool_name in tool_names:
-        if tool_name in ALLOWED_TOOLS:
-            instantiated_tools.append(ALLOWED_TOOLS[tool_name])
+        # 'manage_email' is a UI label — expand to the actual email tools
+        if tool_name == "manage_email":
+            instantiated_tools.extend([
+                email_tool.read_emails,
+                email_tool.search_emails,
+                email_tool.send_email,
+            ])
+            logging.info("Expanded 'manage_email' sentinel into 3 email tools.")
+        elif tool_name in ALLOWED_TOOLS:
+            tool_fn = ALLOWED_TOOLS[tool_name]
+            if tool_fn is not None:  # Skip None sentinels
+                instantiated_tools.append(tool_fn)
         else:
             logging.warning(f"Attempted to use unknown or disallowed tool: '{tool_name}'. Skipping.")
-    
+
     return instantiated_tools
 
 def _build_agent(agent_id):
@@ -195,7 +226,30 @@ def _build_task(task_id, agents_cache):
     if is_local_model:
         task_tools = None  # No tools for local models
     else:
-        task_tools = _map_tools(task_record.get('tools', [])) or None
+        # Map standard tools
+        task_tools = _map_tools(task_record.get('tools', [])) or []
+        
+        # Handle custom dynamic tools like vector_search
+        if 'vector_search' in task_record.get('tools', []):
+            vector_dbs = task_record.get('vector_dbs', [])
+            for db_id in vector_dbs:
+                try:
+                    db_id_int = int(db_id)
+                    vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = ?", (db_id_int,)).fetchone()
+                    if vdb_record:
+                        tool_instance = VectorSearchTool(
+                            name=f"search_db_{vdb_record['name']}",
+                            description=f"Search the vector database '{vdb_record['name']}' for context.",
+                            db_path=vdb_record['path'],
+                            provider=vdb_record['provider'],
+                            model_name=vdb_record['model_name']
+                        )
+                        task_tools.append(tool_instance)
+                except (ValueError, TypeError):
+                    pass
+        
+        if not task_tools:
+            task_tools = None
 
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE

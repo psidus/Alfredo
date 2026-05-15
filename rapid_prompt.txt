@@ -1,4 +1,0 @@
-.\venv\Scripts\activate
-python -m agents.crew_manager
-
-python -m streamlit run ui/dashboard.py
