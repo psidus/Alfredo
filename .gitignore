@@ -23,8 +23,11 @@ coverage.xml
 !.env.example
 
 # Database
-db/*.sqlite
-db/*.db
+*.sqlite
+*.sqlite3
+*.db
+db/
+storage/vector_dbs/
 
 # Logs and Process IDs
 *.log

@@ -120,6 +120,7 @@ class DBManager:
                 agent_id INTEGER,
                 tools_json TEXT, -- List of tool names as JSON
                 required_inputs_json TEXT, -- List of {key, prompt} objects as JSON
+                agent_specialization TEXT, -- Optional task-level agent specialization
                 FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL
             );
             """,
@@ -214,6 +215,30 @@ class DBManager:
             # Migration to add vector_dbs_json to tasks if upgrading
             try:
                 self.cursor.execute("ALTER TABLE tasks ADD COLUMN vector_dbs_json TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add current_task_idx, task_outputs, and inputs to workflow_runs
+            try:
+                self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN current_task_idx INTEGER DEFAULT 0;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN task_outputs TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN inputs TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add agent_specialization to tasks if upgrading from older version
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN agent_specialization TEXT;")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -358,15 +383,15 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
         vector_dbs_json = json.dumps(vector_dbs)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json) VALUES (?, ?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json))
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -389,7 +414,7 @@ class DBManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
@@ -398,10 +423,10 @@ class DBManager:
         vector_dbs_json = json.dumps(vector_dbs)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?, agent_specialization = ?
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 
@@ -600,19 +625,29 @@ class DBManager:
         return [self._to_dict(row) for row in rows]
 
     # --- Workflow Runs CRUD ---
-    def create_run(self, workflow_id: int, status: str = 'running') -> int:
-        sql = "INSERT INTO workflow_runs (workflow_id, status) VALUES (?, ?)"
-        self.cursor.execute(sql, (workflow_id, status))
+    def create_run(self, workflow_id: int, status: str = 'running', inputs: dict = None) -> int:
+        inputs_json = json.dumps(inputs) if inputs else None
+        sql = "INSERT INTO workflow_runs (workflow_id, status, current_task_idx, task_outputs, inputs) VALUES (?, ?, 0, '{}', ?)"
+        self.cursor.execute(sql, (workflow_id, status, inputs_json))
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def update_run(self, run_id: int, status: str, result: str = "") -> None:
-        sql = """
-        UPDATE workflow_runs 
-        SET status = ?, result = ?, finished_at = CURRENT_TIMESTAMP 
-        WHERE id = ?
-        """
-        self.cursor.execute(sql, (status, result, run_id))
+    def update_run(self, run_id: int, status: str, result: str = "", current_task_idx: int = None, task_outputs: dict = None) -> None:
+        if current_task_idx is not None and task_outputs is not None:
+            task_outputs_json = json.dumps(task_outputs)
+            sql = """
+            UPDATE workflow_runs 
+            SET status = ?, result = ?, current_task_idx = ?, task_outputs = ?, finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)
+            WHERE id = ?
+            """
+            self.cursor.execute(sql, (status, result, current_task_idx, task_outputs_json, status, run_id))
+        else:
+            sql = """
+            UPDATE workflow_runs 
+            SET status = ?, result = ?, finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END) 
+            WHERE id = ?
+            """
+            self.cursor.execute(sql, (status, result, status, run_id))
         self.conn.commit()
 
     def read_run(self, run_id: int) -> Optional[Dict[str, Any]]:

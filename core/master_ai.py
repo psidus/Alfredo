@@ -113,6 +113,18 @@ class MasterAI:
         self.data_manager = DataManager()
         self.llm_client = None
         
+        # Load from .env if model_id is not explicitly provided
+        if model_id is None:
+            try:
+                from dotenv import dotenv_values, find_dotenv
+                env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+                current_env = dotenv_values(env_path)
+                env_model_id = current_env.get("MASTER_AI_MODEL_ID")
+                if env_model_id:
+                    model_id = int(env_model_id)
+            except Exception as e:
+                logger.warning(f"Error loading MASTER_AI_MODEL_ID from environment: {e}")
+        
         # Default Robust Configuration (Simple vs Complex)
         # Source: https://ai.google.dev/gemini-api/docs/models (May 2026)
         # gemini-2.0-flash and gemini-2.0-flash-lite are DEPRECATED — use 2.5 series.

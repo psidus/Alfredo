@@ -97,6 +97,9 @@ def get_agent_avatar_url(agent):
 
 def render_knowledge_base():
     """Renders Tab 1: Vector Knowledge Base."""
+    import importlib
+    import core.vector_manager
+    importlib.reload(core.vector_manager)
     from core.vector_manager import VectorManager
     import tempfile
     
@@ -109,24 +112,238 @@ def render_knowledge_base():
     with col_list:
         st.subheader("Existing Databases")
         vector_dbs = db.read_all_vector_dbs()
+        vm = VectorManager()
+        storage_dir = vm.storage_dir  # default: storage/vector_dbs
+
         if not vector_dbs:
             st.info("No databases created yet.")
         else:
             for vdb in vector_dbs:
+                folder_exists = os.path.isdir(vdb['path'])
                 with st.container(border=True):
-                    st.markdown(f"**{vdb['name']}**")
+                    if not folder_exists:
+                        st.markdown(f"**{vdb['name']}** ⚠️")
+                        st.caption("Missing on disk — folder was deleted externally.")
+                    else:
+                        # Count structured CSVs if present
+                        structured_dir = os.path.join(vdb['path'], "structured")
+                        csv_count = len([f for f in os.listdir(structured_dir) if f.endswith('.csv')]) if os.path.isdir(structured_dir) else 0
+                        label = f"**{vdb['name']}**"
+                        if csv_count:
+                            label += f" 📊 ({csv_count} table{'s' if csv_count > 1 else ''})"
+                        st.markdown(label)
                     st.caption(f"Provider: {vdb['provider']} | Model: {vdb['model_name']}")
                     if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
-                        vm = VectorManager()
-                        vm.delete_database(vdb['name'])
+                        if folder_exists:
+                            vm.delete_database(vdb['name'])
                         db.delete_vector_db(vdb['id'])
-                        st.toast(f"Database {vdb['name']} deleted", icon="🗑️")
+                        st.toast(f"Database {vdb['name']} removed", icon="🗑️")
                         st.rerun()
-                    
-                    if st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
+
+                    if folder_exists and st.button("Manage Files", key=f"manage_vdb_{vdb['id']}", use_container_width=True):
+                        st.session_state.manage_vdb = vdb
+                        if "query_vdb" in st.session_state:
+                            del st.session_state.query_vdb
+                        st.rerun()
+
+                    if folder_exists and st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
                         st.session_state.query_vdb = vdb
+                        if "manage_vdb" in st.session_state:
+                            del st.session_state.manage_vdb
+                        st.rerun()
+
+        # --- Auto-Discovery: Detect manually added DB folders not in metadata ---
+        registered_names = {vdb['name'] for vdb in vector_dbs}
+        discovered = []
+        if os.path.isdir(storage_dir):
+            for folder_name in sorted(os.listdir(storage_dir)):
+                folder_path = os.path.join(storage_dir, folder_name)
+                if os.path.isdir(folder_path) and folder_name not in registered_names:
+                    # Check it looks like a real DB (has chroma.sqlite3 or structured/ subfolder)
+                    has_chroma = os.path.exists(os.path.join(folder_path, "chroma.sqlite3"))
+                    has_structured = os.path.isdir(os.path.join(folder_path, "structured"))
+                    if has_chroma or has_structured:
+                        discovered.append((folder_name, folder_path))
+
+        if discovered:
+            st.divider()
+            st.markdown("**🔍 Discovered Databases** — *Found on disk but not registered*")
+            for disc_name, disc_path in discovered:
+                with st.container(border=True):
+                    st.markdown(f"📁 `{disc_name}`")
+                    st.caption(disc_path)
+
+                    # Quick-import form
+                    from dotenv import dotenv_values, find_dotenv
+                    env_path_disc = find_dotenv() or os.path.join(os.getcwd(), '.env')
+                    current_env_disc = dotenv_values(env_path_disc)
+
+                    imp_models = {
+                        "Local (Ollama) / nomic-embed-text": {"provider": "ollama", "model_name": "nomic-embed-text"},
+                    }
+                    if current_env_disc.get("OPENAI_API_KEY"):
+                        imp_models["OpenAI / text-embedding-3-small"] = {"provider": "openai", "model_name": "text-embedding-3-small"}
+                    if current_env_disc.get("GEMINI_API_KEY") or current_env_disc.get("GOOGLE_API_KEY"):
+                        imp_models["Gemini / gemini-embedding-2"] = {"provider": "gemini", "model_name": "models/gemini-embedding-2"}
+                        imp_models["Gemini / gemini-embedding-001"] = {"provider": "gemini", "model_name": "models/gemini-embedding-001"}
+
+                    sel = st.selectbox(
+                        "Embedding model used to create this DB",
+                        options=list(imp_models.keys()),
+                        key=f"disc_model_{disc_name}"
+                    )
+                    if st.button("Import", key=f"disc_import_{disc_name}", use_container_width=True):
+                        chosen = imp_models[sel]
+                        db.create_vector_db(
+                            name=disc_name,
+                            path=disc_path,
+                            provider=chosen["provider"],
+                            model_name=chosen["model_name"]
+                        )
+                        st.toast(f"Database '{disc_name}' imported successfully!", icon="✅")
+                        st.rerun()
 
     with col_main:
+        if "manage_vdb" in st.session_state:
+            vdb = st.session_state.manage_vdb
+            st.subheader(f"📂 Manage Files: {vdb['name']}")
+            st.caption(f"Path: {vdb['path']} | Provider: {vdb['provider']} | Model: {vdb['model_name']}")
+            
+            vm = VectorManager()
+            files_dict = vm.get_database_files(vdb['path'], vdb['provider'], vdb['model_name'])
+            
+            col_close, _ = st.columns([1, 4])
+            with col_close:
+                if st.button("Close Manager", key="close_manage_vdb", use_container_width=True):
+                    del st.session_state.manage_vdb
+                    st.rerun()
+                
+            # File list container
+            with st.container(border=True):
+                # 1. Tabular Files
+                st.markdown("### 📊 Structured Tables (Excel/CSV)")
+                if not files_dict['structured']:
+                    st.info("No structured files inside this database.")
+                else:
+                    # Scrollable container if there are multiple tables
+                    container_ctx = st.container(height=200) if len(files_dict['structured']) > 4 else st.container()
+                    with container_ctx:
+                        for idx, s_file in enumerate(files_dict['structured']):
+                            col_file_name, col_file_action = st.columns([5, 1.2])
+                            with col_file_name:
+                                st.write(f"📊 `{s_file}`")
+                            with col_file_action:
+                                if st.button("🗑️ Remove", key=f"rm_struct_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
+                                    success = vm.remove_file_from_database(
+                                        db_path=vdb['path'],
+                                        provider=vdb['provider'],
+                                        model_name=vdb['model_name'],
+                                        file_type='structured',
+                                        file_identifier=s_file
+                                    )
+                                    if success:
+                                        st.toast(f"Removed structured table '{s_file}'", icon="✅")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Could not remove '{s_file}'")
+                
+                st.divider()
+                
+                # 2. Vectorized Files
+                st.markdown("### 📖 Vectorized Documents (PDF/TXT/DOCX)")
+                
+                # Search input for vectorized files
+                search_vect = st.text_input(
+                    "🔍 Search vectorized documents by name",
+                    placeholder="Type to filter documents...",
+                    key=f"search_vect_input_{vdb['id']}"
+                )
+                
+                filtered_vectorized = files_dict['vectorized']
+                if search_vect:
+                    filtered_vectorized = [
+                        f for f in files_dict['vectorized']
+                        if search_vect.lower() in os.path.basename(f).lower()
+                    ]
+                
+                if not filtered_vectorized:
+                    if search_vect:
+                        st.info("No documents match your search query.")
+                    else:
+                        st.info("No vectorized files inside this database.")
+                else:
+                    # Constrain height to 300px to enable scrollbar
+                    with st.container(height=300):
+                        for idx, v_file in enumerate(filtered_vectorized):
+                            col_file_name, col_file_action = st.columns([5, 1.2])
+                            v_base = os.path.basename(v_file)
+                            with col_file_name:
+                                st.write(f"📄 `{v_base}`")
+                                st.caption(v_file)
+                            with col_file_action:
+                                if st.button("🗑️ Remove", key=f"rm_vect_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
+                                    success = vm.remove_file_from_database(
+                                        db_path=vdb['path'],
+                                        provider=vdb['provider'],
+                                        model_name=vdb['model_name'],
+                                        file_type='vectorized',
+                                        file_identifier=v_file
+                                    )
+                                    if success:
+                                        st.toast(f"Removed '{v_base}' from vector store", icon="✅")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Could not remove '{v_base}'")
+                                    
+            # Form to add files to this database
+            st.markdown("### ➕ Add Files to this Database")
+            with st.form("add_files_to_db_form"):
+                new_files = st.file_uploader(
+                    "Select documents/spreadsheets to add",
+                    accept_multiple_files=True,
+                    type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls'],
+                    key="manage_upload_files"
+                )
+                
+                col_add_btn, _ = st.columns([1, 4])
+                with col_add_btn:
+                    submitted = st.form_submit_button("Add Files", type="primary")
+                    
+                if submitted:
+                    if not new_files:
+                        st.warning("Please upload at least one file.")
+                    else:
+                        with st.spinner("Processing files..."):
+                            temp_paths = []
+                            for f in new_files:
+                                suffix = os.path.splitext(f.name)[1]
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_f:
+                                    temp_f.write(f.read())
+                                    temp_paths.append(temp_f.name)
+                                    
+                            try:
+                                res = vm.add_files_to_database(
+                                    db_path=vdb['path'],
+                                    provider=vdb['provider'],
+                                    model_name=vdb['model_name'],
+                                    file_paths=temp_paths
+                                )
+                                for p in temp_paths:
+                                    try:
+                                        os.remove(p)
+                                    except Exception:
+                                        pass
+                                        
+                                if res.get('status') == 'success':
+                                    st.success(res.get('message'))
+                                    st.toast("Files added successfully!", icon="✅")
+                                    st.rerun()
+                                else:
+                                    st.error(res.get('message'))
+                            except Exception as add_err:
+                                st.error(f"Error adding files: {add_err}")
+            st.divider()
+
         if "query_vdb" in st.session_state:
             vdb = st.session_state.query_vdb
             st.subheader(f"Query: {vdb['name']}")
@@ -168,9 +385,10 @@ def render_knowledge_base():
             
             # File Uploader supports drag & drop inherently
             uploaded_files = st.file_uploader(
-                "Drag & Drop Documents (PDF, TXT, DOCX)", 
+                "Drag & Drop Documents (PDF, TXT, DOCX, CSV, Excel)",
                 accept_multiple_files=True,
-                type=['pdf', 'txt', 'md', 'csv', 'docx']
+                type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls'],
+                help="📄 PDF/TXT/DOCX/MD → vectorized for semantic search.  📊 CSV/XLSX/XLS → cleaned and saved as structured tables, queryable by agents via the tabular_query tool."
             )
             
             # Model Selection
@@ -301,8 +519,8 @@ def render_api_vault():
         "GEMINI_API_KEY"
     ]
     
-    # Combine suggested keys and any other keys already in .env
-    all_keys = sorted(list(set(suggested_keys + list(current_env.keys()))))
+    # Combine suggested keys and any other keys already in .env, excluding Telegram configs
+    all_keys = sorted([k for k in set(suggested_keys + list(current_env.keys())) if "TELEGRAM" not in k.upper()])
     
     st.subheader("API Keys")
     st.markdown("Monitor and manage API keys saved securely in your `.env` file.")
@@ -330,9 +548,12 @@ def render_api_vault():
             if final_key_name and key_value:
                 # Sanitize key name (uppercase, no spaces)
                 final_key_name = final_key_name.upper().replace(' ', '_')
-                set_key(env_path, final_key_name, key_value.strip())
-                st.success(f"Key '{final_key_name}' saved securely!")
-                st.rerun()
+                if "TELEGRAM" in final_key_name:
+                    st.error("Telegram bot tokens must be managed in the Telegram Bot Config at the top right, not here.")
+                else:
+                    set_key(env_path, final_key_name, key_value.strip())
+                    st.success(f"Key '{final_key_name}' saved securely!")
+                    st.rerun()
             else:
                 st.error("Please provide both a valid Key Name and a Value.")
 
@@ -363,7 +584,7 @@ def render_api_vault():
         col1, col2, col3 = st.columns(3)
         with col1:
             # --- NEW: Dropdown of keys found in .env ---
-            env_options = sorted([k for k, v in current_env.items() if v and str(v).strip()])
+            env_options = sorted([k for k, v in current_env.items() if v and str(v).strip() and "TELEGRAM" not in k.upper()])
             if not env_options:
                 env_options = ["(No keys found in .env)"]
             env_var_name = st.selectbox("Link to API Key", options=env_options, help="Select the variable from your .env that contains the API key for this model.")
@@ -434,6 +655,48 @@ def render_agent_caserma():
         return
 
     model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
+    
+    # --- Main Agent (Master AI) Configuration Row ---
+    st.markdown("### 🧠 Main Agent (Master AI) Configuration")
+    
+    # Read current Master AI model selection from .env
+    from dotenv import set_key
+    env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+    current_env = dotenv_values(env_path)
+    current_master_model_id = current_env.get("MASTER_AI_MODEL_ID", "")
+    
+    # Find matching model index
+    model_names = list(model_options.keys())
+    model_ids = list(model_options.values())
+    
+    default_master_index = 0
+    try:
+        if current_master_model_id:
+            master_model_id_int = int(current_master_model_id)
+            if master_model_id_int in model_ids:
+                default_master_index = model_ids.index(master_model_id_int)
+    except ValueError:
+        pass
+        
+    col_master_model, col_master_save = st.columns([4, 1])
+    with col_master_model:
+        selected_master_model_str = st.selectbox(
+            "Select Model for Master AI (System Orchestrator)", 
+            options=model_names, 
+            index=default_master_index,
+            key="master_ai_model_select",
+            help="Select the model that Master AI will use for routing intents and refining agent output."
+        )
+    with col_master_save:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
+            chosen_model_id = model_options[selected_master_model_str]
+            set_key(env_path, "MASTER_AI_MODEL_ID", str(chosen_model_id))
+            st.toast("Master AI Model saved successfully!", icon="✅")
+            st.rerun()
+            
+    st.divider()
     
     agents = db.read_all_agents()
     
@@ -529,7 +792,24 @@ def render_agent_caserma():
                             st.markdown(f"<p style='text-align: center; color: gray; font-size: 14px; margin-top: 0px;'>{agent['role']}</p>", unsafe_allow_html=True)
                             
                             with st.expander("Details"):
-                                st.markdown(f"**Backstory:** {agent['backstory']}")
+                                backstory_content = agent['backstory'] or ""
+                                goal_val = ""
+                                backstory_val = backstory_content
+                                
+                                if "Goal: " in backstory_content and "\n\nBackstory: " in backstory_content:
+                                    try:
+                                        parts = backstory_content.split("\n\nBackstory: ")
+                                        goal_val = parts[0].replace("Goal: ", "").strip()
+                                        backstory_val = parts[1].strip()
+                                    except Exception:
+                                        pass
+                                
+                                if goal_val:
+                                    st.markdown(f"**Goal:** {goal_val}")
+                                    st.markdown(f"**Backstory:** {backstory_val}")
+                                else:
+                                    st.markdown(f"**Backstory:** {backstory_content}")
+                                    
                                 model = next((m for m in models if m['id'] == agent['model_id']), None)
                                 if model:
                                     st.markdown(f"**Model:** {model['provider']} / {model['model_name']}")
@@ -596,6 +876,7 @@ def render_task_builder():
         default_desc = editing_task['description'] if editing_task else ""
         default_output = editing_task['expected_output'] if editing_task else ""
         default_tools = editing_task.get('tools', []) if editing_task else []
+        default_specialization = editing_task.get('agent_specialization', '') or '' if editing_task else ''
         
         default_agent_id = editing_task['agent_id'] if editing_task else None
         agent_names = list(agent_options.keys())
@@ -612,17 +893,30 @@ def render_task_builder():
         current_sel_name = st.session_state.task_agent_sel if "task_agent_sel" in st.session_state else agent_names[default_index]
         current_agent = next((a for a in agents if f"{a['name']} ({a['role']})" == current_sel_name), None)
         
-        col_av, col_sel = st.columns([1.5, 8.5])
+        col_av, col_sel = st.columns([1.8, 8.2])
         with col_av:
             if current_agent:
-                # Alignment for larger avatar
-                st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
-                # Small spacer to push it slightly to the right
-                _, avatar_col = st.columns([1, 5])
-                with avatar_col:
-                    st.image(get_agent_avatar_url(current_agent), width=80)
+                # Alignment for larger avatar, pushed towards the right
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                _, img_col = st.columns([1, 4])
+                with img_col:
+                    st.image(get_agent_avatar_url(current_agent), width=100)
         with col_sel:
             selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index, key="task_agent_sel")
+            
+        # --- Spacing ---
+        st.markdown("<div style='margin-top: 12px;'></div>", unsafe_allow_html=True)
+            
+        # --- Agent Specialization (Optional) ---
+        agent_specialization = st.text_input(
+            "Agent Specialization (Optional)",
+            value=default_specialization,
+            placeholder="e.g. chemical thermodynamics and biofuel combustion properties",
+            help="Dynamically narrows the assigned agent's role and backstory for this specific task, without creating a new agent.",
+            key="task_specialization_input"
+        )
+        if agent_specialization:
+            st.caption(f"🔍 The agent will act as: **{selected_agent_name.split(' (')[0]} specialized in {agent_specialization}**")
         
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools, key="task_tools_sel")
@@ -773,12 +1067,12 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     st.rerun()
@@ -831,6 +1125,9 @@ def render_task_builder():
                                 st.code(task['expected_output'], language=None)
                                 if task.get('tools'):
                                     st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
+                                
+                                if task.get('agent_specialization'):
+                                    st.markdown(f"**🎯 Specialization:** *{task['agent_specialization']}*")
                                 
                                 if task.get('vector_dbs') and 'vector_search' in task.get('tools', []):
                                     # Fetch DB names for display
@@ -1105,11 +1402,12 @@ def render_workflow_assembler():
                         st.write("⚡ **Executing Workflow...**")
                         # Pass extracted params if available, otherwise raw prompt
                         inputs = routing.get('extracted_params', {})
-                        # Create a run record
-                        run_id = db.create_run(wf_id, status='running')
+                        # Create a run record with inputs
+                        run_id = db.create_run(wf_id, status='running', inputs=inputs)
                         
                         try:
-                            result = crew.kickoff(inputs=inputs)
+                            from core.crew_builder import execute_run_with_resume
+                            result = execute_run_with_resume(run_id, status_callback=st.write)
                             
                             # Update run record
                             db.update_run(run_id, status='completed', result=str(result))
@@ -1185,6 +1483,20 @@ def render_history_monitoring():
                     st.write("No output yet.")
             
             with col_actions:
+                if status in ['failed', 'running']:
+                    if st.button("🔄", key=f"res_run_{run['id']}", help="Resume this run"):
+                        with st.spinner("Resuming execution..."):
+                            try:
+                                from core.crew_builder import execute_run_with_resume
+                                result = execute_run_with_resume(run['id'])
+                                db.update_run(run['id'], status='completed', result=result)
+                                st.toast("Run resumed and completed successfully!", icon="✅")
+                                st.rerun()
+                            except Exception as e:
+                                db.update_run(run['id'], status='failed', result=str(e))
+                                st.toast(f"Failed to resume run: {e}", icon="❌")
+                                st.rerun()
+                
                 if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete this run"):
                     db.delete_run(run['id'])
                     st.toast(f"Run {run['id']} deleted")
@@ -1193,11 +1505,19 @@ def render_history_monitoring():
 
 def main():
     """Main function to run the Streamlit dashboard."""
-    st.set_page_config(page_title="AI Workflow Configurator", layout="wide")
+    import os
+    from PIL import Image
+    logo_path = "logo.png"
+    page_icon = None
+    if os.path.exists(logo_path):
+        try:
+            page_icon = Image.open(logo_path)
+        except Exception:
+            pass
+    st.set_page_config(page_title="AI Workflow Configurator", layout="wide", page_icon=page_icon or "🤖")
     # --- Bot Process Management ---
     import subprocess
     import sys
-    import os
     
     bot_pid_file = "bot.pid"
     

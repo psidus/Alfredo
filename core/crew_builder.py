@@ -13,6 +13,7 @@ import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
 import tools.email_tool as email_tool
 from tools.vector_search_tool import VectorSearchTool
+from tools.tabular_query_tool import TabularQueryTool
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -61,6 +62,10 @@ ALLOWED_TOOLS = {
     "read_emails": email_tool.read_emails,
     "search_emails": email_tool.search_emails,
     "send_email": email_tool.send_email,
+    # Vector search — expanded at task build time into VectorSearchTool instances
+    "vector_search": None,  # Sentinel
+    # Tabular query — auto-injected at task build time when structured CSVs exist
+    "tabular_query": None,  # Sentinel
 }
 
 def _instantiate_llm(model_id):
@@ -153,11 +158,13 @@ def _map_tools(tool_names):
 
     return instantiated_tools
 
-def _build_agent(agent_id):
+def _build_agent(agent_id, specialization=None):
     """
     Constructs a CrewAI Agent object from database records.
     Automatically disables tools for local models (Ollama/phi3, etc.)
     that do not support the function-calling protocol.
+    If a 'specialization' string is provided, the agent's role and backstory
+    are dynamically narrowed for that specific task without altering the DB record.
     """
     agent_record = db.read_agent(agent_id)
     if not agent_record:
@@ -181,23 +188,44 @@ def _build_agent(agent_id):
     else:
         agent_tools = _map_tools(agent_record.get('tools', []))
 
+    # --- DYNAMIC SPECIALIZATION INJECTION ---
+    # If the calling task defines a specialization, we narrow the agent's persona
+    # at runtime without touching the database record. This lets a generic agent
+    # (e.g. "Web Researcher") act as a domain expert (e.g. "Web Researcher
+    # specialized in chemical thermodynamics") for one specific task.
+    base_role = agent_record['role']
+    base_backstory = agent_record['backstory']
+
+    if specialization:
+        effective_role = f"{base_role} specialized in {specialization}"
+        effective_backstory = (
+            base_backstory +
+            f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
+            f"focused on **{specialization}**. Apply all your base skills strictly within "
+            f"this specialized domain. Do not stray outside it."
+        )
+        logging.info(f"Agent '{agent_record['name']}' specialized as: '{effective_role}'")
+    else:
+        effective_role = base_role
+        effective_backstory = base_backstory
+
     # --- BACKSTORY INJECTION: Enforce conciseness at identity level ---
     conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
                          "You never ramble. You output structured bullet points, not essays. "
                          "Every sentence must carry unique, actionable information.")
-    enhanced_backstory = agent_record['backstory'] + conciseness_trait
+    enhanced_backstory = effective_backstory + conciseness_trait
 
     agent = Agent(
-        role=agent_record['role'],
+        role=effective_role,
         backstory=enhanced_backstory,
-        goal=f"Act as {agent_record['name']} with the role: {agent_record['role']}",
+        goal=f"Act as {agent_record['name']} with the role: {effective_role}",
         llm=llm_instance,
         tools=agent_tools,
         verbose=True,
         allow_delegation=False,
         max_iter=5  # Prevent infinite reasoning loops
     )
-    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model})")
+    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model}, specialization={specialization!r})")
     return agent
 
 def _build_task(task_id, agents_cache):
@@ -210,10 +238,18 @@ def _build_task(task_id, agents_cache):
         raise ValueError(f"Task ID {task_id} not found in database.")
 
     agent_id = task_record['agent_id']
-    if agent_id not in agents_cache:
-        agents_cache[agent_id] = _build_agent(agent_id)
-    
-    agent_instance = agents_cache[agent_id]
+
+    # --- SPECIALIZATION CACHE BYPASS ---
+    # If this task defines an agent_specialization, we must build a fresh, task-specific
+    # agent clone rather than pulling from the shared cache. This prevents the specialized
+    # role/backstory from leaking into other tasks that use the same base agent.
+    specialization = task_record.get('agent_specialization')
+    if specialization:
+        agent_instance = _build_agent(agent_id, specialization=specialization)
+    else:
+        if agent_id not in agents_cache:
+            agents_cache[agent_id] = _build_agent(agent_id)
+        agent_instance = agents_cache[agent_id]
     
     # Check if the agent's model is local — if so, strip task-level tools too
     agent_record = db.read_agent(agent_id) if agent_id else None
@@ -245,6 +281,29 @@ def _build_task(task_id, agents_cache):
                             model_name=vdb_record['model_name']
                         )
                         task_tools.append(tool_instance)
+
+                        # --- Auto-inject TabularQueryTool if structured CSVs exist ---
+                        structured_dir = os.path.join(vdb_record['path'], "structured")
+                        if os.path.isdir(structured_dir):
+                            csv_files = [f for f in os.listdir(structured_dir) if f.endswith('.csv')]
+                            if csv_files:
+                                table_list = ', '.join(csv_files)
+                                tabular_tool = TabularQueryTool(
+                                    name=f"query_tables_{vdb_record['name']}",
+                                    description=(
+                                        f"Query structured tabular data (CSV/Excel) from database '{vdb_record['name']}'. "
+                                        f"Available tables: {table_list}. "
+                                        "Use action='list' to see all tables, 'info' for schema, "
+                                        "'head' for a preview, 'summary' for statistics, "
+                                        "or 'query' with a pandas filter expression to find specific rows."
+                                    ),
+                                    structured_dir=structured_dir
+                                )
+                                task_tools.append(tabular_tool)
+                                logging.info(
+                                    f"Auto-injected TabularQueryTool for DB '{vdb_record['name']}' "
+                                    f"with {len(csv_files)} CSV file(s)."
+                                )
                 except (ValueError, TypeError):
                     pass
         
@@ -321,6 +380,111 @@ def build_crew(workflow_id):
         logging.error(f"Error building crew for workflow ID {workflow_id}: {e}", exc_info=True)
         # Re-raise or return a structured error, depending on how the calling function handles it
         raise RuntimeError(f"Failed to build crew for workflow {workflow_id}: {e}") from e
+
+def execute_run_with_resume(run_id: int, status_callback=None) -> str:
+    """
+    Executes a workflow run task-by-task. Saves progress after each task.
+    If the run is already partially completed, it resumes from the next uncompleted task.
+    """
+    # 1. Read run record
+    run = db.read_run(run_id)
+    if not run:
+        raise ValueError(f"Run ID {run_id} not found.")
+        
+    workflow_id = run['workflow_id']
+    workflow_record = db.read_workflow(workflow_id)
+    if not workflow_record:
+        raise ValueError(f"Workflow ID {workflow_id} not found.")
+        
+    task_ids = workflow_record.get('task_ids')
+    if task_ids is None:
+        if 'task_ids_json' in workflow_record:
+            task_ids = json.loads(workflow_record['task_ids_json'])
+        else:
+            task_ids = []
+            
+    if not task_ids:
+        raise ValueError(f"Workflow ID {workflow_id} has no tasks defined.")
+        
+    # Parse inputs and task_outputs
+    inputs = {}
+    if run.get('inputs'):
+        try:
+            inputs = json.loads(run['inputs'])
+        except Exception:
+            inputs = {}
+            
+    task_outputs = {}
+    if run.get('task_outputs'):
+        try:
+            task_outputs = json.loads(run['task_outputs'])
+        except Exception:
+            task_outputs = {}
+            
+    start_idx = run.get('current_task_idx', 0)
+    if start_idx >= len(task_ids):
+        # Already completed
+        return run.get('result', '')
+        
+    # Mark run as running
+    db.update_run(run_id, status='running', current_task_idx=start_idx, task_outputs=task_outputs)
+    
+    agents_cache = {}
+    last_output = ""
+    if start_idx > 0:
+        # Re-establish last_output from previously completed task
+        prev_task_id = task_ids[start_idx - 1]
+        last_output = task_outputs.get(str(prev_task_id), "")
+        
+    for i in range(start_idx, len(task_ids)):
+        task_id = task_ids[i]
+        
+        if status_callback:
+            try:
+                status_callback(f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})...")
+            except Exception:
+                pass
+            
+        # Build task object (and agent)
+        task_obj = _build_task(task_id, agents_cache)
+        
+        # Inject inputs into task description
+        original_desc = task_obj.description
+        
+        # Format task description with current inputs and previous result
+        for k, v in inputs.items():
+            original_desc = original_desc.replace(f"{{{k}}}", str(v))
+        original_desc = original_desc.replace("{user_input}", inputs.get('user_input', ''))
+        original_desc = original_desc.replace("{previous_result}", last_output)
+        original_desc = original_desc.replace("{context}", last_output)
+        original_desc = original_desc.replace("{flexible_input}", inputs.get('user_input', last_output))
+        
+        # If there is a last_output from a previous step, append it to the task description explicitly
+        if last_output:
+            original_desc += f"\n\n[CONTEXT FROM PREVIOUS STEP]:\n{last_output}"
+            
+        task_obj.description = original_desc
+        
+        # Create a single task Crew and execute it
+        single_task_crew = Crew(
+            agents=[task_obj.agent],
+            tasks=[task_obj],
+            verbose=True,
+            process='sequential'
+        )
+        
+        # Kick off!
+        result = single_task_crew.kickoff()
+        last_output = str(result)
+        
+        # Save output
+        task_outputs[str(task_id)] = last_output
+        
+        # Save progress checkpoint to database
+        db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
+        
+    # Final output
+    return last_output
 
 def build_dynamic_crew(plan: dict, default_model_id=None):
     """

@@ -281,21 +281,23 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Create a run record if it's a predefined workflow
     run_id = None
     if workflow_id:
-        run_id = db.create_run(workflow_id, status='running')
+        run_id = db.create_run(workflow_id, status='running', inputs=execution_context)
 
     try:
-        from core.crew_builder import build_crew, build_dynamic_crew
+        from core.crew_builder import build_crew, build_dynamic_crew, execute_run_with_resume
         
         # Build the CrewAI crew
+        crew = None
         if final_plan:
             logger.info(f"User {user_id}: Using Dynamic Crew Builder for execution.")
             crew = await asyncio.to_thread(build_dynamic_crew, final_plan)
         else:
             logger.info(f"User {user_id}: Using Standard Crew Builder for Workflow ID {workflow_id}.")
-            crew = await asyncio.to_thread(build_crew, workflow_id)
+            # We don't build the entire crew beforehand if we execute step-by-step; we will use execute_run_with_resume directly.
+            pass
             
-        if not crew:
-            raise ValueError("Failed to build crew.")
+        if final_plan and not crew:
+            raise ValueError("Failed to build dynamic crew.")
 
         # Update message to show execution started
         await status_msg.edit_text(
@@ -317,8 +319,12 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
             # to prevent blocking the Telegram bot's event loop.
-            logger.info(f"User {user_id}: Kicking off CrewAI with context: {execution_context}")
-            final_result = await asyncio.to_thread(crew.kickoff, inputs=execution_context)
+            if final_plan:
+                logger.info(f"User {user_id}: Kicking off CrewAI with context: {execution_context}")
+                final_result = await asyncio.to_thread(crew.kickoff, inputs=execution_context)
+            else:
+                logger.info(f"User {user_id}: Kicking off CrewAI with resume tracking for Run ID {run_id}")
+                final_result = await asyncio.to_thread(execute_run_with_resume, run_id)
         finally:
             typing_task.cancel()
             try:
