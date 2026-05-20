@@ -709,7 +709,7 @@ def render_agent_caserma():
     form_title = "Edit Agent" if editing_agent else "Create a New Agent"
     submit_label = "Update Agent" if editing_agent else "Add Agent"
 
-    with st.form("agent_form"):
+    with st.container(border=True):
         st.subheader(form_title)
         
         default_name = editing_agent['name'] if editing_agent else ""
@@ -728,10 +728,26 @@ def render_agent_caserma():
             except Exception:
                 pass # Fallback to showing everything in backstory field
 
-        name = st.text_input("Name", value=default_name)
-        role = st.text_input("Role", value=default_role)
-        goal = st.text_area("Goal", value=default_goal)
-        backstory = st.text_area("Backstory", value=default_backstory)
+        # Ensure session state variables for agent editing exist and are in sync
+        current_editing_id = editing_agent['id'] if editing_agent else None
+        
+        if "last_editing_agent_id" not in st.session_state:
+            st.session_state.last_editing_agent_id = current_editing_id
+            st.session_state.agent_name_input = default_name
+            st.session_state.agent_role_input = default_role
+            st.session_state.agent_goal_input = default_goal
+            st.session_state.agent_backstory_input = default_backstory
+        elif st.session_state.last_editing_agent_id != current_editing_id:
+            st.session_state.last_editing_agent_id = current_editing_id
+            st.session_state.agent_name_input = default_name
+            st.session_state.agent_role_input = default_role
+            st.session_state.agent_goal_input = default_goal
+            st.session_state.agent_backstory_input = default_backstory
+
+        name = st.text_input("Name", key="agent_name_input")
+        role = st.text_input("Role", key="agent_role_input")
+        goal = st.text_area("Goal", key="agent_goal_input")
+        backstory = st.text_area("Backstory", key="agent_backstory_input")
         
         # Select model
         default_model_id = editing_agent['model_id'] if editing_agent else None
@@ -743,7 +759,35 @@ def render_agent_caserma():
             
         selected_model_str = st.selectbox("Select Model", options=model_names, index=default_model_index)
         
-        submitted = st.form_submit_button(submit_label)
+        col_opt, col_sub = st.columns([1, 1])
+        with col_opt:
+            if st.button("✨ Optimize Prompts with AI", use_container_width=True, key="opt_agent_prompts_btn"):
+                current_role = st.session_state.get("agent_role_input", "").strip()
+                current_goal = st.session_state.get("agent_goal_input", "").strip()
+                current_backstory = st.session_state.get("agent_backstory_input", "").strip()
+                
+                if not current_role and not current_goal and not current_backstory:
+                    st.warning("Please fill in at least one field (Role, Goal, or Backstory) to optimize.")
+                else:
+                    with st.spinner("Optimizing prompts..."):
+                        try:
+                            master_ai = MasterAI()
+                            optimized = master_ai.optimize_agent_fields(
+                                role=current_role,
+                                goal=current_goal,
+                                backstory=current_backstory
+                            )
+                            st.session_state.agent_role_input = optimized["role"]
+                            st.session_state.agent_goal_input = optimized["goal"]
+                            st.session_state.agent_backstory_input = optimized["backstory"]
+                            st.toast("Prompts optimized successfully! Review and save the agent.", icon="✨")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error during optimization: {e}")
+                            
+        with col_sub:
+            submitted = st.button(submit_label, type="primary", use_container_width=True, key="save_agent_btn")
+            
         if submitted and name and role and goal and backstory and selected_model_str:
             # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
             sane_name = sanitize_input(name)
@@ -757,14 +801,17 @@ def render_agent_caserma():
             if editing_agent:
                 db.update_agent(editing_agent['id'], sane_name, sane_role, combined_backstory, model_id, [])
                 st.success(f"Agent '{sane_name}' updated successfully!")
+                if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 clear_editing_state('editing_agent_id')
             else:
                 db.create_agent(sane_name, sane_role, combined_backstory, model_id, [])
                 st.success(f"Agent '{sane_name}' has been recruited!")
+                if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 st.rerun()
 
     if editing_agent:
-        if st.button("Cancel Edit", key="cancel_agent_edit"):
+        if st.button("Cancel Edit", key="cancel_agent_edit", use_container_width=True):
+            if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
             clear_editing_state('editing_agent_id')
 
     st.divider()
@@ -883,10 +930,44 @@ def render_task_builder():
         agent_ids = list(agent_options.values())
         default_index = agent_ids.index(default_agent_id) if default_agent_id in agent_ids else 0
 
-        description = st.text_area("Task Description", value=default_desc, height=100, key="task_desc_area",
+        # Ensure session state variables for task editing exist and are in sync
+        current_editing_task_id = editing_task['id'] if editing_task else None
+        
+        if "last_editing_task_id" not in st.session_state:
+            st.session_state.last_editing_task_id = current_editing_task_id
+            st.session_state.task_desc_area = default_desc
+            st.session_state.task_output_area = default_output
+        elif st.session_state.last_editing_task_id != current_editing_task_id:
+            st.session_state.last_editing_task_id = current_editing_task_id
+            st.session_state.task_desc_area = default_desc
+            st.session_state.task_output_area = default_output
+
+        description = st.text_area("Task Description", height=100, key="task_desc_area",
                                     help="Use `{variable_name}` to insert dynamic values from Required Inputs. E.g. `Crea un logo con sfumature {colore}`")
-        expected_output = st.text_area("Expected Output", value=default_output, height=150, key="task_output_area",
+        expected_output = st.text_area("Expected Output", height=150, key="task_output_area",
                                        help="You can also use `{variable_name}` placeholders here.")
+
+        # --- Task AI Optimizer Button ---
+        if st.button("✨ Optimize Description & Output with AI", key="opt_task_prompts_btn", use_container_width=True):
+            current_desc = st.session_state.get("task_desc_area", "").strip()
+            current_out = st.session_state.get("task_output_area", "").strip()
+            
+            if not current_desc and not current_out:
+                st.warning("Please fill in at least one field (Description or Expected Output) to optimize.")
+            else:
+                with st.spinner("Optimizing task..."):
+                    try:
+                        master_ai = MasterAI()
+                        optimized = master_ai.optimize_task_fields(
+                            description=current_desc,
+                            expected_output=current_out
+                        )
+                        st.session_state.task_desc_area = optimized["description"]
+                        st.session_state.task_output_area = optimized["expected_output"]
+                        st.toast("Task optimized successfully! Review and save changes.", icon="✨")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error during optimization: {e}")
         
         # --- Agent Selection with Avatar Preview ---
         # We need to peek at the session state to know which agent is selected for the preview
@@ -1070,17 +1151,21 @@ def render_task_builder():
                     db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
+                    if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     clear_editing_state('editing_task_id')
                 else:
                     db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
+                    if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     st.rerun()
 
     if editing_task:
         if st.button("Cancel Edit", key="cancel_task_edit", use_container_width=True):
             if 'temp_required_inputs' in st.session_state:
                 del st.session_state.temp_required_inputs
+            if 'last_editing_task_id' in st.session_state:
+                del st.session_state.last_editing_task_id
             clear_editing_state('editing_task_id')
 
     st.divider()

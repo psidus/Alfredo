@@ -97,6 +97,46 @@ RAW AGENT OUTPUT:
 Produce the refined, user-ready report below:
 """
 
+AGENT_OPTIMIZER_PROMPT = """
+You are Alfredo, a Senior Prompt Engineer and Agent Architect.
+Your job is to optimize the Role, Goal, and Backstory of an AI agent to ensure they are:
+1. Clear, professional, and grammatically correct.
+2. Structured to avoid "fluff", making them concise, factual, and focused.
+3. Designed to follow CrewAI best practices.
+4. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
+
+Input Agent Details:
+- Role: {role}
+- Goal: {goal}
+- Backstory: {backstory}
+
+Optimize and return a JSON object with:
+{
+  "role": "Optimized role description",
+  "goal": "Optimized goal, clear and focused",
+  "backstory": "Optimized backstory, concise and professional, describing key expertise, tone, and directives (e.g. be concise, avoid fluff)"
+}
+"""
+
+TASK_OPTIMIZER_PROMPT = """
+You are Alfredo, a Senior Prompt Engineer and Workflow Architect.
+Your job is to optimize the Description and Expected Output of an AI task to ensure they are:
+1. Clear, professional, and grammatically correct.
+2. Specific, unambiguous, and focused on producing measurable outcomes.
+3. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
+4. CRITICAL: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like `{nome_variabile}` or `{user_input}` or `{previous_result}`. Keep them exactly as they are.
+
+Input Task Details:
+- Description: {description}
+- Expected Output: {expected_output}
+
+Optimize and return a JSON object with:
+{
+  "description": "Optimized task description, preserving all curly brace placeholders",
+  "expected_output": "Optimized expected output description, preserving all curly brace placeholders"
+}
+"""
+
 class MasterAI:
     """
     The MasterAI class acts as the intelligent gatekeeper and router for the system.
@@ -457,4 +497,74 @@ Please propose this base workflow to the user, adapt it to their specific reques
                 "status": "planning",
                 "response": f"⚠️ Error in planning phase occurred: {str(e)}",
                 "plan": None
+            }
+
+    def optimize_agent_fields(self, role: str, goal: str, backstory: str) -> Dict[str, str]:
+        """
+        Optimizes an agent's role, goal, and backstory prompts using the LLM.
+        """
+        system_prompt = AGENT_OPTIMIZER_PROMPT.format(role=role, goal=goal, backstory=backstory)
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI Optimizing agent fields with: {model_string}")
+        try:
+            raw_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Optimize the agent's prompts."}
+                ],
+                temperature=0.3
+            )
+            clean_json = self._sanitize_json(raw_output)
+            result = json.loads(clean_json)
+            return {
+                "role": result.get("role", role),
+                "goal": result.get("goal", goal),
+                "backstory": result.get("backstory", backstory)
+            }
+        except Exception as e:
+            logger.error(f"Failed to optimize agent prompts: {e}")
+            return {
+                "role": role,
+                "goal": goal,
+                "backstory": backstory
+            }
+
+    def optimize_task_fields(self, description: str, expected_output: str) -> Dict[str, str]:
+        """
+        Optimizes a task's description and expected output prompts using the LLM.
+        """
+        system_prompt = TASK_OPTIMIZER_PROMPT.format(description=description, expected_output=expected_output)
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI Optimizing task fields with: {model_string}")
+        try:
+            raw_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Optimize the task's prompts."}
+                ],
+                temperature=0.3
+            )
+            clean_json = self._sanitize_json(raw_output)
+            result = json.loads(clean_json)
+            return {
+                "description": result.get("description", description),
+                "expected_output": result.get("expected_output", expected_output)
+            }
+        except Exception as e:
+            logger.error(f"Failed to optimize task prompts: {e}")
+            return {
+                "description": description,
+                "expected_output": expected_output
             }
