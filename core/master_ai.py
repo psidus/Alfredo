@@ -43,10 +43,11 @@ AVAILABLE TOOLS:
 - ask_operator
 - execute_shell_command
 
-STRATEGIC RULES FOR CONCISENESS:
+STRATEGIC RULES FOR CONCISENESS & SPECIALIZATION:
 - All agents MUST be instructed in their 'backstory' to be "concise, factual, and avoid fluff".
 - All tasks MUST have an 'expected_output' that specifies a "synthesized, structured report or clear list of findings".
 - Avoid dispersion: agents should focus only on the most relevant data needed for the next step.
+- Agent Specialization: Use the 'agent_specialization' field in tasks to focus or customize the agent's persona specifically for that task (e.g. chemistry, copywriting, physics). If the same base agent is reused in different tasks, assign distinct 'agent_specialization' strings to give them different personalities/focuses.
 
 OUTPUT FORMAT (JSON ONLY):
 {
@@ -65,7 +66,8 @@ OUTPUT FORMAT (JSON ONLY):
       {
         "description": "Clear and detailed task description",
         "expected_output": "What the task should produce",
-        "agent_role": "MUST match exactly one role from the agents list"
+        "agent_role": "MUST match exactly one role from the agents list",
+        "agent_specialization": "Optional domain specialization for the agent in this task (e.g., 'Quantum Physics', 'Italian Cooking')"
       }
     ]
   }
@@ -100,10 +102,11 @@ Produce the refined, user-ready report below:
 AGENT_OPTIMIZER_PROMPT = """
 You are Alfredo, a Senior Prompt Engineer and Agent Architect.
 Your job is to optimize the Role, Goal, and Backstory of an AI agent to ensure they are:
-1. Clear, professional, and grammatically correct.
-2. Structured to avoid "fluff", making them concise, factual, and focused.
+1. Highly concise, factual, and focused on core expertise to minimize token usage.
+2. Structured to avoid "fluff", conversational preamble, or unnecessary detail.
 3. Designed to follow CrewAI best practices.
 4. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
+5. Aligning with the system philosophy: agents communicate using basic, dense tokens, and final response expansion is handled by the Master AI.
 
 Input Agent Details:
 - Role: {role}
@@ -111,30 +114,31 @@ Input Agent Details:
 - Backstory: {backstory}
 
 Optimize and return a JSON object with:
-{
+{{
   "role": "Optimized role description",
   "goal": "Optimized goal, clear and focused",
   "backstory": "Optimized backstory, concise and professional, describing key expertise, tone, and directives (e.g. be concise, avoid fluff)"
-}
+}}
 """
 
 TASK_OPTIMIZER_PROMPT = """
 You are Alfredo, a Senior Prompt Engineer and Workflow Architect.
 Your job is to optimize the Description and Expected Output of an AI task to ensure they are:
-1. Clear, professional, and grammatically correct.
-2. Specific, unambiguous, and focused on producing measurable outcomes.
-3. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
-4. CRITICAL: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like `{nome_variabile}` or `{user_input}` or `{previous_result}`. Keep them exactly as they are.
+1. Optimized to minimize token consumption. Focus purely on required inputs, steps, and structure.
+2. Structured for basic, dense intermediate pipeline communication between agents (no conversational outputs, no preambles, structured lists only).
+3. Specific, unambiguous, and focused on producing measurable outcomes.
+4. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
+5. CRITICAL: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like `{{nome_variabile}}` or `{{user_input}}` or `{{previous_result}}`. Keep them exactly as they are.
 
 Input Task Details:
 - Description: {description}
 - Expected Output: {expected_output}
 
 Optimize and return a JSON object with:
-{
+{{
   "description": "Optimized task description, preserving all curly brace placeholders",
   "expected_output": "Optimized expected output description, preserving all curly brace placeholders"
-}
+}}
 """
 
 class MasterAI:

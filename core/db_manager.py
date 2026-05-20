@@ -286,8 +286,9 @@ class DBManager:
 
     # --- Vector Databases CRUD ---
     def create_vector_db(self, name: str, path: str, provider: str, model_name: str) -> int:
+        normalized_path = path.replace('\\', '/')
         sql = "INSERT INTO vector_databases (name, path, provider, model_name) VALUES (?, ?, ?, ?)"
-        self.cursor.execute(sql, (name, path, provider, model_name))
+        self.cursor.execute(sql, (name, normalized_path, provider, model_name))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -295,7 +296,11 @@ class DBManager:
         sql = "SELECT * FROM vector_databases ORDER BY created_at DESC"
         self.cursor.execute(sql)
         rows = self.cursor.fetchall()
-        return [self._to_dict(row) for row in rows]
+        dbs = [self._to_dict(row) for row in rows]
+        for db in dbs:
+            if db.get('path'):
+                db['path'] = db['path'].replace('\\', '/')
+        return dbs
 
     def delete_vector_db(self, db_id: int) -> int:
         sql = "DELETE FROM vector_databases WHERE id = ?"

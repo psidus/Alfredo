@@ -731,6 +731,13 @@ def render_agent_caserma():
         # Ensure session state variables for agent editing exist and are in sync
         current_editing_id = editing_agent['id'] if editing_agent else None
         
+        if "optimized_agent_data" in st.session_state:
+            opt_data = st.session_state.pop("optimized_agent_data")
+            st.session_state.agent_role_input = opt_data["role"]
+            st.session_state.agent_goal_input = opt_data["goal"]
+            st.session_state.agent_backstory_input = opt_data["backstory"]
+            st.toast("Prompts optimized successfully! Review and save the agent.", icon="✨")
+
         if "last_editing_agent_id" not in st.session_state:
             st.session_state.last_editing_agent_id = current_editing_id
             st.session_state.agent_name_input = default_name
@@ -777,10 +784,11 @@ def render_agent_caserma():
                                 goal=current_goal,
                                 backstory=current_backstory
                             )
-                            st.session_state.agent_role_input = optimized["role"]
-                            st.session_state.agent_goal_input = optimized["goal"]
-                            st.session_state.agent_backstory_input = optimized["backstory"]
-                            st.toast("Prompts optimized successfully! Review and save the agent.", icon="✨")
+                            st.session_state.optimized_agent_data = {
+                                "role": optimized["role"],
+                                "goal": optimized["goal"],
+                                "backstory": optimized["backstory"]
+                            }
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error during optimization: {e}")
@@ -933,6 +941,12 @@ def render_task_builder():
         # Ensure session state variables for task editing exist and are in sync
         current_editing_task_id = editing_task['id'] if editing_task else None
         
+        if "optimized_task_data" in st.session_state:
+            opt_data = st.session_state.pop("optimized_task_data")
+            st.session_state.task_desc_area = opt_data["description"]
+            st.session_state.task_output_area = opt_data["expected_output"]
+            st.toast("Task optimized successfully! Review and save changes.", icon="✨")
+
         if "last_editing_task_id" not in st.session_state:
             st.session_state.last_editing_task_id = current_editing_task_id
             st.session_state.task_desc_area = default_desc
@@ -962,9 +976,10 @@ def render_task_builder():
                             description=current_desc,
                             expected_output=current_out
                         )
-                        st.session_state.task_desc_area = optimized["description"]
-                        st.session_state.task_output_area = optimized["expected_output"]
-                        st.toast("Task optimized successfully! Review and save changes.", icon="✨")
+                        st.session_state.optimized_task_data = {
+                            "description": optimized["description"],
+                            "expected_output": optimized["expected_output"]
+                        }
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error during optimization: {e}")
@@ -1754,29 +1769,35 @@ def main():
     with st.sidebar:
         st.header("🚀 Guide & Placeholders")
         st.markdown("""
-        Customize your **Task Descriptions** using these dynamic placeholders:
-        
-        - **`{variable_name}`**: 
-          **Dynamic Input**: Define custom variables in the 'Required Inputs' section. Alfredo will ask for them in chat before execution.
-          *Tip: If multiple tasks share the same `{variable_name}`, Alfredo will ask only once!*
+        ### 🤖 What is Alfredo?
+        **Alfredo** is an AI Agentic Orchestrator powered by **CrewAI** and **Master AI**. It allows you to model custom teams of AI agents, organize them into sequential workflows, and execute them dynamically through natural language (via Streamlit or Telegram).
 
-        - **`{user_input}`**: 
-          Inserts the full initial message you sent to trigger the bot.
-          
-        - **`{previous_result}`**: 
-          Inserts the output of the *last* executed workflow session.
-          
+        ### ⚙️ How It Works
+        1. **Define Team**: Register models and create agents with unique roles, backstories, and tools in **Agent Caserma**.
+        2. **Build Workflows**: Build individual tasks and link them sequentially in **Workflow Assembler**.
+        3. **Dynamic Planning**: Send a request. **Master AI** analyzes your intent, selects the workflow, asks for required inputs, and configures the agents.
+        4. **Execute**: The crew runs the tasks step-by-step, feeding results from one task to the next.
+
         ---
-        **🛠️ Tool Support & Models**
-        
-        If a task requires **Tools** (e.g. searching the web, reading files, executing terminal commands):
-        
-        - ✅ **Cloud Models**: Use models from **OpenAI**, **Gemini**, **Anthropic**, or **Groq**. These support the "Function Calling" protocol required for tools.
-        - ❌ **Local Models (Ollama)**: Models like **phi3**, **llama**, etc., usually **do NOT support tools**. 
-          *Note: Alfredo will automatically disable tools if you assign a local model to an agent.*
-          
+
+        ### 👤 Agent Specialization
+        Keep agents generic (e.g. *Researcher*) and specialize them per-task:
+        - **`{specialization}`**: Place this in the agent's **Role** or **Backstory** (e.g. `Researcher specialized in {specialization}`). Alfredo will inject the task's custom specialization at runtime.
+          *Note: If omitted, the task specialization is automatically appended.*
+
+        ### 📝 Task Inputs
+        Format task **Descriptions** or **Expected Outputs** with:
+        - **`{variable_name}`**: Define custom parameters in the task's **Required Inputs**. Alfredo will prompt you for them before execution.
+          *Tip: Identical variables across tasks are requested only once!*
+        - **`{user_input}`**: Inserts your initial message that triggered the workflow.
+        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task.
+
         ---
-        *Alfredo (Master AI) handles all conversations and will automatically replace these placeholders during the planning phase.*
+        ### 🛠️ Model & Tool Compatibility
+        - ✅ **Cloud Models** (OpenAI, Gemini, Anthropic, Groq): Full support for function calling and tools (web search, file access, shell commands).
+        - ❌ **Local Models** (Ollama): Do not support tool calling. Tools are automatically disabled for local models.
+
+        *Alfredo resolves all parameters dynamically during planning and execution.*
         """)
         st.divider()
         st.info("The configuration is saved directly to your SQLite database.")

@@ -193,21 +193,31 @@ def _build_agent(agent_id, specialization=None):
     # at runtime without touching the database record. This lets a generic agent
     # (e.g. "Web Researcher") act as a domain expert (e.g. "Web Researcher
     # specialized in chemical thermodynamics") for one specific task.
+    # The agent's role and backstory can also contain the `{specialization}` placeholder
+    # to control exactly where the specialization string is injected.
     base_role = agent_record['role']
-    base_backstory = agent_record['backstory']
+    base_backstory = agent_record['backstory'] or ""
 
     if specialization:
-        effective_role = f"{base_role} specialized in {specialization}"
-        effective_backstory = (
-            base_backstory +
-            f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
-            f"focused on **{specialization}**. Apply all your base skills strictly within "
-            f"this specialized domain. Do not stray outside it."
-        )
+        if "{specialization}" in base_role:
+            effective_role = base_role.replace("{specialization}", specialization)
+        else:
+            effective_role = f"{base_role} specialized in {specialization}"
+
+        if "{specialization}" in base_backstory:
+            effective_backstory = base_backstory.replace("{specialization}", specialization)
+        else:
+            effective_backstory = (
+                base_backstory +
+                f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
+                f"focused on **{specialization}**. Apply all your base skills strictly within "
+                f"this specialized domain. Do not stray outside it."
+            )
         logging.info(f"Agent '{agent_record['name']}' specialized as: '{effective_role}'")
     else:
-        effective_role = base_role
-        effective_backstory = base_backstory
+        # Clean up any `{specialization}` placeholders from the base role and backstory
+        effective_role = base_role.replace(" specialized in {specialization}", "").replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+        effective_backstory = base_backstory.replace("{specialization}", "").strip()
 
     # --- BACKSTORY INJECTION: Enforce conciseness at identity level ---
     conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
@@ -355,12 +365,14 @@ def build_crew(workflow_id):
 
         crew_tasks = []
         agents_cache = {} # Cache to store unique agent instances
+        crew_agents = []
 
         for task_id in task_ids:
-            crew_tasks.append(_build_task(task_id, agents_cache))
-        
-        # Extract all unique Agent objects from the cache
-        crew_agents = list(agents_cache.values())
+            task_obj = _build_task(task_id, agents_cache)
+            crew_tasks.append(task_obj)
+            # Collect all unique agent instances (including specialized clones)
+            if task_obj.agent and task_obj.agent not in crew_agents:
+                crew_agents.append(task_obj.agent)
 
         if not crew_agents:
             raise ValueError(f"No agents found for workflow ID {workflow_id}.")
@@ -512,45 +524,80 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
                          model_record.get('provider', '').lower() == 'ollama'
 
     agents_cache = {}
-    crew_agents = []
+    actual_crew_agents = []
+    agents_data_by_role = {a['role']: a for a in plan.get('agents', [])}
     
-    for agent_data in plan['agents']:
-        role = agent_data['role']
-        # Strip tools if model is local
-        if is_local_model:
-            agent_tools = []
-            logging.info(f"Dynamic Agent '{role}' tools stripped (local model).")
-        else:
-            agent_tools = _map_tools(agent_data.get('tools', []))
-        
-        # --- BACKSTORY INJECTION for dynamic agents ---
-        conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
-                             "You never ramble. You output structured bullet points, not essays. "
-                             "Every sentence must carry unique, actionable information.")
-        enhanced_backstory = agent_data.get('backstory', '') + conciseness_trait
-
-        agent = Agent(
-            role=role,
-            backstory=enhanced_backstory,
-            goal=agent_data.get('goal', ''),
-            llm=llm_instance,
-            tools=agent_tools,
-            verbose=True,
-            allow_delegation=False,
-            max_iter=5
-        )
-        agents_cache[role] = agent
-        crew_agents.append(agent)
-        logging.info(f"Built Dynamic Agent: {role} (local={is_local_model})")
+    conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
+                         "You never ramble. You output structured bullet points, not essays. "
+                         "Every sentence must carry unique, actionable information.")
         
     crew_tasks = []
     for task_data in plan['tasks']:
         agent_role = task_data.get('agent_role')
-        if agent_role not in agents_cache:
+        specialization = task_data.get('agent_specialization')
+        
+        if agent_role not in agents_data_by_role:
             logging.warning(f"Task specifies unknown agent role '{agent_role}'.")
             agent_instance = None
         else:
-            agent_instance = agents_cache[agent_role]
+            agent_info = agents_data_by_role[agent_role]
+            
+            # 1. Resolve agent's persona based on task specialization
+            if specialization:
+                base_role = agent_info['role']
+                base_backstory = agent_info.get('backstory', '') or ""
+                
+                if "{specialization}" in base_role:
+                    effective_role = base_role.replace("{specialization}", specialization)
+                else:
+                    effective_role = f"{base_role} specialized in {specialization}"
+                
+                if "{specialization}" in base_backstory:
+                    effective_backstory = base_backstory.replace("{specialization}", specialization)
+                else:
+                    effective_backstory = (
+                        base_backstory +
+                        f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
+                        f"focused on **{specialization}**. Apply all your base skills strictly within "
+                        f"this specialized domain. Do not stray outside it."
+                    )
+                logging.info(f"Dynamic Agent '{agent_role}' specialized as: '{effective_role}'")
+            else:
+                # Clean up any leftover placeholders
+                base_role = agent_info['role']
+                base_backstory = agent_info.get('backstory', '') or ""
+                effective_role = base_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+                effective_backstory = base_backstory.replace("{specialization}", "").strip()
+
+            # 2. Get or create agent instance
+            if not specialization and agent_role in agents_cache:
+                agent_instance = agents_cache[agent_role]
+            else:
+                # Strip tools if model is local
+                if is_local_model:
+                    agent_tools = []
+                    logging.info(f"Dynamic Agent '{agent_role}' tools stripped (local model).")
+                else:
+                    agent_tools = _map_tools(agent_info.get('tools', []))
+                    
+                enhanced_backstory = effective_backstory + conciseness_trait
+                
+                agent_instance = Agent(
+                    role=effective_role,
+                    backstory=enhanced_backstory,
+                    goal=agent_info.get('goal', ''),
+                    llm=llm_instance,
+                    tools=agent_tools,
+                    verbose=True,
+                    allow_delegation=False,
+                    max_iter=5
+                )
+                
+                if not specialization:
+                    agents_cache[agent_role] = agent_instance
+            
+            if agent_instance not in actual_crew_agents:
+                actual_crew_agents.append(agent_instance)
             
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
@@ -566,15 +613,15 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             async_execution=False
         )
         crew_tasks.append(task)
-        logging.info(f"Built Dynamic Task for Agent: {agent_role}")
+        logging.info(f"Built Dynamic Task for Agent: {agent_role} (specialization={specialization})")
         
-    if not crew_agents:
+    if not actual_crew_agents:
         raise ValueError("No agents could be built from the dynamic plan.")
     if not crew_tasks:
         raise ValueError("No tasks could be built from the dynamic plan.")
         
     crew = Crew(
-        agents=crew_agents,
+        agents=actual_crew_agents,
         tasks=crew_tasks,
         verbose=True,
         process='sequential'
