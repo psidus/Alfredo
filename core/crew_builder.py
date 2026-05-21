@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import re
 
 from crewai import Agent, Task, Crew
 from langchain_openai import ChatOpenAI
@@ -66,6 +67,12 @@ ALLOWED_TOOLS = {
     "vector_search": None,  # Sentinel
     # Tabular query — auto-injected at task build time when structured CSVs exist
     "tabular_query": None,  # Sentinel
+    # Calculator
+    "calculator": local_tools.calculate,
+    # Code Management Tools
+    "file_read_tool": local_tools.read_python_file,
+    "file_write_tool": local_tools.write_python_file,
+    "python_repl_tool": local_tools.python_repl,
 }
 
 def _instantiate_llm(model_id):
@@ -471,9 +478,96 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
         original_desc = original_desc.replace("{context}", last_output)
         original_desc = original_desc.replace("{flexible_input}", inputs.get('user_input', last_output))
         
-        # If there is a last_output from a previous step, append it to the task description explicitly
-        if last_output:
-            original_desc += f"\n\n[CONTEXT FROM PREVIOUS STEP]:\n{last_output}"
+        # Build lookup dict for prior task outputs (using task names, sequential IDs, and aliases)
+        def normalize_name(s: str) -> str:
+            if not s:
+                return ""
+            s_norm = s.lower().replace('_', ' ').replace('-', ' ')
+            return " ".join(s_norm.split())
+
+        # Fetch task details for all tasks in this workflow to get their names
+        workflow_tasks = []
+        for tid in task_ids:
+            try:
+                t_rec = db.read_task(tid)
+                if t_rec:
+                    workflow_tasks.append(t_rec)
+                else:
+                    workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
+            except Exception:
+                workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
+
+        lookup = {}
+        for idx in range(i):
+            t_rec = workflow_tasks[idx]
+            t_id = t_rec['id']
+            t_name = t_rec.get('name')
+            t_output = task_outputs.get(str(t_id), "")
+            
+            # 1. Store by normalized name if name exists
+            if t_name:
+                norm = normalize_name(t_name)
+                if norm:
+                    lookup[norm] = t_output
+                    
+            # 2. Store by string and int task ID
+            lookup[f"task {t_id}"] = t_output
+            lookup[f"task_{t_id}"] = t_output
+            lookup[str(t_id)] = t_output
+            
+        # 3. Store the immediately preceding task output under generic aliases
+        if i > 0:
+            prev_t_id = task_ids[i - 1]
+            prev_output = task_outputs.get(str(prev_t_id), "")
+            lookup["previous task"] = prev_output
+            lookup["previous_task"] = prev_output
+            lookup["previous"] = prev_output
+            lookup["task precedente"] = prev_output
+            lookup["task_precedente"] = prev_output
+
+        # Regex replace placeholders like {task:Nome Task} or {Nome Task}
+        pattern = re.compile(r'\{task:([^\}]+)\}|\{([^\}]+)\}')
+        
+        def repl(match):
+            g1 = match.group(1) # matches after "task:"
+            g2 = match.group(2) # matches the whole content if no "task:"
+            key = g1 if g1 is not None else g2
+            if not key:
+                return match.group(0)
+            
+            norm_key = normalize_name(key)
+            if norm_key in lookup:
+                return lookup[norm_key]
+            
+            # Try lowercase exact matching
+            lower_key = key.strip().lower()
+            if lower_key in lookup:
+                return lookup[lower_key]
+                
+            return match.group(0) # Keep original if not matched
+
+        original_desc = pattern.sub(repl, original_desc)
+        
+        # If there are outputs from previous steps, append them to the task description explicitly
+        if i > 0:
+            context_str = "\n\n[CONTEXT FROM PREVIOUS STEPS]:"
+            for prev_idx in range(i):
+                prev_task_id = task_ids[prev_idx]
+                prev_output = task_outputs.get(str(prev_task_id), "")
+                if prev_output:
+                    try:
+                        prev_task_rec = db.read_task(prev_task_id)
+                        t_name = prev_task_rec.get('name')
+                        role_str = f"Agent ID {prev_task_rec.get('agent_id')}"
+                        if prev_task_rec.get('agent_id'):
+                            agent_rec = db.read_agent(prev_task_rec['agent_id'])
+                            if agent_rec:
+                                role_str = agent_rec['name']
+                    except Exception:
+                        role_str = f"Task {prev_task_id}"
+                        t_name = None
+                    context_str += f"\n--- Step {prev_idx + 1} ({role_str} - Task: {t_name or f'Task {prev_task_id}'}) Output ---\n{prev_output}\n"
+            original_desc += context_str
             
         task_obj.description = original_desc
         

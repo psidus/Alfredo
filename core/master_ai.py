@@ -52,6 +52,7 @@ STRATEGIC RULES FOR CONCISENESS & SPECIALIZATION:
 OUTPUT FORMAT (JSON ONLY):
 {
   "status": "planning" | "ready",
+  "modified": false | true,
   "response": "Your conversational reply to the user (use Markdown if needed, keep it concise and helpful).",
   "plan": {
     "agents": [
@@ -440,15 +441,56 @@ class MasterAI:
         
         base_workflow_context = ""
         if base_workflow:
+            # Fetch tasks and agents to give the LLM the exact base workflow representation
+            task_ids = base_workflow.get('task_ids')
+            if not task_ids and 'task_ids_json' in base_workflow:
+                try:
+                    task_ids = json.loads(base_workflow['task_ids_json'])
+                except Exception:
+                    task_ids = []
+            
+            wf_tasks = []
+            for tid in (task_ids or []):
+                t_rec = self.db_manager.read_task(tid)
+                if t_rec:
+                    # Fetch agent details
+                    a_rec = self.db_manager.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+                    agent_info = None
+                    if a_rec:
+                        agent_info = {
+                            "role": a_rec.get("role"),
+                            "goal": a_rec.get("goal"),
+                            "backstory": a_rec.get("backstory"),
+                            "tools": a_rec.get("tools") or []
+                        }
+                    
+                    wf_tasks.append({
+                        "task_name": t_rec.get("name"),
+                        "description": t_rec.get("description"),
+                        "expected_output": t_rec.get("expected_output"),
+                        "agent_specialization": t_rec.get("agent_specialization"),
+                        "tools": t_rec.get("tools") or [],
+                        "agent": agent_info
+                    })
+            
             base_workflow_context = f"""
 BASE WORKFLOW LOADED:
 The user has selected the following predefined workflow as a starting point:
 Name: {base_workflow.get('name')}
 Description: {base_workflow.get('description')}
-Please propose this base workflow to the user, adapt it to their specific request, and ask if they want to modify it.
+
+Here are the EXACT agents, tasks, and tools defined in the database for this workflow:
+{json.dumps(wf_tasks, indent=2)}
+
+CRITICAL INSTRUCTIONS FOR PREDEFINED WORKFLOW:
+1. Present/Propose this predefined workflow to the user in a natural, user-friendly language summary (without modifying its structure, tasks, agents, or tools).
+2. If the user did not explicitly request changes/modifications to this predefined workflow, you MUST:
+   - Keep the returned "plan" object identical in agents, tasks, and tools to the loaded base workflow.
+   - Set "modified": false in your JSON output.
+3. If the user explicitly asks for changes/customizations (e.g. adding tasks, changing agent goals, adding tools), modify the "plan" accordingly, describe the changes in your "response", and set "modified": true in your JSON output.
 """
         else:
-            base_workflow_context = "No base workflow loaded. You must design a custom plan from scratch based on the user's request."
+            base_workflow_context = "No base workflow loaded. You must design a custom plan from scratch based on the user's request, and set \"modified\": true."
             
         system_prompt = CHAT_PLANNER_PROMPT.replace("{base_workflow_context}", base_workflow_context)
         
@@ -461,7 +503,7 @@ Please propose this base workflow to the user, adapt it to their specific reques
             model_string = self.model_name
         elif self.model_provider == "gemini" and "/" in self.model_name:
             model_string = self.model_name
-
+ 
         logger.info(f"MasterAI Attempting Planning with: {model_string}")
         try:
             # Use temperature 0.2 for a bit more creativity in planning while keeping JSON stable
@@ -492,6 +534,8 @@ Please propose this base workflow to the user, adapt it to their specific reques
                 result["status"] = "planning"
             if "response" not in result:
                 result["response"] = "I'm processing the plan..."
+            if "modified" not in result:
+                result["modified"] = True if not base_workflow else False
                 
             return result
             

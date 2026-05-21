@@ -1,6 +1,7 @@
 streamlit
 crewai
 crewai[tools]
+crewai[google-genai]
 python-dotenv
 pyyaml
 litellm

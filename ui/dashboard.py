@@ -10,6 +10,7 @@ from core.data_manager import DataManager
 import yaml
 import json
 import re
+import html
 from datetime import datetime
 import os
 import hashlib
@@ -65,6 +66,20 @@ def clear_editing_state(key):
     if key in st.session_state:
         del st.session_state[key]
     st.rerun()
+
+def start_editing_task(task_id):
+    st.session_state.editing_task_id = task_id
+    if 'last_editing_task_id' in st.session_state:
+        del st.session_state.last_editing_task_id
+    # Reset tool checkboxes to prevent leakage
+    for k in list(st.session_state.keys()):
+        if k.startswith("cb_task_"):
+            del st.session_state[k]
+
+def start_editing_agent(agent_id):
+    st.session_state.editing_agent_id = agent_id
+    if 'last_editing_agent_id' in st.session_state:
+        del st.session_state.last_editing_agent_id
 
 def get_agent_avatar_url(agent):
     """Generates a consistent avatar URL for an agent based on their metadata."""
@@ -712,11 +727,11 @@ def render_agent_caserma():
     with st.container(border=True):
         st.subheader(form_title)
         
-        default_name = editing_agent['name'] if editing_agent else ""
-        default_role = editing_agent['role'] if editing_agent else ""
+        default_name = (editing_agent['name'] or "") if editing_agent else ""
+        default_role = (editing_agent['role'] or "") if editing_agent else ""
         
         # Logic to split Goal and Backstory if they follow the format
-        raw_backstory = editing_agent['backstory'] if editing_agent else ""
+        raw_backstory = (editing_agent['backstory'] or "") if editing_agent else ""
         default_goal = ""
         default_backstory = raw_backstory
         
@@ -731,6 +746,13 @@ def render_agent_caserma():
         # Ensure session state variables for agent editing exist and are in sync
         current_editing_id = editing_agent['id'] if editing_agent else None
         
+        default_model_id = editing_agent['model_id'] if editing_agent else None
+        model_names = list(model_options.keys())
+        model_ids = list(model_options.values())
+        default_model_index = 0
+        if default_model_id in model_ids:
+            default_model_index = model_ids.index(default_model_id)
+
         if "optimized_agent_data" in st.session_state:
             opt_data = st.session_state.pop("optimized_agent_data")
             st.session_state.agent_role_input = opt_data["role"]
@@ -744,12 +766,22 @@ def render_agent_caserma():
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
+            st.session_state.agent_model_sel = model_names[default_model_index] if model_names else None
         elif st.session_state.last_editing_agent_id != current_editing_id:
             st.session_state.last_editing_agent_id = current_editing_id
             st.session_state.agent_name_input = default_name
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
+            st.session_state.agent_model_sel = model_names[default_model_index] if model_names else None
+
+        # Sanitize session state keys before rendering widgets to avoid TypeError: bad argument type for built-in operation
+        for k in ["agent_name_input", "agent_role_input", "agent_goal_input", "agent_backstory_input"]:
+            if k in st.session_state:
+                if st.session_state[k] is None:
+                    st.session_state[k] = ""
+                elif not isinstance(st.session_state[k], str):
+                    st.session_state[k] = str(st.session_state[k])
 
         name = st.text_input("Name", key="agent_name_input")
         role = st.text_input("Role", key="agent_role_input")
@@ -757,14 +789,7 @@ def render_agent_caserma():
         backstory = st.text_area("Backstory", key="agent_backstory_input")
         
         # Select model
-        default_model_id = editing_agent['model_id'] if editing_agent else None
-        model_names = list(model_options.keys())
-        model_ids = list(model_options.values())
-        default_model_index = 0
-        if default_model_id in model_ids:
-            default_model_index = model_ids.index(default_model_id)
-            
-        selected_model_str = st.selectbox("Select Model", options=model_names, index=default_model_index)
+        selected_model_str = st.selectbox("Select Model", options=model_names, key="agent_model_sel")
         
         col_opt, col_sub = st.columns([1, 1])
         with col_opt:
@@ -871,7 +896,7 @@ def render_agent_caserma():
                             
                             col_mod, col_del = st.columns([1, 1])
                             with col_mod:
-                                st.button("Edit", key=f"mod_agent_{agent['id']}", on_click=set_editing_state, args=('editing_agent_id', agent['id']), use_container_width=True)
+                                st.button("Edit", key=f"mod_agent_{agent['id']}", on_click=start_editing_agent, args=(agent['id'],), use_container_width=True)
                             with col_del:
                                 if st.button("Del", key=f"del_agent_{agent['id']}", type="primary", use_container_width=True):
                                     db.delete_agent(agent['id'])
@@ -886,12 +911,33 @@ def render_task_builder():
     
     tools_map_path = os.path.join(os.getcwd(), 'config', 'tools_map.yaml')
     AVAILABLE_TOOLS = []
+    tools_registry = {}
     try:
         tools_config = DataManager.load_yaml(tools_map_path)
         tools_registry = tools_config.get('tools_registry', {})
         AVAILABLE_TOOLS = list(tools_registry.keys())
     except Exception:
         pass
+
+    TOOL_EMOJIS = {
+        "read_file": "📄",
+        "write_file": "✏️",
+        "read_file_anywhere": "🔍",
+        "search_files": "📂",
+        "search_web": "🌐",
+        "execute_shell_command": "💻",
+        "ask_operator": "💬",
+        "create_word_document": "📝",
+        "edit_word_document": "🖊️",
+        "create_excel_document": "📊",
+        "take_screenshot": "📸",
+        "manage_email": "✉️",
+        "vector_search": "🗄️",
+        "calculator": "🧮",
+        "file_read_tool": "📖",
+        "file_write_tool": "💾",
+        "python_repl_tool": "🐍"
+    }
 
     agents = db.read_all_agents()
     tasks = db.read_all_tasks()
@@ -924,12 +970,30 @@ def render_task_builder():
     def remove_specific_row(index):
         if 0 <= index < len(st.session_state.temp_required_inputs):
             st.session_state.temp_required_inputs.pop(index)
+            # Shift session state keys to match the new list
+            num_elements = len(st.session_state.temp_required_inputs) + 1
+            keys = [st.session_state.get(f"ri_key_{i}", "") for i in range(num_elements)]
+            prompts = [st.session_state.get(f"ri_prompt_{i}", "") for i in range(num_elements)]
+            
+            if index < len(keys):
+                keys.pop(index)
+            if index < len(prompts):
+                prompts.pop(index)
+                
+            for i in range(num_elements):
+                st.session_state.pop(f"ri_key_{i}", None)
+                st.session_state.pop(f"ri_prompt_{i}", None)
+                
+            for i, (k, p) in enumerate(zip(keys, prompts)):
+                st.session_state[f"ri_key_{i}"] = k
+                st.session_state[f"ri_prompt_{i}"] = p
 
     with st.container(border=True):
         st.subheader(form_title)
         
-        default_desc = editing_task['description'] if editing_task else ""
-        default_output = editing_task['expected_output'] if editing_task else ""
+        default_name = (editing_task['name'] or "") if editing_task else ""
+        default_desc = (editing_task['description'] or "") if editing_task else ""
+        default_output = (editing_task['expected_output'] or "") if editing_task else ""
         default_tools = editing_task.get('tools', []) if editing_task else []
         default_specialization = editing_task.get('agent_specialization', '') or '' if editing_task else ''
         
@@ -937,6 +1001,15 @@ def render_task_builder():
         agent_names = list(agent_options.keys())
         agent_ids = list(agent_options.values())
         default_index = agent_ids.index(default_agent_id) if default_agent_id in agent_ids else 0
+        default_agent_name = agent_names[default_index] if agent_names else None
+        
+        # Calculate default vector DB names
+        vector_dbs = db.read_all_vector_dbs()
+        default_vdb_names = []
+        if vector_dbs and editing_task:
+            db_options = {f"{vdb['name']} ({vdb['provider']})": vdb['id'] for vdb in vector_dbs}
+            default_vdb_ids = editing_task.get('vector_dbs', []) if editing_task else []
+            default_vdb_names = [name for name, v_id in db_options.items() if str(v_id) in default_vdb_ids or int(v_id) in default_vdb_ids]
 
         # Ensure session state variables for task editing exist and are in sync
         current_editing_task_id = editing_task['id'] if editing_task else None
@@ -949,13 +1022,75 @@ def render_task_builder():
 
         if "last_editing_task_id" not in st.session_state:
             st.session_state.last_editing_task_id = current_editing_task_id
+            st.session_state.task_name_input = default_name
             st.session_state.task_desc_area = default_desc
             st.session_state.task_output_area = default_output
+            st.session_state.temp_required_inputs = editing_task.get('required_inputs', [{"key": "", "prompt": ""}]) if editing_task else [{"key": "", "prompt": ""}]
+            st.session_state.task_specialization_input = default_specialization
+            st.session_state.task_agent_sel = default_agent_name
+            st.session_state.task_tools_sel = default_tools
+            st.session_state.task_vdb_sel = default_vdb_names
+            
+            # Clear old dynamic input keys from session state
+            for k in list(st.session_state.keys()):
+                if k.startswith("ri_key_") or k.startswith("ri_prompt_"):
+                    del st.session_state[k]
+            # Reset tool checkboxes to match newly loaded default_tools
+            for k in list(st.session_state.keys()):
+                if k.startswith("cb_task_"):
+                    del st.session_state[k]
+            # Set the new ones
+            for idx, item in enumerate(st.session_state.temp_required_inputs):
+                st.session_state[f"ri_key_{idx}"] = item.get("key", "") or ""
+                st.session_state[f"ri_prompt_{idx}"] = item.get("prompt", "") or ""
+                
         elif st.session_state.last_editing_task_id != current_editing_task_id:
             st.session_state.last_editing_task_id = current_editing_task_id
+            st.session_state.task_name_input = default_name
             st.session_state.task_desc_area = default_desc
             st.session_state.task_output_area = default_output
+            st.session_state.temp_required_inputs = editing_task.get('required_inputs', [{"key": "", "prompt": ""}]) if editing_task else [{"key": "", "prompt": ""}]
+            st.session_state.task_specialization_input = default_specialization
+            st.session_state.task_agent_sel = default_agent_name
+            st.session_state.task_tools_sel = default_tools
+            st.session_state.task_vdb_sel = default_vdb_names
+            
+            # Clear old dynamic input keys from session state
+            for k in list(st.session_state.keys()):
+                if k.startswith("ri_key_") or k.startswith("ri_prompt_"):
+                    del st.session_state[k]
+            # Reset tool checkboxes to match newly loaded default_tools
+            for k in list(st.session_state.keys()):
+                if k.startswith("cb_task_"):
+                    del st.session_state[k]
+            # Set the new ones
+            for idx, item in enumerate(st.session_state.temp_required_inputs):
+                st.session_state[f"ri_key_{idx}"] = item.get("key", "") or ""
+                st.session_state[f"ri_prompt_{idx}"] = item.get("prompt", "") or ""
 
+        # Sanitize session state keys before rendering widgets to avoid TypeError: bad argument type for built-in operation
+        for k in ["task_name_input", "task_desc_area", "task_output_area", "task_specialization_input"]:
+            if k in st.session_state:
+                if st.session_state[k] is None:
+                    st.session_state[k] = ""
+                elif not isinstance(st.session_state[k], str):
+                    st.session_state[k] = str(st.session_state[k])
+                    
+        for idx in range(len(st.session_state.get('temp_required_inputs', []))):
+            for pfx in ["ri_key_", "ri_prompt_"]:
+                k = f"{pfx}{idx}"
+                if k in st.session_state:
+                    if st.session_state[k] is None:
+                        st.session_state[k] = ""
+                    elif not isinstance(st.session_state[k], str):
+                        st.session_state[k] = str(st.session_state[k])
+
+        task_name = st.text_input(
+            "Task Name / Label (Optional)",
+            placeholder="e.g. analisi_database",
+            help="Give this task a unique name to reference its output in other tasks (e.g. `{task:analisi_database}`). Leave empty to use Task ID instead.",
+            key="task_name_input"
+        )
         description = st.text_area("Task Description", height=100, key="task_desc_area",
                                     help="Use `{variable_name}` to insert dynamic values from Required Inputs. E.g. `Crea un logo con sfumature {colore}`")
         expected_output = st.text_area("Expected Output", height=150, key="task_output_area",
@@ -1015,7 +1150,84 @@ def render_task_builder():
             st.caption(f"🔍 The agent will act as: **{selected_agent_name.split(' (')[0]} specialized in {agent_specialization}**")
         
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
-        selected_tools = st.multiselect("Assign Tools (Optional)", options=AVAILABLE_TOOLS, default=default_tools, key="task_tools_sel")
+        
+        # Display Tools inside a collapsible expander containing Premium Cards
+        with st.expander("🛠️ Assign Tools (Optional)", expanded=False):
+            st.caption("Select the tools this task's agent is authorized to use:")
+            
+            # 1. Initialize all tool checkboxes in session state so selection is preserved even when filtered out
+            for tool_id in AVAILABLE_TOOLS:
+                cb_key = f"cb_task_{tool_id}"
+                if cb_key not in st.session_state:
+                    st.session_state[cb_key] = tool_id in default_tools
+            
+            # 2. Search box for filtering tools
+            search_query = st.text_input("🔍 Cerca Tool", placeholder="Cerca tool per nome o descrizione...", key="tool_search_input", label_visibility="collapsed")
+            st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+            
+            # Filter tools list based on search query
+            filtered_tools = AVAILABLE_TOOLS
+            if search_query:
+                q = search_query.strip().lower()
+                filtered_tools = [
+                    t for t in AVAILABLE_TOOLS
+                    if q in t.lower() or q in t.replace("_", " ").lower() or q in tools_registry.get(t, {}).get("description", "").lower()
+                ]
+
+            # 3. Fixed height container with a scrollbar
+            with st.container(height=380):
+                st.markdown("""
+<style>
+/* Center checkbox vertically inside the tool card */
+div[data-testid="column"] div[data-testid="stCheckbox"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 100% !important;
+    min-height: 42px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+/* Ensure the border container itself has proper spacing */
+div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
+    padding: 0.6rem 0.8rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+                if filtered_tools:
+                    cols_per_row = 4
+                    rows = [filtered_tools[i:i + cols_per_row] for i in range(0, len(filtered_tools), cols_per_row)]
+                    
+                    for row_tools in rows:
+                        cols = st.columns(cols_per_row)
+                        for idx, tool_id in enumerate(row_tools):
+                            with cols[idx]:
+                                emoji = TOOL_EMOJIS.get(tool_id, "🛠️")
+                                pretty_name = tool_id.replace("_", " ").title()
+                                tool_desc = tools_registry.get(tool_id, {}).get("description", "")
+                                escaped_desc = html.escape(tool_desc)
+                                
+                                cb_key = f"cb_task_{tool_id}"
+                                with st.container(border=True):
+                                    c_cb, c_name = st.columns([1, 5], gap="small")
+                                    with c_cb:
+                                        st.checkbox("Select", key=cb_key, label_visibility="collapsed", help=tool_desc)
+                                    with c_name:
+                                        st.markdown(
+                                            f"<div style='font-size: 13.5px; font-weight: 600; display: flex; align-items: center; min-height: 42px; line-height: 1.2; margin-left: -5px;'>"
+                                            f"<span style='margin-right: 8px; font-size: 19px;'>{emoji}</span>"
+                                            f"<span>{pretty_name}</span>"
+                                            f"<span title='{escaped_desc}' style='cursor: help; margin-left: 6px; font-size: 15px; color: #4A90E2; font-weight: bold;'>ⓘ</span>"
+                                            f"</div>",
+                                            unsafe_allow_html=True
+                                        )
+                else:
+                    st.info("Nessun tool corrisponde alla ricerca.")
+
+            # Compile selected tools from all checkboxes state
+            selected_tools = [t for t in AVAILABLE_TOOLS if st.session_state.get(f"cb_task_{t}", False)]
+            st.session_state.task_tools_sel = selected_tools
+        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         
         selected_vector_dbs = []
         if 'vector_search' in selected_tools:
@@ -1163,16 +1375,24 @@ def render_task_builder():
             else:
                 agent_id = agent_options[selected_agent_name]
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
+                    if 'task_name_input' in st.session_state: del st.session_state.task_name_input
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("cb_task_"):
+                            del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
+                    if 'task_name_input' in st.session_state: del st.session_state.task_name_input
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("cb_task_"):
+                            del st.session_state[k]
                     st.rerun()
 
     if editing_task:
@@ -1181,6 +1401,11 @@ def render_task_builder():
                 del st.session_state.temp_required_inputs
             if 'last_editing_task_id' in st.session_state:
                 del st.session_state.last_editing_task_id
+            if 'task_name_input' in st.session_state:
+                del st.session_state.task_name_input
+            for k in list(st.session_state.keys()):
+                if k.startswith("cb_task_"):
+                    del st.session_state[k]
             clear_editing_state('editing_task_id')
 
     st.divider()
@@ -1219,12 +1444,16 @@ def render_task_builder():
                         for task in agent_tasks:
                             # Use a container with border for visual grouping of individual tasks
                             with st.container(border=True):
-                                st.markdown(f"**Task ID:** `{task['id']}`")
+                                if task.get('name'):
+                                    st.markdown(f"**Task Name:** `{task['name']}` (ID: `{task['id']}`)")
+                                else:
+                                    st.markdown(f"**Task ID:** `{task['id']}`")
                                 st.markdown(f"**Description:** {task['description']}")
                                 st.markdown("**Expected Output:**")
                                 st.code(task['expected_output'], language=None)
                                 if task.get('tools'):
-                                    st.markdown(f"**Assigned Tools:** `{', '.join(task['tools'])}`")
+                                    pretty_tools = [f"{TOOL_EMOJIS.get(t, '🛠️')} {t.replace('_', ' ').title()}" for t in task['tools']]
+                                    st.markdown(f"**Assigned Tools:** {', '.join(pretty_tools)}")
                                 
                                 if task.get('agent_specialization'):
                                     st.markdown(f"**🎯 Specialization:** *{task['agent_specialization']}*")
@@ -1243,7 +1472,7 @@ def render_task_builder():
                                 
                                 col1, col2 = st.columns([1, 1])
                                 with col1:
-                                    st.button("Edit", key=f"edit_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
+                                    st.button("Edit", key=f"edit_{task['id']}", on_click=start_editing_task, args=(task['id'],), use_container_width=True)
                                 with col2:
                                     if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
                                         db.delete_task(task['id'])
@@ -1264,7 +1493,7 @@ def render_task_builder():
                         
                         col1, col2 = st.columns([1, 1])
                         with col1:
-                            st.button("Edit", key=f"edit_unk_{task['id']}", on_click=set_editing_state, args=('editing_task_id', task['id']), use_container_width=True)
+                            st.button("Edit", key=f"edit_unk_{task['id']}", on_click=start_editing_task, args=(task['id'],), use_container_width=True)
                         with col2:
                             if st.button("Delete", key=f"delete_unk_{task['id']}", type="primary", use_container_width=True):
                                 db.delete_task(task['id'])
@@ -1278,6 +1507,100 @@ def render_workflow_assembler():
     db = get_db_manager()
     st.header("Workflow Assembler")
     st.markdown("Combine individual tasks into a sequential workflow.")
+
+    # Inject CSS/JS to style task buttons to look like normal clickable text
+    st.markdown("""
+<style>
+/* CSS to style task buttons inside the task scroll container to look like plain text */
+div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button {
+    background-color: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    color: inherit !important;
+    text-align: left !important;
+    font-weight: normal !important;
+    box-shadow: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    justify-content: flex-start !important;
+    display: inline-block !important;
+    cursor: pointer !important;
+    white-space: normal !important;
+    line-height: inherit !important;
+}
+div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:hover {
+    color: #29B6F6 !important;
+    background-color: transparent !important;
+    text-decoration: underline !important;
+}
+div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:focus {
+    background-color: transparent !important;
+    box-shadow: none !important;
+    color: inherit !important;
+    outline: none !important;
+}
+div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:active {
+    background-color: transparent !important;
+    color: #29B6F6 !important;
+}
+</style>
+
+<script>
+(function() {
+    function styleTaskButtons() {
+        const markers = document.querySelectorAll('.task-text-marker');
+        markers.forEach(marker => {
+            const container = marker.closest('div[data-testid="stElementContainer"]');
+            if (container) {
+                const nextContainer = container.nextElementSibling;
+                if (nextContainer) {
+                    const btn = nextContainer.querySelector('button');
+                    if (btn) {
+                        btn.style.backgroundColor = 'transparent';
+                        btn.style.border = 'none';
+                        btn.style.padding = '0';
+                        btn.style.margin = '0';
+                        btn.style.boxShadow = 'none';
+                        btn.style.color = 'inherit';
+                        btn.style.textAlign = 'left';
+                        btn.style.justifyContent = 'flex-start';
+                        btn.style.display = 'inline-block';
+                        btn.style.width = '100%';
+                        btn.style.height = 'auto';
+                        btn.style.minHeight = '0';
+                        btn.style.fontWeight = 'normal';
+                        btn.style.cursor = 'pointer';
+                        btn.style.whiteSpace = 'normal';
+                        
+                        btn.onmouseover = () => {
+                            btn.style.color = '#29B6F6';
+                            btn.style.textDecoration = 'underline';
+                            btn.style.backgroundColor = 'transparent';
+                        };
+                        btn.onmouseout = () => {
+                            btn.style.color = 'inherit';
+                            btn.style.textDecoration = 'none';
+                            btn.style.backgroundColor = 'transparent';
+                        };
+                        btn.onfocus = () => {
+                            btn.style.backgroundColor = 'transparent';
+                            btn.style.outline = 'none';
+                            btn.style.boxShadow = 'none';
+                        };
+                    }
+                }
+            }
+        });
+    }
+    if (!window.taskButtonsIntervalID) {
+        window.taskButtonsIntervalID = setInterval(styleTaskButtons, 300);
+    }
+    styleTaskButtons();
+})();
+</script>
+""", unsafe_allow_html=True)
 
     tasks = db.read_all_tasks()
     workflows = db.read_all_workflows()
@@ -1297,13 +1620,41 @@ def render_workflow_assembler():
         if a_id in tasks_by_agent:
             tasks_by_agent[a_id].append(task)
 
-    # --- Session state for selected tasks order ---
-    if 'wf_selected_task_ids' not in st.session_state:
-        st.session_state.wf_selected_task_ids = []
+    # --- Edit/Create Workflow State Management ---
+    editing_workflow = None
+    if 'editing_workflow_id' in st.session_state and st.session_state.editing_workflow_id:
+        wf_id = st.session_state.editing_workflow_id
+        editing_workflow = next((w for w in workflows if w['id'] == wf_id), None)
+        
+    current_editing_wf_id = editing_workflow['id'] if editing_workflow else None
+    
+    default_wf_name = (editing_workflow['name'] or "") if editing_workflow else ""
+    default_wf_human_check = editing_workflow['requires_human_check'] if editing_workflow else False
+    default_wf_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
+
+    if "last_editing_workflow_id" not in st.session_state:
+        st.session_state.last_editing_workflow_id = current_editing_wf_id
+        st.session_state.wf_name_input = default_wf_name
+        st.session_state.wf_human_check = default_wf_human_check
+        st.session_state.wf_selected_task_ids = default_wf_task_ids
+        for k in list(st.session_state.keys()):
+            if k.startswith("wf_check_"):
+                del st.session_state[k]
+    elif st.session_state.last_editing_workflow_id != current_editing_wf_id:
+        st.session_state.last_editing_workflow_id = current_editing_wf_id
+        st.session_state.wf_name_input = default_wf_name
+        st.session_state.wf_human_check = default_wf_human_check
+        st.session_state.wf_selected_task_ids = default_wf_task_ids
+        for k in list(st.session_state.keys()):
+            if k.startswith("wf_check_"):
+                del st.session_state[k]
 
     def remove_wf_task(task_id):
         if task_id in st.session_state.wf_selected_task_ids:
             st.session_state.wf_selected_task_ids.remove(task_id)
+            chk_key = f"wf_check_{task_id}"
+            if chk_key in st.session_state:
+                del st.session_state[chk_key]
 
     def move_wf_task_up(idx):
         lst = st.session_state.wf_selected_task_ids
@@ -1316,7 +1667,11 @@ def render_workflow_assembler():
             lst[idx], lst[idx + 1] = lst[idx + 1], lst[idx]
 
     with st.container(border=True):
-        st.subheader("Create a New Workflow")
+        if editing_workflow:
+            st.subheader(f"Edit Workflow: {editing_workflow['name']}")
+        else:
+            st.subheader("Create a New Workflow")
+            
         workflow_name = st.text_input("Workflow Name", key="wf_name_input")
         requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
         
@@ -1355,13 +1710,40 @@ def render_workflow_assembler():
                     with st.container(height=300, border=True):
                         for task in agent_tasks:
                             is_selected = task['id'] in st.session_state.wf_selected_task_ids
-                            label = f"**Task #{task['id']}:** {task['description'][:80]}{'...' if len(task['description']) > 80 else ''}"
-                            if st.checkbox(label, value=is_selected, key=f"wf_check_{task['id']}"):
-                                if task['id'] not in st.session_state.wf_selected_task_ids:
-                                    st.session_state.wf_selected_task_ids.append(task['id'])
-                            else:
-                                if task['id'] in st.session_state.wf_selected_task_ids:
-                                    st.session_state.wf_selected_task_ids.remove(task['id'])
+                            expanded_key = f"wf_task_expanded_{task['id']}"
+                            if expanded_key not in st.session_state:
+                                st.session_state[expanded_key] = False
+                                
+                            desc_len = len(task['description'])
+                            has_truncation = desc_len > 80
+                            
+                            # Layout as columns: checkbox on the left, clickable text on the right
+                            col_chk, col_txt = st.columns([1, 14], gap="small")
+                            with col_chk:
+                                if st.checkbox("Select", value=is_selected, key=f"wf_check_{task['id']}", label_visibility="collapsed"):
+                                    if task['id'] not in st.session_state.wf_selected_task_ids:
+                                        st.session_state.wf_selected_task_ids.append(task['id'])
+                                else:
+                                    if task['id'] in st.session_state.wf_selected_task_ids:
+                                        st.session_state.wf_selected_task_ids.remove(task['id'])
+                            with col_txt:
+                                st.markdown('<div class="task-text-marker" style="display:none;"></div>', unsafe_allow_html=True)
+                                task_display_name = task.get('name') if task.get('name') else f"Task #{task['id']}"
+                                label = f"{task_display_name}: {task['description'][:75]}{'...' if has_truncation else ''}"
+                                # Clicking this button ONLY toggles expansion
+                                if st.button(label, key=f"wf_txt_btn_{task['id']}", help="Clicca per mostrare/nascondere i dettagli del task", use_container_width=True):
+                                    st.session_state[expanded_key] = not st.session_state[expanded_key]
+                                    st.rerun()
+                                        
+                            if st.session_state[expanded_key]:
+                                with st.container(border=True):
+                                    st.markdown(f"📄 **Full Description:**\n{task['description']}")
+                                    st.markdown(f"🎯 **Expected Output:**\n{task['expected_output']}")
+                                    if task.get('agent_specialization'):
+                                        st.markdown(f"⚙️ **Specialization:** `{task['agent_specialization']}`")
+                                    if task.get('tools'):
+                                        pretty_t = [t.replace('_', ' ').title() for t in task['tools']]
+                                        st.markdown(f"🛠️ **Assigned Tools:** `{', '.join(pretty_t)}`")
         
         # --- Ordered Task Preview ---
         st.markdown("---")
@@ -1380,21 +1762,69 @@ def render_workflow_assembler():
                     if agent:
                         col_av.image(get_agent_avatar_url(agent), width=36)
                     if task:
-                        col_txt.markdown(f"**{task['description'][:70]}{'...' if len(task['description']) > 70 else ''}**")
+                        t_name_display = task.get('name') if task.get('name') else f"Task #{task['id']}"
+                        col_txt.markdown(f"**{t_name_display}**: {task['description'][:70]}{'...' if len(task['description']) > 70 else ''}")
                     col_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,), help="Move up")
                     col_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,), help="Move down")
                     col_rem.button("✖️", key=f"wf_rem_{i}", on_click=remove_wf_task, args=(t_id,), help="Remove")
         
         st.markdown("---")
-        if st.button("💾 Save Workflow", type="primary", use_container_width=True):
-            sane_workflow_name = sanitize_input(workflow_name)
-            if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
-                st.error("Workflow Name and at least one Task are required.")
-            else:
-                db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
-                st.success(f"Workflow '{sane_workflow_name}' created successfully!")
-                del st.session_state.wf_selected_task_ids
-                st.rerun()
+        if editing_workflow:
+            col_save, col_cancel = st.columns([1, 1])
+            with col_save:
+                if st.button("💾 Update Workflow", type="primary", use_container_width=True):
+                    sane_workflow_name = sanitize_input(workflow_name)
+                    if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
+                        st.error("Workflow Name and at least one Task are required.")
+                    else:
+                        db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
+                        st.success(f"Workflow '{sane_workflow_name}' updated successfully!")
+                        st.session_state.editing_workflow_id = None
+                        if 'last_editing_workflow_id' in st.session_state:
+                            del st.session_state.last_editing_workflow_id
+                        if 'wf_selected_task_ids' in st.session_state:
+                            del st.session_state.wf_selected_task_ids
+                        if 'wf_name_input' in st.session_state:
+                            del st.session_state.wf_name_input
+                        if 'wf_human_check' in st.session_state:
+                            del st.session_state.wf_human_check
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("wf_check_"):
+                                del st.session_state[k]
+                        st.rerun()
+            with col_cancel:
+                if st.button("❌ Cancel Edit", use_container_width=True):
+                    st.session_state.editing_workflow_id = None
+                    if 'last_editing_workflow_id' in st.session_state:
+                        del st.session_state.last_editing_workflow_id
+                    if 'wf_selected_task_ids' in st.session_state:
+                        del st.session_state.wf_selected_task_ids
+                    if 'wf_name_input' in st.session_state:
+                        del st.session_state.wf_name_input
+                    if 'wf_human_check' in st.session_state:
+                        del st.session_state.wf_human_check
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("wf_check_"):
+                            del st.session_state[k]
+                    st.rerun()
+        else:
+            if st.button("💾 Save Workflow", type="primary", use_container_width=True):
+                sane_workflow_name = sanitize_input(workflow_name)
+                if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
+                    st.error("Workflow Name and at least one Task are required.")
+                else:
+                    db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
+                    st.success(f"Workflow '{sane_workflow_name}' created successfully!")
+                    if 'wf_selected_task_ids' in st.session_state:
+                        del st.session_state.wf_selected_task_ids
+                    if 'wf_name_input' in st.session_state:
+                        del st.session_state.wf_name_input
+                    if 'wf_human_check' in st.session_state:
+                        del st.session_state.wf_human_check
+                    for k in list(st.session_state.keys()):
+                        if k.startswith("wf_check_"):
+                            del st.session_state[k]
+                    st.rerun()
 
     st.divider()
     st.subheader("Saved Workflows")
@@ -1432,7 +1862,8 @@ def render_workflow_assembler():
                             else:
                                 st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
                         with col_text:
-                            st.markdown(f"**Step {i+1}:** {task['description']}")
+                            t_name_display = task.get('name') if task.get('name') else f"Task #{task['id']}"
+                            st.markdown(f"**Step {i+1} ({t_name_display}):** {task['description']}")
                     else:
                         st.error(f"Step {i+1}: Task ID {task_id} not found")
                 
@@ -1444,6 +1875,7 @@ def render_workflow_assembler():
                     if task:
                         agent = agent_id_map.get(task['agent_id'])
                         task_data = {
+                            'name': task.get('name') or f"Task #{task['id']}",
                             'description': task['description'],
                             'expected_output': task['expected_output'],
                             'agent': agent['name'] if agent else 'Unknown Agent'
@@ -1456,13 +1888,23 @@ def render_workflow_assembler():
                 # 3. Sanitize filename and provide download button
                 safe_filename = f"{sanitize_filename(workflow['name'])}.yaml"
                 
-                col1, col2 = st.columns([1, 2])
-                with col1:
+                col_del, col_edit, col_export = st.columns([1, 1, 2])
+                with col_edit:
+                    if st.button("Edit", key=f"edit_wf_{workflow['id']}", use_container_width=True):
+                        st.session_state.editing_workflow_id = workflow['id']
+                        if 'last_editing_workflow_id' in st.session_state:
+                            del st.session_state.last_editing_workflow_id
+                        st.rerun()
+                with col_del:
                     if st.button("Delete", key=f"del_wf_{workflow['id']}", type="primary", use_container_width=True):
                         db.delete_workflow(workflow['id'])
                         st.toast(f"Deleted workflow {workflow['name']}", icon="🗑️")
+                        if st.session_state.get('editing_workflow_id') == workflow['id']:
+                            st.session_state.editing_workflow_id = None
+                            if 'last_editing_workflow_id' in st.session_state:
+                                del st.session_state.last_editing_workflow_id
                         st.rerun()
-                with col2:
+                with col_export:
                     st.download_button(
                         label="Export to YAML",
                         data=yaml_string.encode('utf-8'),
@@ -1630,8 +2072,15 @@ def main():
             except ValueError:
                 return False
         try:
-            output = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}"]).decode()
-            return str(pid) in output
+            if sys.platform.startswith("win"):
+                output = subprocess.check_output(["tasklist", "/FI", f"PID eq {pid}"]).decode()
+                return str(pid) in output
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return False
+                return True
         except Exception:
             return False
 
@@ -1640,23 +2089,33 @@ def main():
             # Stop bot
             with open(bot_pid_file, 'r') as f:
                 pid = int(f.read().strip())
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+            if sys.platform.startswith("win"):
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+            else:
+                import signal
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
             if os.path.exists(bot_pid_file):
                 os.remove(bot_pid_file)
         else:
             # Start bot
-            flags = 0x08000000 # CREATE_NO_WINDOW on Windows
             # Force UTF-8 environment for the bot process
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
             
             with open("bot.log", "w", encoding="utf-8") as log_file:
+                popen_kwargs = {
+                    "stdout": log_file,
+                    "stderr": subprocess.STDOUT,
+                    "env": env
+                }
+                if sys.platform.startswith("win"):
+                    popen_kwargs["creationflags"] = 0x08000000 # CREATE_NO_WINDOW
                 p = subprocess.Popen(
                     [sys.executable, "bot.py"], 
-                    creationflags=flags,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    env=env
+                    **popen_kwargs
                 )
             with open(bot_pid_file, 'w') as f:
                 f.write(str(p.pid))
@@ -1807,6 +2266,8 @@ def main():
         st.session_state.editing_task_id = None
     if 'editing_agent_id' not in st.session_state:
         st.session_state.editing_agent_id = None
+    if 'editing_workflow_id' not in st.session_state:
+        st.session_state.editing_workflow_id = None
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Tab 1: Add Database",
@@ -1818,22 +2279,46 @@ def main():
     ])
 
     with tab1:
-        render_knowledge_base()
+        try:
+            render_knowledge_base()
+        except Exception as e:
+            st.error(f"Errore nel caricamento del Database: {e}")
+            st.exception(e)
 
     with tab2:
-        render_api_vault()
+        try:
+            render_api_vault()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di API Vault & Model Registry: {e}")
+            st.exception(e)
 
     with tab3:
-        render_agent_caserma()
+        try:
+            render_agent_caserma()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di Agent Caserma: {e}")
+            st.exception(e)
     
     with tab4:
-        render_task_builder()
+        try:
+            render_task_builder()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di Task Builder: {e}")
+            st.exception(e)
 
     with tab5:
-        render_workflow_assembler()
+        try:
+            render_workflow_assembler()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di Workflow Assembler: {e}")
+            st.exception(e)
 
     with tab6:
-        render_history_monitoring()
+        try:
+            render_history_monitoring()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di History & Monitoring: {e}")
+            st.exception(e)
 
 
 if __name__ == "__main__":

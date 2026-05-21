@@ -162,15 +162,33 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
     context.user_data["base_workflow"] = workflow
     context.user_data["chat_history"] = []
 
-    await query.edit_message_text(f"📝 <b>Initializing Planner for '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(f"📝 <b>Loading Workflow '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML)
 
-    initial_prompt = f"I want to run the workflow '{workflow['name']}'. What do you need from me?"
-    result = await asyncio.to_thread(master_ai.chat_plan, initial_prompt, [], workflow)
+    # Build a natural-language summary directly from DB data (no LLM call here)
+    # This guarantees the initial presentation is faithful to the predefined workflow.
+    task_ids = workflow.get('task_ids') or []
+    task_lines = []
+    for i, tid in enumerate(task_ids):
+        t_rec = db.read_task(tid)
+        if t_rec:
+            a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+            agent_name = a_rec.get('name', a_rec.get('role', 'Unknown agent')) if a_rec else 'Unknown agent'
+            t_label = t_rec.get('name') or t_rec.get('description', '')[:60]
+            task_lines.append(f"{i+1}. <b>{t_label}</b> — <i>{agent_name}</i>")
 
-    context.user_data["chat_history"].append({"role": "user", "content": initial_prompt})
-    context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
+    tasks_block = "\n".join(task_lines) if task_lines else "<i>No tasks defined.</i>"
+    intro = (
+        f"\U0001f4cb <b>Workflow: {workflow['name']}</b>\n\n"
+        f"Here's the predefined plan I'll execute for you:\n\n"
+        f"{tasks_block}\n\n"
+        f"\U0001f4ac <i>Reply with your specific inputs or context (e.g. dataset name, objective...), "
+        f"or just say <b>\"go\"</b> to start as-is. You can also ask me to customize any step.</i>"
+    )
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=result["response"])
+    # Record the intro as the assistant's first message so the conversation flows naturally
+    context.user_data["chat_history"].append({"role": "assistant", "content": intro})
+
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=intro, parse_mode=ParseMode.HTML)
     return PLANNING_MODE
 
 @whitelist_check
@@ -221,23 +239,44 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if result.get("status") == "ready":
         plan = result.get("plan")
+        # Determine whether the workflow was modified by the user.
+        # If 'modified' is False and we have a predefined base_workflow,
+        # we MUST use the standard execution path (execute_run_with_resume)
+        # so the original DB agents/tasks/tools are used untouched.
+        is_modified = result.get("modified", True)  # default True for safety
+        use_predefined = base_workflow and not is_modified
+
         if plan:
-            context.user_data["final_plan"] = plan
-            # Show the final plan one last time for clarity
+            # Show the final plan summary
             final_summary = format_plan_summary(plan)
             await context.bot.send_message(
                 chat_id=chat_id, 
                 text=f"✅ <b>Plan Confirmed!</b>\n\n{final_summary}",
                 parse_mode=ParseMode.HTML
             )
-            await context.bot.send_message(chat_id=chat_id, text="🚀 Starting execution...")
-            
+
+        await context.bot.send_message(chat_id=chat_id, text="🚀 Starting execution...")
+
+        if use_predefined:
+            # Predefined workflow confirmed as-is: use the DB workflow without dynamic crew
+            logger.info(f"User confirmed predefined workflow '{base_workflow['name']}' (id={base_workflow['id']}) without changes. Using standard execution path.")
+            context.user_data["current_workflow_id"] = base_workflow["id"]
+            context.user_data["final_plan"] = None  # Ensure dynamic builder is NOT triggered
+        elif plan:
+            # User requested modifications or created a custom plan: use dynamic crew
+            logger.info(f"User confirmed a modified/custom plan. Using dynamic crew builder.")
+            context.user_data["final_plan"] = plan
             if base_workflow:
                 context.user_data["current_workflow_id"] = base_workflow["id"]
-                
-            context.user_data["execution_context"] = {"user_input": " ".join([m['content'] for m in chat_history])}
-            await execute_crew(update, context)
-                
+        else:
+            # No plan available (edge case): fall back to predefined workflow_id if available
+            if base_workflow:
+                context.user_data["current_workflow_id"] = base_workflow["id"]
+                context.user_data["final_plan"] = None
+
+        context.user_data["execution_context"] = {"user_input": " ".join([m['content'] for m in chat_history])}
+        await execute_crew(update, context)
+            
         return ConversationHandler.END
     else:
         # If still planning, but a draft plan exists, show it

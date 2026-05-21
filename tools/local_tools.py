@@ -212,3 +212,182 @@ def ask_operator(question: str) -> str:
 
     answer = request_human_input(chat_id, question)
     return f"Human replied: {answer}"
+
+
+@tool("Calculator Tool")
+def calculate(expression: str) -> str:
+    """
+    Evaluates a mathematical expression safely and returns the result.
+    Supported operations: addition (+), subtraction (-), multiplication (*), division (/), modulo (%), exponentiation (**).
+    Supported functions: sqrt(), abs(), round(), min(), max(), sum(), pow(), sin(), cos(), tan(), log(), log10(), exp().
+    Supported constants: pi, e.
+    Example: '2 * (3 + 5)' or 'sqrt(16) + log(e)'
+    """
+    import math
+    safe_dict = {
+        'abs': abs,
+        'round': round,
+        'min': min,
+        'max': max,
+        'sum': sum,
+        'pow': pow,
+        'sqrt': math.sqrt,
+        'sin': math.sin,
+        'cos': math.cos,
+        'tan': math.tan,
+        'log': math.log,
+        'log10': math.log10,
+        'exp': math.exp,
+        'pi': math.pi,
+        'e': math.e,
+    }
+    
+    # Basic input sanitation (clean spaces)
+    expression = expression.strip()
+    
+    try:
+        # Evaluate safely in sandbox
+        result = eval(expression, {"__builtins__": None}, safe_dict)
+        return str(result)
+    except Exception as e:
+        return f"Error evaluating expression '{expression}': {e}"
+
+
+@tool("FileWriteTool")
+def write_python_file(file_path: str, content: str) -> str:
+    """
+    Permette all'agente di prendere il codice generato e salvarlo fisicamente nel tuo progetto come un vero e proprio file .py (es. modello_pirolisi.py).
+    Il percorso può essere relativo (es. 'modello_pirolisi.py') o assoluto all'interno del progetto.
+    Questo tool consente esclusivamente la scrittura di file Python con estensione '.py'.
+    """
+    # Force extension to be .py
+    if not file_path.endswith('.py'):
+        return "Error: FileWriteTool only allows writing Python files ending with '.py'."
+        
+    # Resolve absolute path relative to current working directory (project root)
+    project_root = os.path.abspath(os.getcwd())
+    
+    # If the path is relative, resolve it against the project root
+    if not os.path.isabs(file_path):
+        full_path = os.path.abspath(os.path.join(project_root, file_path))
+    else:
+        full_path = os.path.abspath(file_path)
+        
+    # Security checks
+    if not full_path.startswith(project_root):
+        return "Error: Security violation. Path is outside the designated project directory."
+        
+    # Block writing to sensitive directories (core, ui, db, venv, .git)
+    sensitive_dirs = [
+        os.path.join(project_root, "core"),
+        os.path.join(project_root, "ui"),
+        os.path.join(project_root, "db"),
+        os.path.join(project_root, "venv"),
+        os.path.join(project_root, ".git"),
+    ]
+    for s in sensitive_dirs:
+        if full_path.startswith(s):
+            return f"Error: Writing to sensitive directory '{os.path.basename(s)}' is restricted for stability reasons."
+
+    try:
+        # Create directories if they don't exist
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        # Return path relative to the project root for clean agent visibility
+        rel_path = os.path.relpath(full_path, project_root)
+        return f"Successfully saved Python code to '{rel_path}' in the project root."
+    except IOError as e:
+        return f"Error writing to file '{file_path}': {e}"
+    except Exception as e:
+        return f"An unexpected error occurred while writing to '{file_path}': {e}"
+
+
+@tool("FileReadTool")
+def read_python_file(file_path: str) -> str:
+    """
+    Permette all'agente di leggere il contenuto di un file .py generato o salvato nel progetto (es. modello_pirolisi.py).
+    Il percorso può essere relativo (es. 'modello_pirolisi.py') o assoluto all'interno del progetto.
+    Questo tool consente esclusivamente la lettura di file Python con estensione '.py'.
+    """
+    # Force extension to be .py
+    if not file_path.endswith('.py'):
+        return "Error: FileReadTool only allows reading Python files ending with '.py'."
+        
+    # Resolve absolute path relative to current working directory (project root)
+    project_root = os.path.abspath(os.getcwd())
+    
+    # If the path is relative, resolve it against the project root
+    if not os.path.isabs(file_path):
+        full_path = os.path.abspath(os.path.join(project_root, file_path))
+    else:
+        full_path = os.path.abspath(file_path)
+        
+    # Security checks
+    if not full_path.startswith(project_root):
+        return "Error: Security violation. Path is outside the designated project directory."
+        
+    # Block reading from sensitive directories (db, .env, venv, .git)
+    sensitive_dirs = [
+        os.path.join(project_root, "db"),
+        os.path.join(project_root, "venv"),
+        os.path.join(project_root, ".git"),
+    ]
+    for s in sensitive_dirs:
+        if full_path.startswith(s):
+            return f"Error: Reading from sensitive directory '{os.path.basename(s)}' is restricted for security reasons."
+
+    if not os.path.isfile(full_path):
+        return f"Error: File not found at path '{file_path}' in the project root."
+
+    try:
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return content
+    except IOError as e:
+        return f"Error reading file '{file_path}': {e}"
+    except Exception as e:
+        return f"An unexpected error occurred while reading '{file_path}': {e}"
+
+
+
+@tool("Python_REPL_Tool")
+def python_repl(code: str) -> str:
+    """
+    Esegue il codice Python fornito in un ambiente isolato (subprocess) e restituisce lo standard output e standard error.
+    Può essere usato per fare un "test di compilazione" veloce, verificare sintassi, importare librerie (es. Pydantic)
+    e verificare funzioni/classi prima di salvare il file definitivo. Il tempo limite di esecuzione è di 10 secondi.
+    """
+    import subprocess
+    import sys
+    
+    # First, do a syntax check using built-in compile
+    try:
+        compile(code, "<string>", "exec")
+    except SyntaxError as e:
+        return f"Syntax Error: {e.msg} at line {e.lineno}, col {e.offset}\nCode line: {e.text}"
+    except Exception as e:
+        return f"Compilation Error: {e}"
+
+    # If syntax is valid, execute the code in a subprocess
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        output = []
+        if result.stdout:
+            output.append(f"--- STDOUT ---\n{result.stdout}")
+        if result.stderr:
+            output.append(f"--- STDERR ---\n{result.stderr}")
+            
+        if not output:
+            return "Execution completed successfully with no output (exit code 0)."
+            
+        return "\n".join(output)
+    except subprocess.TimeoutExpired:
+        return "Error: Execution timed out (limit: 10 seconds)."
+    except Exception as e:
+        return f"Runtime Error during execution: {e}"

@@ -55,3 +55,21 @@ tools_registry:
     display_name: "Local: Vector Database Search"
     description: "Queries a local vector database to retrieve context from uploaded documents."
     required_secrets: []
+  calculator:
+    display_name: "Local: Calculator Tool"
+    description: "Evaluates mathematical expressions safely (supports +, -, *, /, sqrt, log, etc.)."
+    required_secrets: []
+  file_read_tool:
+    display_name: "Code: File Reader (.py only)"
+    description: "Reads Python code from a .py file physically located in the project root."
+    required_secrets: []
+  file_write_tool:
+    display_name: "Code: File Writer (.py only)"
+    description: "Saves Python code physically in the project as a .py file."
+    required_secrets: []
+  python_repl_tool:
+    display_name: "Code: Python REPL (Compile/Run)"
+    description: "Executes Python code in a subprocess to test syntax, compile, and verify imports."
+    required_secrets: []
+
+
