@@ -17,18 +17,4 @@ services:
       - ./storage:/app/storage
     restart: unless-stopped
 
-  bot:
-    build: .
-    container_name: alfredo_bot
-    command: python bot.py
-    env_file:
-      - .env
-    environment:
-      - PYTHONPATH=/app
-    volumes:
-      - ./db:/app/db
-      - ./workspace:/app/workspace
-      - ./storage:/app/storage
-    restart: unless-stopped
-    depends_on:
-      - dashboard
+

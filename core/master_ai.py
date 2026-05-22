@@ -33,7 +33,7 @@ Your goal is to help the user design a plan to achieve their objective using a t
 
 You must maintain a conversational tone in your 'response'.
 If the user asks for changes, acknowledge them, update your internal plan, and ask if they agree.
-If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes"), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
+If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes", "go"), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
 Otherwise, set the "status" to "planning", provide your conversational response in "response", and you may leave "plan" null or provide a draft.
 
 AVAILABLE TOOLS:
@@ -48,6 +48,12 @@ STRATEGIC RULES FOR CONCISENESS & SPECIALIZATION:
 - All tasks MUST have an 'expected_output' that specifies a "synthesized, structured report or clear list of findings".
 - Avoid dispersion: agents should focus only on the most relevant data needed for the next step.
 - Agent Specialization: Use the 'agent_specialization' field in tasks to focus or customize the agent's persona specifically for that task (e.g. chemistry, copywriting, physics). If the same base agent is reused in different tasks, assign distinct 'agent_specialization' strings to give them different personalities/focuses.
+
+RULES FOR REQUIRED INPUTS:
+- If a task description needs user-provided information (e.g. a dataset name, target compound, research topic), use a {variable_name} placeholder in the description.
+- CRITICAL: For EVERY {variable_name} placeholder used in a task description, you MUST add a matching entry in that task's "required_inputs" list, with a clear user-facing "prompt" question.
+- Example: description="Analyze {dataset_name}" → required_inputs=[{"key": "dataset_name", "prompt": "What is the name of the dataset to analyze?"}]
+- If a task needs no variable inputs from the user, set "required_inputs": [].
 
 OUTPUT FORMAT (JSON ONLY):
 {
@@ -65,15 +71,19 @@ OUTPUT FORMAT (JSON ONLY):
     ],
     "tasks": [
       {
-        "description": "Clear and detailed task description",
+        "description": "Clear and detailed task description. Use {variable_name} for user-provided values.",
         "expected_output": "What the task should produce",
         "agent_role": "MUST match exactly one role from the agents list",
-        "agent_specialization": "Optional domain specialization for the agent in this task (e.g., 'Quantum Physics', 'Italian Cooking')"
+        "agent_specialization": "Optional domain specialization for the agent in this task",
+        "required_inputs": [
+          {"key": "variable_name", "prompt": "User-facing question to ask before execution"}
+        ]
       }
     ]
   }
 }
 """
+
 
 OUTPUT_REFINER_PROMPT = """
 You are Alfredo, the Master AI Editor and Quality Controller.
@@ -172,15 +182,23 @@ class MasterAI:
         
         # Default Robust Configuration (Simple vs Complex)
         # Source: https://ai.google.dev/gemini-api/docs/models (May 2026)
-        # gemini-2.0-flash and gemini-2.0-flash-lite are DEPRECATED — use 2.5 series.
+        # Cascade: primary → gemini-2.5-flash → gemini-3.5-flash (latest GA model)
         if complexity == "complex":
-            self.model_name = "gemini-2.5-pro"          # Best reasoning, for complex tasks
+            self.model_name = "gemini-2.5-pro"           # Best reasoning, for complex tasks
             self.model_provider = "gemini"
-            self.fallback_model = "gemini/gemini-2.5-flash"
+            self.fallback_chain = [
+                "gemini/gemini-2.5-flash",               # Tier-2: stable Flash
+                "gemini/gemini-3.5-flash",               # Tier-3: latest GA model
+            ]
         else:
-            self.model_name = "gemini-2.5-flash-lite"   # Fastest, lowest traffic, stable
+            self.model_name = "gemini-2.5-flash-lite"    # Fastest, lowest traffic, stable
             self.model_provider = "gemini"
-            self.fallback_model = "gemini/gemini-2.5-flash"  # Fallback to stronger flash
+            self.fallback_chain = [
+                "gemini/gemini-2.5-flash",               # Tier-2: stronger Flash
+                "gemini/gemini-3.5-flash",               # Tier-3: latest GA model
+            ]
+        # Keep self.fallback_model for backward compat (first in chain)
+        self.fallback_model = self.fallback_chain[0] if self.fallback_chain else None
 
         # Attempt to get model details from DB if model_id is provided
         if model_id:
@@ -288,44 +306,84 @@ class MasterAI:
 
     def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0) -> str:
         """
-        Robust LLM call with Retry logic (503/429) and Fallback mechanism.
-        Mimics 'RobustLLM' logic from identities.py.
+        Robust LLM call with exponential backoff retry and a multi-tier fallback cascade.
+
+        Retry strategy per model:
+          - 503 / 429 / "high demand": exponential backoff → 10s, 30s, 60s (max 3 attempts)
+          - Other errors: no retry, fall through immediately to next fallback
+
+        Fallback cascade:
+          primary_model → fallback_chain[0] → fallback_chain[1] → ...
+          Each tier gets its own independent retry budget.
         """
         import time
-        max_retries = 3
-        
-        for attempt in range(max_retries):
-            try:
-                response = litellm.completion(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    response_format={"type": "json_object"} # Force JSON mode for all providers
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                err_msg = str(e)
-                # Check for temporary errors (503 Service Unavailable, 429 Rate Limit)
-                if ("503" in err_msg or "429" in err_msg or "high demand" in err_msg.lower()) and attempt < max_retries - 1:
-                    wait = (attempt + 1) * 3
-                    logger.warning(f"MasterAI Retry {attempt+1}/{max_retries} due to: {err_msg[:50]}... Waiting {wait}s")
+
+        # --- Retry waits for transient errors (seconds) ---
+        RETRY_WAITS = [10, 30, 60]  # Aggressive: Google 503s typically last 30-60s
+        TRANSIENT_KEYWORDS = ("503", "429", "high demand", "unavailable", "rate limit", "overloaded")
+
+        def _is_transient(err: Exception) -> bool:
+            msg = str(err).lower()
+            return any(kw in msg for kw in TRANSIENT_KEYWORDS)
+
+        def _try_model(m: str, use_json_mode: bool = True) -> str:
+            """Attempt a single model with retry on transient errors."""
+            last_err = None
+            for attempt, wait in enumerate([0] + RETRY_WAITS):
+                if wait > 0:
+                    logger.warning(
+                        f"MasterAI [{m}] Retry {attempt}/{len(RETRY_WAITS)} — "
+                        f"waiting {wait}s before retry..."
+                    )
                     time.sleep(wait)
-                    continue
-                
-                # If retry failed or it's a critical error, try fallback
-                if model != self.fallback_model:
-                    logger.error(f"MasterAI Critical Error with {model}: {e}. Attempting fallback to {self.fallback_model}...")
-                    try:
-                        response = litellm.completion(
-                            model=self.fallback_model,
-                            messages=messages,
-                            temperature=temperature
+                try:
+                    call_kwargs = dict(
+                        model=m,
+                        messages=messages,
+                        temperature=temperature,
+                    )
+                    if use_json_mode:
+                        call_kwargs["response_format"] = {"type": "json_object"}
+                    response = litellm.completion(**call_kwargs)
+                    return response.choices[0].message.content
+                except Exception as e:
+                    last_err = e
+                    if _is_transient(e) and attempt < len(RETRY_WAITS):
+                        logger.warning(
+                            f"MasterAI [{m}] Transient error (attempt {attempt+1}): "
+                            f"{str(e)[:80]}"
                         )
-                        return response.choices[0].message.content
-                    except Exception as fe:
-                        logger.error(f"MasterAI Fallback also failed: {fe}")
-                
-                raise e
+                        continue  # retry with wait
+                    else:
+                        # Non-transient or budget exhausted — stop retrying this model
+                        break
+            raise last_err
+
+        # Build the full ordered list: primary + fallback chain
+        fallback_chain = getattr(self, 'fallback_chain', [])
+        all_models = [model] + [fb for fb in fallback_chain if fb != model]
+
+        last_exception = None
+        for i, candidate in enumerate(all_models):
+            try:
+                logger.info(f"MasterAI — calling model tier {i+1}/{len(all_models)}: {candidate}")
+                # Only use json_mode for the primary model call; some fallbacks may not support it
+                result = _try_model(candidate, use_json_mode=(i == 0))
+                if i > 0:
+                    logger.info(f"MasterAI — succeeded on fallback tier {i+1} ({candidate}).")
+                return result
+            except Exception as e:
+                last_exception = e
+                logger.error(
+                    f"MasterAI — tier {i+1} ({candidate}) exhausted all retries: "
+                    f"{str(e)[:120]}"
+                )
+
+        # All tiers failed
+        logger.critical(
+            f"MasterAI — ALL {len(all_models)} model tiers failed. Last error: {last_exception}"
+        )
+        raise last_exception
 
     def evaluate_intent(self, user_prompt: str, previous_context: str = None) -> Dict[str, Any]:
         """

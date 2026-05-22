@@ -36,7 +36,7 @@ if sys.platform == "win32":
 
 # Configure logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -71,6 +71,7 @@ else:
 
 # --- ConversationHandler States ---
 PLANNING_MODE = 1
+COLLECTING_INPUTS = 2
 
 
 # --- Whitelist Check Decorator ---
@@ -81,22 +82,64 @@ def whitelist_check(func):
             logger.warning(
                 f"Unauthorized access attempt by user ID: {user_id} ({update.effective_user.username})"
             )
-            await update.message.reply_text(
-                "You are not authorized to use this bot. Your User ID has been logged."
-            )
+            if update.message:
+                await update.message.reply_text(
+                    "You are not authorized to use this bot. Your User ID has been logged."
+                )
             return
         return await func(update, context, *args, **kwargs)
 
     return wrapper
 
 
+# --- Shared Helpers ---
+
+async def _send_workflow_list(chat_id: int, bot) -> None:
+    """Sends the workflow selection menu to the given chat_id."""
+    workflows = db.read_all_workflows()
+    if not workflows:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="No workflows found in the database. Please add some via the Streamlit UI."
+        )
+        return
+    keyboard = []
+    for wf in workflows:
+        keyboard.append(
+            [InlineKeyboardButton(wf["name"], callback_data=f"workflow_{wf['id']}")]
+        )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await bot.send_message(
+        chat_id=chat_id,
+        text="👋 Hello! I am Alfredo, your AI Assistant.\n\nYou can <b>type a request</b> directly or choose a workflow from the list below:",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML
+    )
+
+
+def _resolve_db_placeholders(text: str, task_record: dict) -> str:
+    """
+    Resolves DB-set placeholder values in a text string for display purposes.
+    Replaces {specialization} with the agent_specialization stored on the task,
+    so the bot shows e.g. "specialized in Chemical Engineering" instead of
+    "specialized in {specialization}".
+    Only resolves values already set in the DB — user-input variables remain as-is.
+    """
+    if not text:
+        return text
+    specialization = task_record.get('agent_specialization') or ''
+    if specialization:
+        text = text.replace('{specialization}', specialization)
+    return text
+
+
 def format_plan_summary(plan: dict) -> str:
     """Formats the JSON plan into a human-readable summary for Telegram."""
     if not plan:
         return ""
-    
+
     summary = "<b>📋 Proposed Workflow Plan:</b>\n\n"
-    
+
     # 1. Agents Section
     summary += "<b>👥 Team Composition:</b>\n"
     agents = plan.get("agents", [])
@@ -104,7 +147,7 @@ def format_plan_summary(plan: dict) -> str:
         summary += "<i>No agents defined yet.</i>\n"
     for i, agent in enumerate(agents):
         summary += f"{i+1}. <b>{agent.get('role')}</b>\n   🎯 <i>Goal:</i> {agent.get('goal')}\n"
-    
+
     # 2. Tasks Section
     summary += "\n<b>📝 Execution Steps:</b>\n"
     tasks = plan.get("tasks", [])
@@ -112,40 +155,26 @@ def format_plan_summary(plan: dict) -> str:
         summary += "<i>No tasks defined yet.</i>\n"
     for i, task in enumerate(tasks):
         desc = task.get('description', '')
-        # Truncate long descriptions for readability
         short_desc = (desc[:120] + '...') if len(desc) > 120 else desc
         summary += f"{i+1}. {short_desc}\n   👤 <i>Assignee:</i> {task.get('agent_role')}\n"
-    
+        # Show required inputs that will be collected before execution
+        req_inputs = task.get('required_inputs') or []
+        if req_inputs:
+            input_keys = ', '.join(f"<code>{ri.get('key', '?')}</code>" for ri in req_inputs)
+            summary += f"   📋 <i>Inputs needed:</i> {input_keys}\n"
+
     summary += "\n<i>Do you want to proceed or make any changes?</i>"
     return summary
 
 
-# --- Command Handlers (from M4_T1 and M4_T2) ---
+# --- Command Handlers ---
+
 @whitelist_check
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message with inline buttons for available workflows."""
     user = update.effective_user
     logger.info(f"User {user.first_name} ({user.id}) started the bot.")
-
-    workflows = db.read_all_workflows()
-    if not workflows:
-        await update.message.reply_text(
-            "No workflows found in the database. Please add some via the Streamlit UI."
-        )
-        return
-
-    keyboard = []
-    for wf in workflows:
-        keyboard.append(
-            [InlineKeyboardButton(wf["name"], callback_data=f"workflow_{wf['id']}")]
-        )
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "👋 Hello! I am Alfredo, your AI Assistant.\n\nYou can <b>type a request</b> directly or choose a workflow from the list below:", 
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML
-    )
+    await _send_workflow_list(update.effective_chat.id, context.bot)
 
 
 @whitelist_check
@@ -162,9 +191,11 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
     context.user_data["base_workflow"] = workflow
     context.user_data["chat_history"] = []
 
-    await query.edit_message_text(f"📝 <b>Loading Workflow '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(
+        f"📝 <b>Loading Workflow '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML
+    )
 
-    # Build a natural-language summary directly from DB data (no LLM call here)
+    # Build a natural-language summary directly from DB data (no LLM call here).
     # This guarantees the initial presentation is faithful to the predefined workflow.
     task_ids = workflow.get('task_ids') or []
     task_lines = []
@@ -172,24 +203,39 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
         t_rec = db.read_task(tid)
         if t_rec:
             a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
-            agent_name = a_rec.get('name', a_rec.get('role', 'Unknown agent')) if a_rec else 'Unknown agent'
+
+            # Resolve DB placeholders (e.g. {specialization}) for display
+            agent_role = a_rec.get('role', 'Unknown agent') if a_rec else 'Unknown agent'
+            agent_display = _resolve_db_placeholders(agent_role, t_rec)
+
+            # Task label: name or truncated description (with placeholders resolved)
             t_label = t_rec.get('name') or t_rec.get('description', '')[:60]
-            task_lines.append(f"{i+1}. <b>{t_label}</b> — <i>{agent_name}</i>")
+            t_label = _resolve_db_placeholders(t_label, t_rec)
+
+            # Show required input keys as a hint so the user knows what to expect
+            req_inputs = t_rec.get('required_inputs') or []
+            ri_hint = ''
+            if req_inputs:
+                ri_hint = f" — <i>needs: {', '.join(ri.get('key', '?') for ri in req_inputs)}</i>"
+
+            task_lines.append(f"{i+1}. <b>{t_label}</b> — {agent_display}{ri_hint}")
 
     tasks_block = "\n".join(task_lines) if task_lines else "<i>No tasks defined.</i>"
     intro = (
-        f"\U0001f4cb <b>Workflow: {workflow['name']}</b>\n\n"
+        f"📋 <b>Workflow: {workflow['name']}</b>\n\n"
         f"Here's the predefined plan I'll execute for you:\n\n"
         f"{tasks_block}\n\n"
-        f"\U0001f4ac <i>Reply with your specific inputs or context (e.g. dataset name, objective...), "
+        f"💬 <i>Reply with your specific inputs or context (e.g. dataset name, objective...), "
         f"or just say <b>\"go\"</b> to start as-is. You can also ask me to customize any step.</i>"
     )
 
     # Record the intro as the assistant's first message so the conversation flows naturally
     context.user_data["chat_history"].append({"role": "assistant", "content": intro})
-
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=intro, parse_mode=ParseMode.HTML)
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, text=intro, parse_mode=ParseMode.HTML
+    )
     return PLANNING_MODE
+
 
 @whitelist_check
 async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -198,10 +244,14 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), user_input)
-        await context.bot.send_message(chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution...")
+        await context.bot.send_message(
+            chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution..."
+        )
         return ConversationHandler.END
 
-    status_msg = await update.message.reply_text("🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text(
+        "🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML
+    )
 
     context.user_data["base_workflow"] = None
     context.user_data["chat_history"] = []
@@ -214,6 +264,7 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await status_msg.edit_text(result["response"])
     return PLANNING_MODE
 
+
 @whitelist_check
 async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_input = update.message.text
@@ -221,13 +272,17 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), user_input)
-        await context.bot.send_message(chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution...")
+        await context.bot.send_message(
+            chat_id=chat_id, text="✅ Reply sent to the agent. Resuming execution..."
+        )
         return PLANNING_MODE
 
     chat_history = context.user_data.get("chat_history", [])
     base_workflow = context.user_data.get("base_workflow")
 
-    status_msg = await update.message.reply_text("🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text(
+        "🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML
+    )
 
     result = await asyncio.to_thread(master_ai.chat_plan, user_input, chat_history, base_workflow)
 
@@ -241,30 +296,28 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         plan = result.get("plan")
         # Determine whether the workflow was modified by the user.
         # If 'modified' is False and we have a predefined base_workflow,
-        # we MUST use the standard execution path (execute_run_with_resume)
-        # so the original DB agents/tasks/tools are used untouched.
+        # use the standard DB execution path (execute_run_with_resume) so
+        # the original agents/tasks/tools remain untouched.
         is_modified = result.get("modified", True)  # default True for safety
         use_predefined = base_workflow and not is_modified
 
         if plan:
-            # Show the final plan summary
             final_summary = format_plan_summary(plan)
             await context.bot.send_message(
-                chat_id=chat_id, 
+                chat_id=chat_id,
                 text=f"✅ <b>Plan Confirmed!</b>\n\n{final_summary}",
                 parse_mode=ParseMode.HTML
             )
 
-        await context.bot.send_message(chat_id=chat_id, text="🚀 Starting execution...")
-
         if use_predefined:
-            # Predefined workflow confirmed as-is: use the DB workflow without dynamic crew
-            logger.info(f"User confirmed predefined workflow '{base_workflow['name']}' (id={base_workflow['id']}) without changes. Using standard execution path.")
+            logger.info(
+                f"User confirmed predefined workflow '{base_workflow['name']}' "
+                f"(id={base_workflow['id']}) without changes. Using standard execution path."
+            )
             context.user_data["current_workflow_id"] = base_workflow["id"]
             context.user_data["final_plan"] = None  # Ensure dynamic builder is NOT triggered
         elif plan:
-            # User requested modifications or created a custom plan: use dynamic crew
-            logger.info(f"User confirmed a modified/custom plan. Using dynamic crew builder.")
+            logger.info("User confirmed a modified/custom plan. Using dynamic crew builder.")
             context.user_data["final_plan"] = plan
             if base_workflow:
                 context.user_data["current_workflow_id"] = base_workflow["id"]
@@ -274,23 +327,130 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data["current_workflow_id"] = base_workflow["id"]
                 context.user_data["final_plan"] = None
 
-        context.user_data["execution_context"] = {"user_input": " ".join([m['content'] for m in chat_history])}
-        await execute_crew(update, context)
-            
-        return ConversationHandler.END
+        context.user_data["execution_context"] = {
+            "user_input": " ".join([m['content'] for m in chat_history])
+        }
+
+        # Transition to input collection before executing
+        return await collect_required_inputs(update, context)
+
     else:
-        # If still planning, but a draft plan exists, show it
+        # Still planning — show draft plan if available
         draft_plan = result.get("plan")
         if draft_plan:
             draft_summary = format_plan_summary(draft_plan)
             await context.bot.send_message(
-                chat_id=chat_id,
-                text=draft_summary,
-                parse_mode=ParseMode.HTML
+                chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
             )
 
     return PLANNING_MODE
 
+
+# --- Required Inputs Collection Phase ---
+
+async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Collects all required inputs from the confirmed workflow/plan before execution.
+    For predefined workflows: reads required_inputs from DB task records.
+    For dynamic plans: reads required_inputs from task objects generated by the LLM.
+    Deduplicates by key, then asks the user each question in sequence.
+    Returns COLLECTING_INPUTS if questions remain, or ConversationHandler.END after execute_crew.
+    """
+    chat_id = update.effective_chat.id
+    base_workflow = context.user_data.get("base_workflow")
+    final_plan = context.user_data.get("final_plan")
+
+    all_inputs = []
+    seen_keys = set()
+
+    if final_plan:
+        # Dynamic plan: extract required_inputs from each task object
+        for task in final_plan.get("tasks", []):
+            for ri in (task.get("required_inputs") or []):
+                key = ri.get("key")
+                if key and key not in seen_keys:
+                    all_inputs.append(ri)
+                    seen_keys.add(key)
+    elif base_workflow:
+        # Predefined workflow: read required_inputs from DB task records
+        task_ids = base_workflow.get('task_ids') or []
+        for tid in task_ids:
+            t_rec = db.read_task(tid)
+            if t_rec:
+                for ri in (t_rec.get('required_inputs') or []):
+                    key = ri.get("key")
+                    if key and key not in seen_keys:
+                        all_inputs.append(ri)
+                        seen_keys.add(key)
+
+    context.user_data["pending_inputs"] = all_inputs
+    context.user_data["collected_inputs"] = {}
+
+    if not all_inputs:
+        # No inputs needed — proceed directly to execution
+        await execute_crew(update, context)
+        return ConversationHandler.END
+
+    # Ask the first question
+    total = len(all_inputs)
+    first = all_inputs[0]
+    prompt_text = first.get("prompt") or f"Please provide a value for '{first.get('key')}':"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"📝 <b>Input required (1/{total}):</b>\n\n{prompt_text}",
+        parse_mode=ParseMode.HTML
+    )
+    return COLLECTING_INPUTS
+
+
+@whitelist_check
+async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles user answers to required input questions, one at a time."""
+    user_answer = update.message.text
+    chat_id = update.effective_chat.id
+
+    pending = context.user_data.get("pending_inputs", [])
+    collected = context.user_data.get("collected_inputs", {})
+
+    if not pending:
+        # No pending questions — should not happen, but handle gracefully
+        await execute_crew(update, context)
+        return ConversationHandler.END
+
+    # Record the answer for the current (first) pending question
+    current = pending.pop(0)
+    collected[current["key"]] = user_answer
+    context.user_data["pending_inputs"] = pending
+    context.user_data["collected_inputs"] = collected
+
+    if pending:
+        # Ask the next question
+        total_done = len(collected)
+        total_all = total_done + len(pending)
+        next_q = pending[0]
+        prompt_text = next_q.get("prompt") or f"Please provide a value for '{next_q.get('key')}':"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📝 <b>Input required ({total_done + 1}/{total_all}):</b>\n\n{prompt_text}",
+            parse_mode=ParseMode.HTML
+        )
+        return COLLECTING_INPUTS
+    else:
+        # All inputs collected — merge into execution context and start
+        exec_ctx = context.user_data.get("execution_context", {})
+        exec_ctx.update(collected)
+        context.user_data["execution_context"] = exec_ctx
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="✅ <b>All inputs collected!</b> Starting execution...",
+            parse_mode=ParseMode.HTML
+        )
+        await execute_crew(update, context)
+        return ConversationHandler.END
+
+
+# --- Crew Execution ---
 
 async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -324,17 +484,18 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         from core.crew_builder import build_crew, build_dynamic_crew, execute_run_with_resume
-        
+
         # Build the CrewAI crew
         crew = None
         if final_plan:
             logger.info(f"User {user_id}: Using Dynamic Crew Builder for execution.")
             crew = await asyncio.to_thread(build_dynamic_crew, final_plan)
         else:
-            logger.info(f"User {user_id}: Using Standard Crew Builder for Workflow ID {workflow_id}.")
-            # We don't build the entire crew beforehand if we execute step-by-step; we will use execute_run_with_resume directly.
-            pass
-            
+            logger.info(
+                f"User {user_id}: Using Standard Crew Builder for Workflow ID {workflow_id}."
+            )
+            pass  # execute_run_with_resume builds per-task below
+
         if final_plan and not crew:
             raise ValueError("Failed to build dynamic crew.")
 
@@ -362,7 +523,9 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 logger.info(f"User {user_id}: Kicking off CrewAI with context: {execution_context}")
                 final_result = await asyncio.to_thread(crew.kickoff, inputs=execution_context)
             else:
-                logger.info(f"User {user_id}: Kicking off CrewAI with resume tracking for Run ID {run_id}")
+                logger.info(
+                    f"User {user_id}: Kicking off CrewAI with resume tracking for Run ID {run_id}"
+                )
                 final_result = await asyncio.to_thread(execute_run_with_resume, run_id)
         finally:
             typing_task.cancel()
@@ -372,17 +535,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 pass
 
         logger.info(f"User {user_id}: CrewAI execution finished.")
-        
+
         # --- AUTOMATIC POST-PROCESSING: Master AI Refinement ---
-        # The raw crew output is passed through Master AI for:
-        # 1. Formatting & syntax cleanup
-        # 2. Ethical review
-        # 3. Synthesis into a clear, user-friendly report
         await status_msg.edit_text(
             text="🧠 <b>Refining output...</b>\n<i>Master AI is polishing the final report.</i>",
             parse_mode=ParseMode.HTML
         )
-        
+
         try:
             refined_result = await asyncio.to_thread(master_ai.refine_output, str(final_result))
             logger.info(f"User {user_id}: Output refinement complete.")
@@ -402,7 +561,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if workflow_id:
             workflow = db.read_workflow(workflow_id)
             wf_name = workflow["name"] if workflow else "Unknown"
-            
+
         notifier.notify_workflow_completion(wf_name, refined_result, chat_id=chat_id)
 
         keyboard = [
@@ -428,7 +587,6 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         final_caption = f"✅ *Execution Complete!*\n\n{report_text}\n\n_Choose how to proceed:_"
 
         try:
-            # Attempt sending with Markdown for rich formatting
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=final_caption,
@@ -437,24 +595,23 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         except Exception as e:
             if "Can't parse entities" in str(e):
-                logger.warning(f"Markdown parsing failed for message. Falling back to plain text. Error: {e}")
-                # Fallback to plain text if Markdown is broken
+                logger.warning(
+                    f"Markdown parsing failed for message. Falling back to plain text. Error: {e}"
+                )
                 fallback_text = f"✅ Execution Complete!\n\n{refined_result}\n\nChoose how to proceed:"
                 if len(fallback_text) > 4000:
                     fallback_text = fallback_text[:4000] + "..."
-                
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=fallback_text,
                     reply_markup=reply_markup
                 )
             else:
-                # If it's a different error, re-raise it
                 raise e
 
     except Exception as e:
         logger.error(f"CrewAI execution failed: {e}", exc_info=True)
-        
+
         # Update run record with failure
         if run_id:
             db.update_run(run_id, status='failed', result=str(e))
@@ -472,24 +629,27 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data.clear()
 
 
-# Old free_chat_handler removed as it is now an entry point in ConversationHandler
+# --- Cancellation & Navigation ---
 
 @whitelist_check
-async def cancel_conversation(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> int:
-    """Cancels the current conversation."""
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the current conversation and offers a restart option."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     logger.info(f"User {user_id} canceled the conversation.")
-    
+
     # Critical: Unblock any pending agent threads!
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), "SYSTEM_ABORT")
         logger.info(f"Aborted pending human-in-the-loop request for chat {chat_id}.")
-        
+
+    keyboard = [[InlineKeyboardButton("🔄 Restart", callback_data="restart_bot")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "Operation aborted. Use /start to see available workflows."
+        "⛔ Operation stopped.\n\nPress <b>Restart</b> or use /start to begin a new session.",
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -500,20 +660,34 @@ async def handle_context_choice(update: Update, context: ContextTypes.DEFAULT_TY
     """Handles the user's choice to continue or start a new conversation."""
     query = update.callback_query
     await query.answer()
-    
+
     choice = query.data
     chat_id = update.effective_chat.id
-    
+
     if choice == "context_new":
         db.clear_context(str(chat_id))
         await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(chat_id=chat_id, text="Memory cleared. Let's start a new conversation! 🆕")
+        await context.bot.send_message(
+            chat_id=chat_id, text="Memory cleared. Let's start a new conversation! 🆕"
+        )
     elif choice == "context_continue":
         await query.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(chat_id=chat_id, text="Perfect, I will keep the last result in mind for the next workflow! 🔄")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Perfect, I will keep the last result in mind for the next workflow! 🔄"
+        )
+
+
+async def handle_restart_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the Restart button shown after cancellation."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    await _send_workflow_list(update.effective_chat.id, context.bot)
 
 
 # --- Main Function ---
+
 def main() -> None:
     """Start the bot."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -526,22 +700,34 @@ def main() -> None:
         ],
         states={
             PLANNING_MODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_planning_chat)
+                # "stop" intercept MUST come before the generic text handler
+                MessageHandler(
+                    filters.Regex(r'(?i)^\s*stop\s*$') & ~filters.COMMAND,
+                    cancel_conversation
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_planning_chat),
+            ],
+            COLLECTING_INPUTS: [
+                # Allow stopping even during input collection
+                MessageHandler(
+                    filters.Regex(r'(?i)^\s*stop\s*$') & ~filters.COMMAND,
+                    cancel_conversation
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_input_collection),
             ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conversation),
-            CommandHandler("stop", cancel_conversation)
+            CommandHandler("stop", cancel_conversation),
         ],
     )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    
-    # Global handler for 'stop' command (literal word)
-    application.add_handler(MessageHandler(filters.Regex(r'(?i)^stop$') & ~filters.COMMAND, cancel_conversation))
-    
-    # context handler for callback buttons at the end of a workflow
+
+    # Global callback handlers (registered after ConversationHandler)
     application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
+    application.add_handler(CallbackQueryHandler(handle_restart_button, pattern=r"^restart_bot$"))
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
