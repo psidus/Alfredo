@@ -36,10 +36,11 @@ if sys.platform == "win32":
 
 # Configure logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(sys.stdout)
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("debug_alfredo.log")
     ]
 )
 logger = logging.getLogger(__name__)
@@ -160,8 +161,15 @@ def format_plan_summary(plan: dict) -> str:
         # Show required inputs that will be collected before execution
         req_inputs = task.get('required_inputs') or []
         if req_inputs:
-            input_keys = ', '.join(f"<code>{ri.get('key', '?')}</code>" for ri in req_inputs)
-            summary += f"   📋 <i>Inputs needed:</i> {input_keys}\n"
+            keys = []
+            for ri in req_inputs:
+                if isinstance(ri, dict):
+                    keys.append(f"<code>{ri.get('key', '?')}</code>")
+                elif isinstance(ri, str):
+                    keys.append(f"<code>{ri}</code>")
+            if keys:
+                input_keys = ', '.join(keys)
+                summary += f"   📋 <i>Inputs needed:</i> {input_keys}\n"
 
     summary += "\n<i>Do you want to proceed or make any changes?</i>"
     return summary
@@ -294,35 +302,89 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if result.get("status") == "ready":
         plan = result.get("plan")
-        # Determine whether the workflow was modified by the user.
-        # If 'modified' is False and we have a predefined base_workflow,
-        # use the standard DB execution path (execute_run_with_resume) so
-        # the original agents/tasks/tools remain untouched.
         is_modified = result.get("modified", True)  # default True for safety
         use_predefined = base_workflow and not is_modified
 
+        # 1. If it's a predefined workflow without changes, build a plan representation from DB
+        if use_predefined and not plan:
+            task_ids = base_workflow.get('task_ids') or []
+            wf_tasks = []
+            wf_agents = []
+            seen_agent_roles = set()
+            
+            for tid in task_ids:
+                t_rec = db.read_task(tid)
+                if t_rec:
+                    a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+                    agent_role = a_rec.get('role', 'Unknown Agent') if a_rec else 'Unknown Agent'
+                    
+                    if a_rec and agent_role not in seen_agent_roles:
+                        wf_agents.append({
+                            "role": a_rec.get("role"),
+                            "goal": a_rec.get("goal"),
+                            "backstory": a_rec.get("backstory"),
+                            "tools": a_rec.get("tools") or []
+                        })
+                        seen_agent_roles.add(agent_role)
+                        
+                    wf_tasks.append({
+                        "name": t_rec.get("name") or t_rec.get("description")[:30],
+                        "description": t_rec.get("description"),
+                        "expected_output": t_rec.get("expected_output"),
+                        "agent_role": agent_role,
+                        "agent_specialization": t_rec.get("agent_specialization"),
+                        "required_inputs": t_rec.get("required_inputs") or []
+                    })
+            plan = {
+                "agents": wf_agents,
+                "tasks": wf_tasks
+            }
+
+        # 2. Decompose the plan (expand complex tasks) dynamically using Master AI
         if plan:
+            decomp_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text="🔄 <b>Quality check in progress...</b>\n<i>Alfredo is examining the tasks to decide whether to divide them into more specific and atomic subtasks...</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            async def typing_indicator():
+                while True:
+                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                    await asyncio.sleep(4)
+
+            typing_task = asyncio.create_task(typing_indicator())
+            
+            try:
+                # Run decomposer in a separate thread to keep Telegram responsive
+                expanded_plan = await asyncio.to_thread(master_ai.decompose_workflow_plan, plan)
+                plan = expanded_plan
+            except Exception as decomp_err:
+                logger.error(f"Decomposition failed: {decomp_err}. Using original plan.")
+            finally:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+                try:
+                    await decomp_msg.delete()
+                except Exception:
+                    pass
+
             final_summary = format_plan_summary(plan)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ <b>Plan Confirmed!</b>\n\n{final_summary}",
+                text=f"✅ <b>Plan Confirmed and Expanded!</b>\n\n{final_summary}",
                 parse_mode=ParseMode.HTML
             )
-
-        if use_predefined:
-            logger.info(
-                f"User confirmed predefined workflow '{base_workflow['name']}' "
-                f"(id={base_workflow['id']}) without changes. Using standard execution path."
-            )
-            context.user_data["current_workflow_id"] = base_workflow["id"]
-            context.user_data["final_plan"] = None  # Ensure dynamic builder is NOT triggered
-        elif plan:
-            logger.info("User confirmed a modified/custom plan. Using dynamic crew builder.")
+            
+            # Save the expanded plan as the final execution plan
             context.user_data["final_plan"] = plan
             if base_workflow:
                 context.user_data["current_workflow_id"] = base_workflow["id"]
         else:
-            # No plan available (edge case): fall back to predefined workflow_id if available
+            # Fallback (should not happen): run original predefined workflow
             if base_workflow:
                 context.user_data["current_workflow_id"] = base_workflow["id"]
                 context.user_data["final_plan"] = None
@@ -367,24 +429,38 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
         # Dynamic plan: extract required_inputs from each task object
         for task in final_plan.get("tasks", []):
             for ri in (task.get("required_inputs") or []):
-                key = ri.get("key")
-                if key and key not in seen_keys:
-                    all_inputs.append(ri)
-                    seen_keys.add(key)
-    elif base_workflow:
+                if isinstance(ri, dict):
+                    key = ri.get("key")
+                    if key and key not in seen_keys:
+                        all_inputs.append(ri)
+                        seen_keys.add(key)
+                elif isinstance(ri, str):
+                    key = ri
+                    if key and key not in seen_keys:
+                        all_inputs.append({"key": key, "prompt": f"Please provide a value for '{key}':"})
+                        seen_keys.add(key)
+    if base_workflow:
         # Predefined workflow: read required_inputs from DB task records
         task_ids = base_workflow.get('task_ids') or []
         for tid in task_ids:
             t_rec = db.read_task(tid)
             if t_rec:
                 for ri in (t_rec.get('required_inputs') or []):
-                    key = ri.get("key")
-                    if key and key not in seen_keys:
-                        all_inputs.append(ri)
-                        seen_keys.add(key)
+                    if isinstance(ri, dict):
+                        key = ri.get("key")
+                        if key and key not in seen_keys:
+                            all_inputs.append(ri)
+                            seen_keys.add(key)
+                    elif isinstance(ri, str):
+                        key = ri
+                        if key and key not in seen_keys:
+                            all_inputs.append({"key": key, "prompt": f"Please provide a value for '{key}':"})
+                            seen_keys.add(key)
 
     context.user_data["pending_inputs"] = all_inputs
     context.user_data["collected_inputs"] = {}
+
+    logger.error(f"DEBUG_INPUTS: final_plan_tasks={len(final_plan.get('tasks', [])) if final_plan else 0}, base_workflow={bool(base_workflow)}, all_inputs={all_inputs}")
 
     if not all_inputs:
         # No inputs needed — proceed directly to execution
@@ -483,25 +559,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         run_id = db.create_run(workflow_id, status='running', inputs=execution_context)
 
     try:
-        from core.crew_builder import build_crew, build_dynamic_crew, execute_run_with_resume
-
-        # Build the CrewAI crew
-        crew = None
-        if final_plan:
-            logger.info(f"User {user_id}: Using Dynamic Crew Builder for execution.")
-            crew = await asyncio.to_thread(build_dynamic_crew, final_plan)
-        else:
-            logger.info(
-                f"User {user_id}: Using Standard Crew Builder for Workflow ID {workflow_id}."
-            )
-            pass  # execute_run_with_resume builds per-task below
-
-        if final_plan and not crew:
-            raise ValueError("Failed to build dynamic crew.")
+        from core.crew_builder import (
+            build_crew, build_dynamic_crew,
+            execute_run_with_resume, execute_dynamic_crew_with_memory
+        )
 
         # Update message to show execution started
         await status_msg.edit_text(
-            text="🚀 <b>Execution in progress...</b>\n<i>My agents are working for you.</i>",
+            text="🚀 <b>Execution in progress...</b>\n<i>My agents are working for you (Memory-Centric mode).</i>",
             parse_mode=ParseMode.HTML
         )
 
@@ -519,14 +584,27 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
             # to prevent blocking the Telegram bot's event loop.
+            # MEMORY-CENTRIC: Both paths now use task-by-task execution with
+            # ephemeral in-memory ChromaDB for inter-agent communication.
             if final_plan:
-                logger.info(f"User {user_id}: Kicking off CrewAI with context: {execution_context}")
-                final_result = await asyncio.to_thread(crew.kickoff, inputs=execution_context)
+                logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
+                final_result = await asyncio.to_thread(
+                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id
+                )
             else:
                 logger.info(
-                    f"User {user_id}: Kicking off CrewAI with resume tracking for Run ID {run_id}"
+                    f"User {user_id}: Kicking off Memory-Centric Crew with resume tracking for Run ID {run_id}"
                 )
                 final_result = await asyncio.to_thread(execute_run_with_resume, run_id)
+        except Exception as e:
+            logger.error(f"Execution error for User {user_id}: {e}", exc_info=True)
+            await status_msg.edit_text(
+                text=f"❌ <b>Execution Failed</b>\n<i>An error occurred during workflow execution:</i>\n<code>{e}</code>",
+                parse_mode=ParseMode.HTML
+            )
+            if run_id:
+                db.update_run(run_id, status='failed', result=str(e))
+            return ConversationHandler.END
         finally:
             typing_task.cancel()
             try:

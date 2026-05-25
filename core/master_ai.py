@@ -152,6 +152,59 @@ Optimize and return a JSON object with:
 }}
 """
 
+TASK_DECOMPOSER_PROMPT = """
+You are Alfredo, a Senior Workflow Architect.
+Your job is to analyze an AI task and decide if it is too complex or multi-step, which might cause the executing agent to produce a lazy, incomplete, or rushed output.
+
+If the task is simple and atomic (e.g. just reading a single file, running a single simple command, or writing a basic draft), return it as-is and set "is_complex": false.
+
+If the task is complex (e.g. designing AND implementing a feature, writing complex logic, setting up multiple files, writing code and writing tests, analyzing massive data and writing a report), you MUST decompose it into 2 to 4 sequential, highly focused subtasks.
+
+For each generated subtask, you must:
+1. Define a highly specific 'name' and 'description' that focuses on exactly ONE atomic action.
+2. Formulate explicit instructions on how to use the ephemeral workspace memory:
+   - For downstream subtasks, explain what key to read from the memory (e.g. read the database schema written under key 'task_schema_tablename').
+   - For all subtasks, explain what key they must write their findings to (e.g. write the finalized code to key 'task_code_codename').
+3. Define a clear, measurable 'expected_output'.
+4. Assign it to one of the available agents.
+5. Provide a specific 'agent_specialization' to tailor their persona for this micro-step.
+6. Crucial: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like {{nome_variabile}} or {{user_input}}. Keep them exactly as they are in the original task description so they can be resolved at runtime.
+7. CRITICAL: The original task has a list of 'required_inputs'. You MUST distribute these required inputs into the 'required_inputs' array of the relevant subtasks where they are needed.
+
+Available Agents:
+{available_agents}
+
+Task to analyze:
+- Title/Name: {name}
+- Description: {description}
+- Expected Output: {expected_output}
+- Assigned Agent Role: {agent_role}
+- Required Inputs: {required_inputs}
+
+Return ONLY a JSON object with this exact structure:
+{{
+  "is_complex": true,
+  "subtasks": [
+    {{
+      "name": "Subtask Name (e.g. Design Database Schema)",
+      "description": "Specific atomic subtask description with memory read/write instructions. MUST preserve all original curly brace variables (e.g. {{dataset_name}}) if they are relevant to this step.",
+      "expected_output": "Measurable expected output",
+      "agent_role": "Role of the assigned agent (must match one of the roles in the available agents list)",
+      "agent_specialization": "Micro-specialization or null",
+      "required_inputs": [
+        {{ "key": "dataset_name", "prompt": "Please enter dataset name" }}
+      ]
+    }}
+  ]
+}}
+
+If the task is not complex, return this exact structure:
+{{
+  "is_complex": false,
+  "subtasks": []
+}}
+"""
+
 class MasterAI:
     """
     The MasterAI class acts as the intelligent gatekeeper and router for the system.
@@ -319,7 +372,7 @@ class MasterAI:
         import time
 
         # --- Retry waits for transient errors (seconds) ---
-        RETRY_WAITS = [10, 30, 60]  # Aggressive: Google 503s typically last 30-60s
+        RETRY_WAITS = [5, 10, 15]  # Aggressive: Google 503s typically last 30-60s, but we don't want to hang the bot
         TRANSIENT_KEYWORDS = ("503", "429", "high demand", "unavailable", "rate limit", "overloaded")
 
         def _is_transient(err: Exception) -> bool:
@@ -341,6 +394,7 @@ class MasterAI:
                         model=m,
                         messages=messages,
                         temperature=temperature,
+                        timeout=45, # Prevent hanging indefinitely
                     )
                     if use_json_mode:
                         call_kwargs["response_format"] = {"type": "json_object"}
@@ -674,3 +728,101 @@ CRITICAL INSTRUCTIONS FOR PREDEFINED WORKFLOW:
                 "description": description,
                 "expected_output": expected_output
             }
+
+    def decompose_task_if_complex(self, task: Dict[str, Any], available_agents: list) -> list:
+        """
+        Analyzes a single task and decomposes it into 2-4 atomic subtasks if it is complex.
+        Returns a list of task dicts (either the original task or the decomposed subtasks).
+        """
+        name = task.get('name') or task.get('title') or "Unnamed Task"
+        description = task.get('description') or ""
+        expected_output = task.get('expected_output') or ""
+        agent_role = task.get('agent_role') or ""
+
+        # Format agents list for the LLM
+        formatted_agents = []
+        for agent in available_agents:
+            formatted_agents.append({
+                "role": agent.get("role"),
+                "goal": agent.get("goal"),
+                "backstory": agent.get("backstory", "")[:200] + "..." if len(agent.get("backstory", "")) > 200 else agent.get("backstory", "")
+            })
+
+        system_prompt = TASK_DECOMPOSER_PROMPT.format(
+            available_agents=json.dumps(formatted_agents, indent=2),
+            name=name,
+            description=description,
+            expected_output=expected_output,
+            agent_role=agent_role,
+            required_inputs=json.dumps(task.get('required_inputs') or [], indent=2)
+        )
+
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI analyzing complexity of task '{name}' with {model_string}...")
+        try:
+            raw_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Analyze and decompose this task if it is complex."}
+                ],
+                temperature=0.2
+            )
+            clean_json = self._sanitize_json(raw_output)
+            result = json.loads(clean_json)
+
+            if result.get("is_complex") and result.get("subtasks"):
+                subtasks = result["subtasks"]
+                logger.info(f"Task '{name}' decomposed successfully into {len(subtasks)} subtasks!")
+                return subtasks
+            else:
+                logger.info(f"Task '{name}' is not complex. Keeping original.")
+                return [task]
+        except Exception as e:
+            logger.error(f"Failed to decompose task '{name}': {e}. Returning original.")
+            return [task]
+
+    def decompose_workflow_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Takes a full workflow plan (agents and tasks), evaluates each task,
+        decomposes the complex ones, and returns an expanded/atomized plan.
+        """
+        if not plan or 'tasks' not in plan:
+            return plan
+
+        agents = plan.get('agents') or []
+        
+        # If agents list is empty, try to fetch all agents from the database as fallback
+        if not agents:
+            try:
+                db_agents = self.db_manager.read_all_agents()
+                for a in db_agents:
+                    agents.append({
+                        "role": a.get("role"),
+                        "goal": a.get("goal"),
+                        "backstory": a.get("backstory"),
+                        "tools": a.get("tools") or []
+                    })
+                logger.info(f"Workflow plan had no agents. Loaded {len(agents)} agents from DB as fallback.")
+            except Exception as e:
+                logger.error(f"Failed to load fallback agents from DB: {e}")
+
+        # Ensure we have a list of available agents
+        available_agents = agents
+
+        expanded_tasks = []
+        for task in plan.get('tasks', []):
+            decomposed = self.decompose_task_if_complex(task, available_agents)
+            expanded_tasks.extend(decomposed)
+
+        expanded_plan = {
+            "agents": agents,
+            "tasks": expanded_tasks
+        }
+        logger.info(f"Workflow expansion complete. Total tasks: {len(plan.get('tasks', []))} -> {len(expanded_tasks)}")
+        return expanded_plan

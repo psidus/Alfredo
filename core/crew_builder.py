@@ -9,12 +9,14 @@ from langchain_community.llms import Ollama
 
 from core.db_manager import DBManager
 from core.data_manager import DataManager
+from core.ephemeral_memory import EphemeralMemoryManager
 import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
 import tools.email_tool as email_tool
 from tools.vector_search_tool import VectorSearchTool
 from tools.tabular_query_tool import TabularQueryTool
+from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryTool
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,11 +27,19 @@ db = DBManager()
 # --- GLOBAL INTER-AGENT COMMUNICATION DIRECTIVE ---
 # This is appended to EVERY task to enforce concise, structured outputs
 # optimized for AI-to-AI communication (not human-readable fluff).
+# MEMORY-CENTRIC: Agents are now instructed to use the ephemeral memory tools.
 AGENT_COMMS_DIRECTIVE = """
 
---- COMMUNICATION PROTOCOL ---
-You are part of a sequential AI agent pipeline. Your output will be read by the NEXT AI agent, not a human.
-RULES:
+--- COMMUNICATION PROTOCOL (MEMORY-CENTRIC) ---
+You are part of a sequential AI agent pipeline. Your output will be consumed by the NEXT AI agent, not a human.
+INTER-AGENT MEMORY:
+- You have access to 'write_atomic_memory' and 'read_atomic_memory' tools.
+- Results from previous steps are stored in an ephemeral in-memory database.
+  Check the EPHEMERAL WORKSPACE MEMORY INDEX below for available records and their keys.
+- Use 'read_atomic_memory' with the exact 'key' to retrieve a specific record,
+  or use a 'query' string for semantic search when the key is unknown.
+- ALWAYS use 'write_atomic_memory' to store your final output so that downstream agents can access it.
+OUTPUT RULES:
 1. Output ONLY the essential findings as a structured list.
 2. Use bullet points (•) for each key finding.
 3. Start with a one-line SUMMARY of your conclusion.
@@ -73,6 +83,9 @@ ALLOWED_TOOLS = {
     "file_read_tool": local_tools.read_python_file,
     "file_write_tool": local_tools.write_python_file,
     "python_repl_tool": local_tools.python_repl,
+    # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
+    "read_atomic_memory": None,   # Sentinel
+    "write_atomic_memory": None,  # Sentinel
 }
 
 def _instantiate_llm(model_id):
@@ -165,7 +178,7 @@ def _map_tools(tool_names):
 
     return instantiated_tools
 
-def _build_agent(agent_id, specialization=None):
+def _build_agent(agent_id, specialization=None, model_id_override=None):
     """
     Constructs a CrewAI Agent object from database records.
     Automatically disables tools for local models (Ollama/phi3, etc.)
@@ -177,8 +190,28 @@ def _build_agent(agent_id, specialization=None):
     if not agent_record:
         raise ValueError(f"Agent ID {agent_id} not found in database.")
 
-    model_record = db.read_model(agent_record['model_id']) if agent_record.get('model_id') else None
-    llm_instance = _instantiate_llm(agent_record['model_id'])
+    # Determine which model to use: override first, then agent record, then default fallback.
+    model_id = model_id_override if model_id_override is not None else agent_record.get('model_id')
+    
+    # If neither is set, check the global default model from .env!
+    if not model_id:
+        DataManager.load_env()
+        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+        if env_model_id:
+            try:
+                model_id = int(env_model_id)
+            except ValueError:
+                pass
+                
+    # If still not set, let's find the first available model in the database as fallback
+    if not model_id:
+        models = db.read_all_models()
+        if models:
+            model_id = models[0]['id']
+            logging.info(f"No model set for agent/task. Using first model as fallback: {models[0]['model_name']}")
+
+    model_record = db.read_model(model_id) if model_id else None
+    llm_instance = _instantiate_llm(model_id) if model_id else None
     
     # --- LOCAL MODEL CHECK ---
     # Local models (Ollama, phi3, llama, etc.) do NOT support the tools/function-calling
@@ -255,22 +288,24 @@ def _build_task(task_id, agents_cache):
         raise ValueError(f"Task ID {task_id} not found in database.")
 
     agent_id = task_record['agent_id']
+    task_model_id = task_record.get('model_id')  # Custom LLM model for this task
 
-    # --- SPECIALIZATION CACHE BYPASS ---
-    # If this task defines an agent_specialization, we must build a fresh, task-specific
-    # agent clone rather than pulling from the shared cache. This prevents the specialized
-    # role/backstory from leaking into other tasks that use the same base agent.
+    # --- SPECIALIZATION / MODEL CACHE BYPASS ---
+    # If this task defines an agent_specialization OR a specific model_id override,
+    # we must build a fresh, task-specific agent clone rather than pulling from the shared cache.
+    # This prevents the specialized role/backstory and model override from leaking into other tasks.
     specialization = task_record.get('agent_specialization')
-    if specialization:
-        agent_instance = _build_agent(agent_id, specialization=specialization)
+    if specialization or task_model_id is not None:
+        agent_instance = _build_agent(agent_id, specialization=specialization, model_id_override=task_model_id)
     else:
         if agent_id not in agents_cache:
             agents_cache[agent_id] = _build_agent(agent_id)
         agent_instance = agents_cache[agent_id]
     
-    # Check if the agent's model is local — if so, strip task-level tools too
+    # Check if the execution model is local — if so, strip task-level tools too
     agent_record = db.read_agent(agent_id) if agent_id else None
-    model_record = db.read_model(agent_record['model_id']) if agent_record and agent_record.get('model_id') else None
+    execution_model_id = task_model_id if task_model_id is not None else (agent_record.get('model_id') if agent_record else None)
+    model_record = db.read_model(execution_model_id) if execution_model_id else None
     is_local_model = False
     if model_record:
         is_local_model = bool(model_record.get('is_local')) or \
@@ -400,31 +435,94 @@ def build_crew(workflow_id):
         # Re-raise or return a structured error, depending on how the calling function handles it
         raise RuntimeError(f"Failed to build crew for workflow {workflow_id}: {e}") from e
 
+def _inject_memory_tools(agent_instance, task_obj, read_tool, write_tool):
+    """
+    Injects the ephemeral memory read/write tools into both the agent and the
+    task, removing any stale instances first.  This is idempotent.
+    """
+    memory_tool_names = ('read_atomic_memory', 'write_atomic_memory')
+
+    if agent_instance:
+        if not agent_instance.tools:
+            agent_instance.tools = []
+        agent_instance.tools = [
+            t for t in agent_instance.tools if t.name not in memory_tool_names
+        ]
+        agent_instance.tools.extend([read_tool, write_tool])
+
+    if task_obj.tools is None:
+        task_obj.tools = []
+    task_obj.tools = [
+        t for t in task_obj.tools if t.name not in memory_tool_names
+    ]
+    task_obj.tools.extend([read_tool, write_tool])
+
+
+def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
+    """
+    Automatically saves the raw output of a completed task into the ephemeral
+    memory so that downstream agents can retrieve it by key even if the agent
+    forgot to call write_atomic_memory explicitly.
+    """
+    # Try to extract structured JSON from the output
+    try:
+        json_match = re.search(r'```json\s*(.*?)\s*```', last_output, re.DOTALL)
+        json_str = json_match.group(1).strip() if json_match else last_output.strip()
+        structured_data = json.loads(json_str)
+    except Exception:
+        structured_data = {"raw_output": last_output}
+
+    task_rec = db.read_task(task_id)
+    task_name = task_rec.get('name') if task_rec else None
+    key_name = f"task_{task_id}"
+
+    # Truncate summary for the embedding to keep it focused
+    summary = last_output[:500] if len(last_output) > 500 else last_output
+    summary_text = (
+        f"Output of task '{task_name or task_id}' by agent '{agent_role}': {summary}"
+    )
+
+    memory_manager.write_record(
+        key=key_name,
+        content_summary=summary_text,
+        structured_data=structured_data,
+        agent_role=agent_role,
+    )
+
+
 def execute_run_with_resume(run_id: int, status_callback=None) -> str:
     """
-    Executes a workflow run task-by-task. Saves progress after each task.
-    If the run is already partially completed, it resumes from the next uncompleted task.
+    Executes a workflow run task-by-task with MEMORY-CENTRIC communication.
+
+    Instead of stuffing all previous outputs into each task's prompt (which
+    wastes tokens and dilutes context), we use an ephemeral in-memory ChromaDB
+    instance.  Each agent's output is stored as a keyed vector record, and
+    downstream agents receive only a compact Memory Index Table telling them
+    which keys are available.  They retrieve details on demand via the
+    'read_atomic_memory' tool.
+
+    The database is destroyed when this function returns.
     """
     # 1. Read run record
     run = db.read_run(run_id)
     if not run:
         raise ValueError(f"Run ID {run_id} not found.")
-        
+
     workflow_id = run['workflow_id']
     workflow_record = db.read_workflow(workflow_id)
     if not workflow_record:
         raise ValueError(f"Workflow ID {workflow_id} not found.")
-        
+
     task_ids = workflow_record.get('task_ids')
     if task_ids is None:
         if 'task_ids_json' in workflow_record:
             task_ids = json.loads(workflow_record['task_ids_json'])
         else:
             task_ids = []
-            
+
     if not task_ids:
         raise ValueError(f"Workflow ID {workflow_id} has no tasks defined.")
-        
+
     # Parse inputs and task_outputs
     inputs = {}
     if run.get('inputs'):
@@ -432,60 +530,80 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
             inputs = json.loads(run['inputs'])
         except Exception:
             inputs = {}
-            
+
     task_outputs = {}
     if run.get('task_outputs'):
         try:
             task_outputs = json.loads(run['task_outputs'])
         except Exception:
             task_outputs = {}
-            
+
     start_idx = run.get('current_task_idx', 0)
     if start_idx >= len(task_ids):
-        # Already completed
         return run.get('result', '')
-        
+
     # Mark run as running
     db.update_run(run_id, status='running', current_task_idx=start_idx, task_outputs=task_outputs)
-    
+
+    # --- MEMORY-CENTRIC: Initialise ephemeral vector store for this run ---
+    memory_manager = EphemeralMemoryManager(run_id=run_id)
+    read_memory_tool = ReadAtomicMemoryTool(memory_manager=memory_manager)
+    write_memory_tool = WriteAtomicMemoryTool(memory_manager=memory_manager)
+
+    # If resuming, seed the ephemeral memory with outputs from already-completed tasks
+    if start_idx > 0:
+        for prev_i in range(start_idx):
+            prev_tid = task_ids[prev_i]
+            prev_output = task_outputs.get(str(prev_tid), "")
+            if prev_output:
+                prev_task_rec = db.read_task(prev_tid)
+                prev_agent_role = "Unknown"
+                if prev_task_rec and prev_task_rec.get('agent_id'):
+                    agent_rec = db.read_agent(prev_task_rec['agent_id'])
+                    if agent_rec:
+                        prev_agent_role = agent_rec.get('name', 'Unknown')
+                _auto_save_to_memory(
+                    memory_manager, prev_tid, prev_output, prev_agent_role
+                )
+
     agents_cache = {}
     last_output = ""
     if start_idx > 0:
-        # Re-establish last_output from previously completed task
         prev_task_id = task_ids[start_idx - 1]
         last_output = task_outputs.get(str(prev_task_id), "")
-        
+
     for i in range(start_idx, len(task_ids)):
         task_id = task_ids[i]
-        
+
         if status_callback:
             try:
                 status_callback(f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})...")
             except Exception:
                 pass
-            
+
         # Build task object (and agent)
         task_obj = _build_task(task_id, agents_cache)
-        
-        # Inject inputs into task description
+
+        # --- MEMORY-CENTRIC: Inject memory tools into agent & task ---
+        _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
+
+        # Inject user-provided inputs into the task description
         original_desc = task_obj.description
-        
-        # Format task description with current inputs and previous result
+
         for k, v in inputs.items():
             original_desc = original_desc.replace(f"{{{k}}}", str(v))
         original_desc = original_desc.replace("{user_input}", inputs.get('user_input', ''))
         original_desc = original_desc.replace("{previous_result}", last_output)
         original_desc = original_desc.replace("{context}", last_output)
         original_desc = original_desc.replace("{flexible_input}", inputs.get('user_input', last_output))
-        
-        # Build lookup dict for prior task outputs (using task names, sequential IDs, and aliases)
+
+        # --- Placeholder resolution (task names, IDs, aliases) ---
         def normalize_name(s: str) -> str:
             if not s:
                 return ""
             s_norm = s.lower().replace('_', ' ').replace('-', ' ')
             return " ".join(s_norm.split())
 
-        # Fetch task details for all tasks in this workflow to get their names
         workflow_tasks = []
         for tid in task_ids:
             try:
@@ -503,19 +621,16 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
             t_id = t_rec['id']
             t_name = t_rec.get('name')
             t_output = task_outputs.get(str(t_id), "")
-            
-            # 1. Store by normalized name if name exists
+
             if t_name:
                 norm = normalize_name(t_name)
                 if norm:
                     lookup[norm] = t_output
-                    
-            # 2. Store by string and int task ID
+
             lookup[f"task {t_id}"] = t_output
             lookup[f"task_{t_id}"] = t_output
             lookup[str(t_id)] = t_output
-            
-        # 3. Store the immediately preceding task output under generic aliases
+
         if i > 0:
             prev_t_id = task_ids[i - 1]
             prev_output = task_outputs.get(str(prev_t_id), "")
@@ -525,70 +640,61 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
             lookup["task precedente"] = prev_output
             lookup["task_precedente"] = prev_output
 
-        # Regex replace placeholders like {task:Nome Task} or {Nome Task}
         pattern = re.compile(r'\{task:([^\}]+)\}|\{([^\}]+)\}')
-        
+
         def repl(match):
-            g1 = match.group(1) # matches after "task:"
-            g2 = match.group(2) # matches the whole content if no "task:"
+            g1 = match.group(1)
+            g2 = match.group(2)
             key = g1 if g1 is not None else g2
             if not key:
                 return match.group(0)
-            
             norm_key = normalize_name(key)
             if norm_key in lookup:
                 return lookup[norm_key]
-            
-            # Try lowercase exact matching
             lower_key = key.strip().lower()
             if lower_key in lookup:
                 return lookup[lower_key]
-                
-            return match.group(0) # Keep original if not matched
+            return match.group(0)
 
         original_desc = pattern.sub(repl, original_desc)
-        
-        # If there are outputs from previous steps, append them to the task description explicitly
+
+        # --- MEMORY-CENTRIC: Replace prompt-stuffing with Memory Index Table ---
+        # Instead of appending the full text of every previous output (which
+        # consumes O(n²) tokens across n tasks), we append only a compact
+        # index table.  The agent uses read_atomic_memory to fetch details.
         if i > 0:
-            context_str = "\n\n[CONTEXT FROM PREVIOUS STEPS]:"
-            for prev_idx in range(i):
-                prev_task_id = task_ids[prev_idx]
-                prev_output = task_outputs.get(str(prev_task_id), "")
-                if prev_output:
-                    try:
-                        prev_task_rec = db.read_task(prev_task_id)
-                        t_name = prev_task_rec.get('name')
-                        role_str = f"Agent ID {prev_task_rec.get('agent_id')}"
-                        if prev_task_rec.get('agent_id'):
-                            agent_rec = db.read_agent(prev_task_rec['agent_id'])
-                            if agent_rec:
-                                role_str = agent_rec['name']
-                    except Exception:
-                        role_str = f"Task {prev_task_id}"
-                        t_name = None
-                    context_str += f"\n--- Step {prev_idx + 1} ({role_str} - Task: {t_name or f'Task {prev_task_id}'}) Output ---\n{prev_output}\n"
+            index_table = memory_manager.get_memory_index_table()
+            context_str = (
+                "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
+                "Results from previous steps are stored in the ephemeral in-memory database.\n"
+                "Use the 'read_atomic_memory' tool with the exact 'key' column value to retrieve data.\n"
+                "Use 'write_atomic_memory' to store YOUR output for downstream agents.\n\n"
+                f"{index_table}\n"
+                "--- [END MEMORY INDEX] ---\n"
+            )
             original_desc += context_str
-            
+
         task_obj.description = original_desc
-        
-        # Create a single task Crew and execute it
+
+        # Create a single-task Crew and execute
         single_task_crew = Crew(
             agents=[task_obj.agent],
             tasks=[task_obj],
             verbose=True,
             process='sequential'
         )
-        
-        # Kick off!
+
         result = single_task_crew.kickoff()
         last_output = str(result)
-        
-        # Save output
+
+        # --- MEMORY-CENTRIC: Auto-save task output to ephemeral memory ---
+        agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
+        _auto_save_to_memory(memory_manager, task_id, last_output, agent_role)
+
+        # Persist to DB for resume support (fallback)
         task_outputs[str(task_id)] = last_output
-        
-        # Save progress checkpoint to database
         db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
-        
+
     # Final output
     return last_output
 
@@ -601,6 +707,15 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         raise ValueError("Invalid plan format. Must contain 'agents' and 'tasks'.")
         
     # Pick a default model if not provided
+    if not default_model_id:
+        DataManager.load_env()
+        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+        if env_model_id:
+            try:
+                default_model_id = int(env_model_id)
+            except ValueError:
+                pass
+
     if not default_model_id:
         models = db.read_all_models()
         if models:
@@ -723,6 +838,185 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     
     logging.info("Successfully built Dynamic Crew!")
     return crew
+
+
+def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None) -> str:
+    """
+    Builds AND executes a dynamic crew from a JSON plan using memory-centric
+    communication.  This is the counterpart of execute_run_with_resume for
+    plans generated by the Chat Planner (not stored in the DB).
+
+    Instead of running all tasks in a single Crew.kickoff() (which chains
+    outputs via raw text), we run each task individually and mediate
+    communication through the ephemeral ChromaDB store.
+    """
+    if not plan or 'agents' not in plan or 'tasks' not in plan:
+        raise ValueError("Invalid plan format. Must contain 'agents' and 'tasks'.")
+
+    execution_context = execution_context or {}
+
+    # Resolve model
+    if not default_model_id:
+        DataManager.load_env()
+        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+        if env_model_id:
+            try:
+                default_model_id = int(env_model_id)
+            except ValueError:
+                pass
+
+    if not default_model_id:
+        models = db.read_all_models()
+        if models:
+            default_model_id = models[0]['id']
+        else:
+            raise ValueError("No models found in the database. Please configure a model first.")
+
+    llm_instance = _instantiate_llm(default_model_id)
+
+    model_record = db.read_model(default_model_id)
+    is_local_model = False
+    if model_record:
+        is_local_model = bool(model_record.get('is_local')) or \
+                         model_record.get('provider', '').lower() == 'ollama'
+
+    agents_data_by_role = {a['role']: a for a in plan.get('agents', [])}
+    conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
+                         "You never ramble. You output structured bullet points, not essays. "
+                         "Every sentence must carry unique, actionable information.")
+
+    # --- MEMORY-CENTRIC: Initialise ephemeral memory (run_id=0 for dynamic runs) ---
+    import time
+    dynamic_run_id = int(time.time()) % 1_000_000  # Pseudo-unique ID
+    memory_manager = EphemeralMemoryManager(run_id=dynamic_run_id)
+    read_memory_tool = ReadAtomicMemoryTool(memory_manager=memory_manager)
+    write_memory_tool = WriteAtomicMemoryTool(memory_manager=memory_manager)
+
+    agents_cache = {}
+    last_output = ""
+    task_outputs = {}
+
+    for task_idx, task_data in enumerate(plan['tasks']):
+        if run_id:
+            db.update_run(run_id, status='running', current_task_idx=task_idx, task_outputs=task_outputs)
+
+        agent_role = task_data.get('agent_role')
+        specialization = task_data.get('agent_specialization')
+
+        if agent_role not in agents_data_by_role:
+            logging.warning(f"Task specifies unknown agent role '{agent_role}'. Skipping.")
+            continue
+
+        agent_info = agents_data_by_role[agent_role]
+
+        # Resolve persona
+        if specialization:
+            base_role = agent_info['role']
+            base_backstory = agent_info.get('backstory', '') or ""
+            if "{specialization}" in base_role:
+                effective_role = base_role.replace("{specialization}", specialization)
+            else:
+                effective_role = f"{base_role} specialized in {specialization}"
+            if "{specialization}" in base_backstory:
+                effective_backstory = base_backstory.replace("{specialization}", specialization)
+            else:
+                effective_backstory = (
+                    base_backstory +
+                    f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
+                    f"focused on **{specialization}**."
+                )
+        else:
+            base_role = agent_info['role']
+            base_backstory = agent_info.get('backstory', '') or ""
+            effective_role = base_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+            effective_backstory = base_backstory.replace("{specialization}", "").strip()
+
+        # Build or reuse agent
+        if not specialization and agent_role in agents_cache:
+            agent_instance = agents_cache[agent_role]
+        else:
+            if is_local_model:
+                agent_tools = []
+            else:
+                agent_tools = _map_tools(agent_info.get('tools', []))
+
+            enhanced_backstory = effective_backstory + conciseness_trait
+            agent_instance = Agent(
+                role=effective_role,
+                backstory=enhanced_backstory,
+                goal=agent_info.get('goal', ''),
+                llm=llm_instance,
+                tools=agent_tools,
+                verbose=True,
+                allow_delegation=False,
+                max_iter=5
+            )
+            if not specialization:
+                agents_cache[agent_role] = agent_instance
+
+        # Build task
+        task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+
+        # Inject user inputs
+        for k, v in execution_context.items():
+            task_description = task_description.replace(f"{{{k}}}", str(v))
+        task_description = task_description.replace("{user_input}", execution_context.get('user_input', ''))
+        task_description = task_description.replace("{previous_result}", last_output)
+        task_description = task_description.replace("{context}", last_output)
+
+        # Append memory index for steps after the first
+        if task_idx > 0:
+            index_table = memory_manager.get_memory_index_table()
+            task_description += (
+                "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
+                "Results from previous steps are stored in the ephemeral in-memory database.\n"
+                "Use the 'read_atomic_memory' tool with the exact 'key' to retrieve data.\n"
+                "Use 'write_atomic_memory' to store YOUR output for downstream agents.\n\n"
+                f"{index_table}\n"
+                "--- [END MEMORY INDEX] ---\n"
+            )
+
+        base_expected = task_data.get('expected_output', 'Task Output')
+        if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
+            base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
+
+        task_obj = Task(
+            description=task_description,
+            expected_output=base_expected,
+            agent=agent_instance,
+            async_execution=False
+        )
+
+        # Inject memory tools
+        _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)
+
+        # Execute single-task crew
+        single_crew = Crew(
+            agents=[agent_instance],
+            tasks=[task_obj],
+            verbose=True,
+            process='sequential'
+        )
+
+        result = single_crew.kickoff(inputs=execution_context)
+        last_output = str(result)
+
+        # Auto-save to ephemeral memory
+        key_name = f"dynamic_task_{task_idx}"
+        summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {last_output[:500]}"
+        memory_manager.write_record(
+            key=key_name,
+            content_summary=summary_text,
+            structured_data={"raw_output": last_output},
+            agent_role=effective_role,
+        )
+        logging.info(f"[Memory-Centric] Dynamic task {task_idx + 1} completed by '{effective_role}'.")
+        
+        task_outputs[str(task_idx)] = last_output
+        if run_id:
+            db.update_run(run_id, status='running', result=last_output, current_task_idx=task_idx + 1, task_outputs=task_outputs)
+
+    return last_output
 
 if __name__ == '__main__':
     # Example usage (for testing purposes)

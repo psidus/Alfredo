@@ -122,7 +122,9 @@ class DBManager:
                 required_inputs_json TEXT, -- List of {key, prompt} objects as JSON
                 agent_specialization TEXT, -- Optional task-level agent specialization
                 name TEXT,
-                FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL
+                model_id INTEGER,
+                FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL,
+                FOREIGN KEY (model_id) REFERENCES models (id) ON DELETE SET NULL
             );
             """,
             """
@@ -247,6 +249,13 @@ class DBManager:
             # Migration to add name to tasks if upgrading from older version
             try:
                 self.cursor.execute("ALTER TABLE tasks ADD COLUMN name TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+ 
+            # Migration to add model_id to tasks if upgrading from older version
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN model_id INTEGER REFERENCES models(id) ON DELETE SET NULL;")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -396,15 +405,15 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
         vector_dbs_json = json.dumps(vector_dbs)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None))
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name, model_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -427,7 +436,7 @@ class DBManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
@@ -436,10 +445,10 @@ class DBManager:
         vector_dbs_json = json.dumps(vector_dbs)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?, agent_specialization = ?, name = ?
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?, agent_specialization = ?, name = ?, model_id = ?
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 

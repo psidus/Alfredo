@@ -711,6 +711,35 @@ def render_agent_caserma():
             st.toast("Master AI Model saved successfully!", icon="✅")
             st.rerun()
             
+    # Read current Default Agent model selection from .env
+    current_default_agent_model_id = current_env.get("DEFAULT_AGENT_MODEL_ID", "")
+    default_agent_index = 0
+    try:
+        if current_default_agent_model_id:
+            agent_model_id_int = int(current_default_agent_model_id)
+            if agent_model_id_int in model_ids:
+                default_agent_index = model_ids.index(agent_model_id_int)
+    except ValueError:
+        pass
+        
+    col_agent_model, col_agent_save = st.columns([4, 1])
+    with col_agent_model:
+        selected_default_agent_model_str = st.selectbox(
+            "Select Default Model for Agents", 
+            options=model_names, 
+            index=default_agent_index,
+            key="default_agent_model_select",
+            help="Select the default model that all agents will use if a task doesn't override it."
+        )
+    with col_agent_save:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
+            chosen_model_id = model_options[selected_default_agent_model_str]
+            set_key(env_path, "DEFAULT_AGENT_MODEL_ID", str(chosen_model_id))
+            st.toast("Default Agent Model saved successfully!", icon="✅")
+            st.rerun()
+            
     st.divider()
     
     agents = db.read_all_agents()
@@ -745,13 +774,6 @@ def render_agent_caserma():
 
         # Ensure session state variables for agent editing exist and are in sync
         current_editing_id = editing_agent['id'] if editing_agent else None
-        
-        default_model_id = editing_agent['model_id'] if editing_agent else None
-        model_names = list(model_options.keys())
-        model_ids = list(model_options.values())
-        default_model_index = 0
-        if default_model_id in model_ids:
-            default_model_index = model_ids.index(default_model_id)
 
         if "optimized_agent_data" in st.session_state:
             opt_data = st.session_state.pop("optimized_agent_data")
@@ -766,14 +788,12 @@ def render_agent_caserma():
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
-            st.session_state.agent_model_sel = model_names[default_model_index] if model_names else None
         elif st.session_state.last_editing_agent_id != current_editing_id:
             st.session_state.last_editing_agent_id = current_editing_id
             st.session_state.agent_name_input = default_name
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
-            st.session_state.agent_model_sel = model_names[default_model_index] if model_names else None
 
         # Sanitize session state keys before rendering widgets to avoid TypeError: bad argument type for built-in operation
         for k in ["agent_name_input", "agent_role_input", "agent_goal_input", "agent_backstory_input"]:
@@ -787,9 +807,6 @@ def render_agent_caserma():
         role = st.text_input("Role", key="agent_role_input")
         goal = st.text_area("Goal", key="agent_goal_input")
         backstory = st.text_area("Backstory", key="agent_backstory_input")
-        
-        # Select model
-        selected_model_str = st.selectbox("Select Model", options=model_names, key="agent_model_sel")
         
         col_opt, col_sub = st.columns([1, 1])
         with col_opt:
@@ -821,23 +838,23 @@ def render_agent_caserma():
         with col_sub:
             submitted = st.button(submit_label, type="primary", use_container_width=True, key="save_agent_btn")
             
-        if submitted and name and role and goal and backstory and selected_model_str:
+        if submitted and name and role and goal and backstory:
             # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
             sane_name = sanitize_input(name)
             sane_role = sanitize_input(role)
             sane_goal = sanitize_input(goal)
             sane_backstory = sanitize_input(backstory)
             
-            model_id = model_options[selected_model_str]
             combined_backstory = f"Goal: {sane_goal}\n\nBackstory: {sane_backstory}"
             
             if editing_agent:
+                model_id = editing_agent.get('model_id')
                 db.update_agent(editing_agent['id'], sane_name, sane_role, combined_backstory, model_id, [])
                 st.success(f"Agent '{sane_name}' updated successfully!")
                 if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 clear_editing_state('editing_agent_id')
             else:
-                db.create_agent(sane_name, sane_role, combined_backstory, model_id, [])
+                db.create_agent(sane_name, sane_role, combined_backstory, None, [])
                 st.success(f"Agent '{sane_name}' has been recruited!")
                 if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 st.rerun()
@@ -948,6 +965,12 @@ def render_task_builder():
 
     agent_options = {f"{agent['name']} ({agent['role']})": agent['id'] for agent in agents}
 
+    # Fetch models for task-level LLM overrides
+    models = db.read_all_models()
+    model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
+    model_names = ["None / Use Agent Default"] + list(model_options.keys())
+    model_ids = [None] + list(model_options.values())
+
     # --- Edit/Create Form ---
     editing_task = None
     if 'editing_task_id' in st.session_state and st.session_state.editing_task_id:
@@ -1031,6 +1054,13 @@ def render_task_builder():
             st.session_state.task_tools_sel = default_tools
             st.session_state.task_vdb_sel = default_vdb_names
             
+            # Default model override selection
+            default_model_id = editing_task.get('model_id') if editing_task else None
+            default_model_index = 0
+            if default_model_id in model_ids:
+                default_model_index = model_ids.index(default_model_id)
+            st.session_state.task_model_sel = model_names[default_model_index] if model_names else None
+            
             # Clear old dynamic input keys from session state
             for k in list(st.session_state.keys()):
                 if k.startswith("ri_key_") or k.startswith("ri_prompt_"):
@@ -1054,6 +1084,13 @@ def render_task_builder():
             st.session_state.task_agent_sel = default_agent_name
             st.session_state.task_tools_sel = default_tools
             st.session_state.task_vdb_sel = default_vdb_names
+            
+            # Default model override selection
+            default_model_id = editing_task.get('model_id') if editing_task else None
+            default_model_index = 0
+            if default_model_id in model_ids:
+                default_model_index = model_ids.index(default_model_id)
+            st.session_state.task_model_sel = model_names[default_model_index] if model_names else None
             
             # Clear old dynamic input keys from session state
             for k in list(st.session_state.keys()):
@@ -1134,6 +1171,19 @@ def render_task_builder():
                     st.image(get_agent_avatar_url(current_agent), width=100)
         with col_sel:
             selected_agent_name = st.selectbox("Assign to Agent", options=agent_names, index=default_index, key="task_agent_sel")
+            
+            # Retrieve currently selected index for key-based selectbox alignment
+            default_task_model_idx = 0
+            if "task_model_sel" in st.session_state and st.session_state.task_model_sel in model_names:
+                default_task_model_idx = model_names.index(st.session_state.task_model_sel)
+                
+            selected_model_str = st.selectbox(
+                "Model Override for this Task (Optional)",
+                options=model_names,
+                index=default_task_model_idx,
+                key="task_model_sel",
+                help="Select a specific LLM model to execute this task. If set to 'None / Use Agent Default', it will fallback to the agent's default model."
+            )
             
         # --- Spacing ---
         st.markdown("<div style='margin-top: 12px;'></div>", unsafe_allow_html=True)
@@ -1374,22 +1424,31 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                 st.error("All fields are required.")
             else:
                 agent_id = agent_options[selected_agent_name]
+                
+                # Resolve task model_id
+                selected_model_str = st.session_state.get("task_model_sel", "None / Use Agent Default")
+                task_model_id = None
+                if selected_model_str and selected_model_str != "None / Use Agent Default":
+                    task_model_id = model_options.get(selected_model_str)
+                
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     if 'task_name_input' in st.session_state: del st.session_state.task_name_input
+                    if 'task_model_sel' in st.session_state: del st.session_state.task_model_sel
                     for k in list(st.session_state.keys()):
                         if k.startswith("cb_task_"):
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     if 'task_name_input' in st.session_state: del st.session_state.task_name_input
+                    if 'task_model_sel' in st.session_state: del st.session_state.task_model_sel
                     for k in list(st.session_state.keys()):
                         if k.startswith("cb_task_"):
                             del st.session_state[k]
@@ -1403,6 +1462,8 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                 del st.session_state.last_editing_task_id
             if 'task_name_input' in st.session_state:
                 del st.session_state.task_name_input
+            if 'task_model_sel' in st.session_state:
+                del st.session_state.task_model_sel
             for k in list(st.session_state.keys()):
                 if k.startswith("cb_task_"):
                     del st.session_state[k]
@@ -1457,6 +1518,11 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                 
                                 if task.get('agent_specialization'):
                                     st.markdown(f"**🎯 Specialization:** *{task['agent_specialization']}*")
+                                    
+                                if task.get('model_id'):
+                                    task_model = next((m for m in models if m['id'] == task['model_id']), None)
+                                    if task_model:
+                                        st.markdown(f"**🤖 Model Override:** `{task_model['provider']} / {task_model['model_name']}`")
                                 
                                 if task.get('vector_dbs') and 'vector_search' in task.get('tools', []):
                                     # Fetch DB names for display
@@ -1991,6 +2057,9 @@ def render_history_monitoring():
             count = db.clear_all_runs()
             st.toast(f"History cleared! ({count} runs removed)", icon="🗑️")
             st.rerun()
+    with col2:
+        if st.button("🔄 Refresh Live Status", type="secondary"):
+            st.rerun()
 
     runs = db.read_all_runs(limit=50)
     workflows = db.read_all_workflows()
@@ -2018,6 +2087,10 @@ def render_history_monitoring():
                 if run['finished_at']:
                     st.markdown(f"**Finished At:** {run['finished_at']}")
                 
+                if status == 'running':
+                    current_idx = run.get('current_task_idx', 0)
+                    st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
+
                 st.markdown("**Result / Error:**")
                 if run['result']:
                     st.code(run['result'], language=None)
