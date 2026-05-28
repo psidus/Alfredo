@@ -788,14 +788,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # ephemeral in-memory ChromaDB for inter-agent communication.
             if final_plan:
                 logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
+                logger.info(f"User {user_id}: Starting execution of Dynamic Workflow.")
                 result_tuple = await asyncio.to_thread(
-                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context
+                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id)
                 )
             else:
-                logger.info(
-                    f"User {user_id}: Kicking off Memory-Centric Crew with resume tracking for Run ID {run_id}"
-                )
-                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, None, accumulated_context)
+                logger.info(f"User {user_id}: Starting execution of Workflow ID {workflow_id} (resume from {start_idx}).")
+                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, None, accumulated_context, str(chat_id))
 
             # Unpack the (last_output, global_context) tuple
             if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
@@ -833,10 +832,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return ConversationHandler.END
         except Exception as e:
             logger.error(f"Execution error for User {user_id}: {e}", exc_info=True)
-            await status_msg.edit_text(
-                text=f"❌ <b>Execution Failed</b>\n<i>An error occurred during workflow execution:</i>\n<code>{e}</code>",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                safe_e = str(e).replace('<', '&lt;').replace('>', '&gt;')
+                await status_msg.edit_text(
+                    text=f"❌ <b>Execution Failed</b>\n<i>An error occurred during workflow execution:</i>\n<code>{safe_e}</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as inner_e:
+                logger.error(f"Failed to send error message to Telegram: {inner_e}")
             if run_id:
                 db.update_run(run_id, status='failed', result=str(e))
             return ConversationHandler.END

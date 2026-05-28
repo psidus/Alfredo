@@ -1450,6 +1450,15 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
         with col_btn1:
             st.button("➕ Add Variable", on_click=add_row, use_container_width=True)
 
+        # --- Human Validation (HITL) ---
+        st.markdown("---")
+        human_validation = st.checkbox(
+            "Pause for Human Validation",
+            key="task_human_validation_cb",
+            value=bool(editing_task.get('human_validation')) if editing_task else False,
+            help="If enabled, execution will pause after this task and ask the user via chat to review the agent's output and provide feedback to change/filter the output before proceeding."
+        )
+
         st.markdown("---")
         if st.button(submit_label, type="primary", use_container_width=True):
             # ARCHITECTURAL MANDATE M1_T3-A1: Sanitize all text inputs
@@ -1468,7 +1477,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     task_model_id = model_options.get(selected_model_str)
                 
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -1479,7 +1488,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id

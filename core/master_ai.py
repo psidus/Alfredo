@@ -90,6 +90,7 @@ OUTPUT FORMAT (JSON ONLY):
         "expected_output": "What the task should produce",
         "agent_role": "MUST match exactly one role from the agents list",
         "agent_specialization": "Optional domain specialization for the agent in this task",
+        "vector_dbs": ["list of vector database IDs (integers) to search, if needed"],
         "required_inputs": [
           {"key": "variable_name", "prompt": "User-facing question to ask before execution"}
         ]
@@ -238,6 +239,7 @@ For each generated subtask, you must:
 6. Crucial: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like {{nome_variabile}} or {{user_input}}. Keep them exactly as they are in the original task description so they can be resolved at runtime.
 7. CRITICAL ARCHITECTURE RULE: Agents NEVER write or execute final code files. Agents ONLY produce data, logic, and mathematical blueprints, saving them to the vector database. The final code is generated EXCLUSIVELY by the Master AI at the end of the workflow. If the original task asks an agent to "Audit source code", "Write a python file", or "Run code", you MUST decompose it into subtasks that focus on generating "logical blueprints" or "validation rules" for the vector DB instead.
 8. CRITICAL: The original task has a list of 'required_inputs'. You MUST distribute these required inputs into the 'required_inputs' array of the relevant subtasks where they are needed.
+9. AI OPTIMIZER TOOL VERIFICATION: You must verify and assign tools. Single agents DO NOT have write or production tools. They only research and populate the ephemeral database. If a task implies web search, add 'search_web'. If it implies vector DB search, add 'vector_search'. Distribute the original tools and vector_dbs, or add new ones as strictly necessary.
 
 Available Agents:
 {available_agents}
@@ -248,6 +250,8 @@ Task to analyze:
 - Expected Output: {expected_output}
 - Assigned Agent Role: {agent_role}
 - Required Inputs: {required_inputs}
+- Original Tools: {original_tools}
+- Original Vector DBs: {original_vector_dbs}
 
 Return ONLY a JSON object with this exact structure:
 {{
@@ -259,6 +263,8 @@ Return ONLY a JSON object with this exact structure:
       "expected_output": "Measurable expected output",
       "agent_role": "Role of the assigned agent (must match one of the roles in the available agents list)",
       "agent_specialization": "Micro-specialization or null",
+      "tools": ["list of required tools, e.g. 'search_web', 'vector_search'"],
+      "vector_dbs": ["list of vector database IDs (strings or integers) if vector_search is assigned"],
       "required_inputs": [
         {{ "key": "dataset_name", "prompt": "Please enter dataset name" }}
       ]
@@ -271,6 +277,34 @@ If the task is not complex, return this exact structure:
   "is_complex": false,
   "subtasks": []
 }}
+}}
+"""
+
+VALIDATION_FORMATTER_PROMPT = """
+You are Alfredo, the Master AI.
+An AI agent just completed a task that requires HUMAN VALIDATION.
+Your job is to read the agent's raw output and translate it into a clear, concise summary for the user.
+Explain what intermediate results were found, and ask the user what they want to keep, ignore, or change.
+
+RAW OUTPUT:
+{raw_output}
+
+Generate ONLY the user-facing message. Keep it short, use Markdown, and ask for clear instructions.
+"""
+
+VALIDATION_PROCESSOR_PROMPT = """
+You are Alfredo, the Master AI Editor.
+An agent produced an output, and the user provided feedback on it.
+Your job is to rewrite the agent's output to strictly incorporate the user's feedback (e.g., keeping only the selected items, removing ignored ones, or fixing values).
+CRITICAL: You MUST maintain the original Vector DB format (e.g., `# Topic:`, `[KEYWORDS: ]`, bullet points) if it was present.
+
+RAW OUTPUT:
+{raw_output}
+
+USER FEEDBACK:
+{user_feedback}
+
+Rewrite and output ONLY the updated vector DB compliant text. Do not include markdown code block wrappers (like ```md).
 """
 
 class MasterAI:
@@ -650,6 +684,7 @@ class MasterAI:
                         "description": t_rec.get("description"),
                         "expected_output": t_rec.get("expected_output"),
                         "agent_specialization": t_rec.get("agent_specialization"),
+                        "vector_dbs": t_rec.get("vector_dbs") or [],
                         "tools": t_rec.get("tools") or [],
                         "agent": agent_info
                     })
@@ -772,6 +807,58 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 "goal": goal,
                 "backstory": backstory
             }
+
+    def format_validation_request(self, raw_output: str) -> str:
+        """Translates raw agent output into a clear question for the user to validate."""
+        if not raw_output:
+            return "⚠️ The agent produced no output. What should I do next?"
+            
+        system_prompt = VALIDATION_FORMATTER_PROMPT.format(raw_output=raw_output)
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+            
+        try:
+            raw_content = self._call_llm_with_retry(
+                model=model_string,
+                messages=[{"role": "user", "content": system_prompt}],
+                temperature=0.3
+            )
+            return raw_content.strip()
+        except Exception as e:
+            logger.error(f"Failed to format validation request: {e}")
+            return f"⚠️ **Human Validation Required**\n\nRaw Output:\n```\n{raw_output[:1000]}...\n```\n\nPlease provide your feedback:"
+
+    def process_validation_feedback(self, raw_output: str, user_feedback: str) -> str:
+        """Rewrites the raw agent output incorporating the user's feedback."""
+        system_prompt = VALIDATION_PROCESSOR_PROMPT.format(
+            raw_output=raw_output, 
+            user_feedback=user_feedback
+        )
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+            
+        try:
+            new_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=[{"role": "user", "content": system_prompt}],
+                temperature=0.1
+            )
+            new_output = new_output.strip()
+            if new_output.startswith("```"):
+                lines = new_output.split("\n")
+                if len(lines) > 2:
+                    new_output = "\n".join(lines[1:-1])
+            return new_output.strip()
+        except Exception as e:
+            logger.error(f"Failed to process validation feedback: {e}")
+            # Fallback: append the feedback manually
+            return f"{raw_output}\n\n[USER FEEDBACK APPLIED]: {user_feedback}"
 
     def optimize_task_fields(self, description: str, expected_output: str) -> Dict[str, str]:
         """
@@ -930,7 +1017,9 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             description=description,
             expected_output=expected_output,
             agent_role=agent_role,
-            required_inputs=json.dumps(task.get('required_inputs') or [], indent=2)
+            required_inputs=json.dumps(task.get('required_inputs') or [], indent=2),
+            original_tools=json.dumps(task.get('tools') or [], indent=2),
+            original_vector_dbs=json.dumps(task.get('vector_dbs') or [], indent=2)
         )
 
         model_string = f"{self.model_provider}/{self.model_name}"

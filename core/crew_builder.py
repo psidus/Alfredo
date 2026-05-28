@@ -180,6 +180,57 @@ def _map_tools(tool_names):
 
     return instantiated_tools
 
+def _get_task_tools(tool_names, vector_dbs, is_local_model=False):
+    """
+    Combines _map_tools with dynamic instantiation of VectorSearchTool and TabularQueryTool
+    based on the provided vector_dbs list.
+    """
+    if is_local_model:
+        return None
+        
+    task_tools = _map_tools(tool_names) or []
+    
+    if 'vector_search' in tool_names:
+        for db_id in vector_dbs:
+            try:
+                db_id_int = int(db_id)
+                vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = ?", (db_id_int,)).fetchone()
+                if vdb_record:
+                    tool_instance = VectorSearchTool(
+                        name=f"search_db_{vdb_record['name']}",
+                        description=f"Search the vector database '{vdb_record['name']}' for context.",
+                        db_path=vdb_record['path'],
+                        provider=vdb_record['provider'],
+                        model_name=vdb_record['model_name']
+                    )
+                    task_tools.append(tool_instance)
+
+                    structured_dir = os.path.join(vdb_record['path'], "structured")
+                    if os.path.isdir(structured_dir):
+                        csv_files = [f for f in os.listdir(structured_dir) if f.endswith('.csv')]
+                        if csv_files:
+                            table_list = ', '.join(csv_files)
+                            tabular_tool = TabularQueryTool(
+                                name=f"query_tables_{vdb_record['name']}",
+                                description=(
+                                    f"Query structured tabular data (CSV/Excel) from database '{vdb_record['name']}'. "
+                                    f"Available tables: {table_list}. "
+                                    "Use action='list' to see all tables, 'info' for schema, "
+                                    "'head' for a preview, 'summary' for statistics, "
+                                    "or 'query' with a pandas filter expression to find specific rows."
+                                ),
+                                structured_dir=structured_dir
+                            )
+                            task_tools.append(tabular_tool)
+                            logging.info(
+                                f"Auto-injected TabularQueryTool for DB '{vdb_record['name']}' "
+                                f"with {len(csv_files)} CSV file(s)."
+                            )
+            except (ValueError, TypeError):
+                pass
+                
+    return task_tools if task_tools else None
+
 def _build_agent(agent_id, specialization=None, model_id_override=None):
     """
     Constructs a CrewAI Agent object from database records.
@@ -329,53 +380,7 @@ def _build_task(task_id, agents_cache):
     if is_local_model:
         task_tools = None  # No tools for local models
     else:
-        # Map standard tools
-        task_tools = _map_tools(task_record.get('tools', [])) or []
-        
-        # Handle custom dynamic tools like vector_search
-        if 'vector_search' in task_record.get('tools', []):
-            vector_dbs = task_record.get('vector_dbs', [])
-            for db_id in vector_dbs:
-                try:
-                    db_id_int = int(db_id)
-                    vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = ?", (db_id_int,)).fetchone()
-                    if vdb_record:
-                        tool_instance = VectorSearchTool(
-                            name=f"search_db_{vdb_record['name']}",
-                            description=f"Search the vector database '{vdb_record['name']}' for context.",
-                            db_path=vdb_record['path'],
-                            provider=vdb_record['provider'],
-                            model_name=vdb_record['model_name']
-                        )
-                        task_tools.append(tool_instance)
-
-                        # --- Auto-inject TabularQueryTool if structured CSVs exist ---
-                        structured_dir = os.path.join(vdb_record['path'], "structured")
-                        if os.path.isdir(structured_dir):
-                            csv_files = [f for f in os.listdir(structured_dir) if f.endswith('.csv')]
-                            if csv_files:
-                                table_list = ', '.join(csv_files)
-                                tabular_tool = TabularQueryTool(
-                                    name=f"query_tables_{vdb_record['name']}",
-                                    description=(
-                                        f"Query structured tabular data (CSV/Excel) from database '{vdb_record['name']}'. "
-                                        f"Available tables: {table_list}. "
-                                        "Use action='list' to see all tables, 'info' for schema, "
-                                        "'head' for a preview, 'summary' for statistics, "
-                                        "or 'query' with a pandas filter expression to find specific rows."
-                                    ),
-                                    structured_dir=structured_dir
-                                )
-                                task_tools.append(tabular_tool)
-                                logging.info(
-                                    f"Auto-injected TabularQueryTool for DB '{vdb_record['name']}' "
-                                    f"with {len(csv_files)} CSV file(s)."
-                                )
-                except (ValueError, TypeError):
-                    pass
-        
-        if not task_tools:
-            task_tools = None
+        task_tools = _get_task_tools(task_record.get('tools', []), task_record.get('vector_dbs', []), is_local_model)
 
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
@@ -510,7 +515,7 @@ def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
     )
 
 
-def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None) -> str:
+def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None, chat_id: str = None) -> str:
     """
     Executes a workflow run task-by-task with MEMORY-CENTRIC communication.
 
@@ -735,6 +740,23 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, last_output, agent_role)
 
+        # Handle Human Validation
+        t_rec = workflow_tasks[i]
+        if chat_id and t_rec.get('human_validation'):
+            from core.master_ai import MasterAI
+            from core.human_in_the_loop import request_human_input
+            master_ai = MasterAI()
+            
+            logging.info(f"Task {task_id} requires human validation. Pausing execution.")
+            question = master_ai.format_validation_request(last_output)
+            user_feedback = request_human_input(chat_id, question)
+            
+            if user_feedback and user_feedback != "SYSTEM_ABORT":
+                logging.info(f"Processing human feedback for task {task_id}...")
+                last_output = master_ai.process_validation_feedback(last_output, user_feedback)
+                # Overwrite memory with the human-edited output
+                _auto_save_to_memory(memory_manager, task_id, last_output, f"{agent_role} (Human Edited)")
+
         # Persist to DB for resume support (fallback)
         task_outputs[str(task_id)] = last_output
         db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
@@ -857,6 +879,8 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             if agent_instance not in actual_crew_agents:
                 actual_crew_agents.append(agent_instance)
             
+        task_tools = _get_task_tools(agent_info.get('tools', []), task_data.get('vector_dbs', []), is_local_model)
+
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
         # Enhance expected_output for structured format
@@ -873,6 +897,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             description=task_description,
             expected_output=base_expected,
             agent=agent_instance,
+            tools=task_tools,
             async_execution=False
         )
         crew_tasks.append(task)
@@ -894,7 +919,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     return crew
 
 
-def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None) -> str:
+def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None) -> str:
     """
     Builds AND executes a dynamic crew from a JSON plan using memory-centric
     communication.  This is the counterpart of execute_run_with_resume for
@@ -1026,6 +1051,11 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 agents_cache[agent_role] = agent_instance
 
         # Build task
+        # Combine tools from agent definition and task definition (Optimizer adds tools directly to the task)
+        agent_t = agent_info.get('tools') or []
+        task_t = task_data.get('tools') or []
+        combined_tools = list(set(agent_t + task_t))
+        task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], is_local_model)
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
         # Inject user inputs
@@ -1071,6 +1101,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             description=task_description,
             expected_output=base_expected,
             agent=agent_instance,
+            tools=task_tools,
             async_execution=False
         )
 
@@ -1109,6 +1140,27 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             agent_role=effective_role,
         )
         logging.info(f"[Memory-Centric] Dynamic task {task_idx + 1} completed by '{effective_role}'.")
+        
+        # Handle Human Validation for Dynamic Plan
+        if chat_id and task_data.get('human_validation'):
+            from core.master_ai import MasterAI
+            from core.human_in_the_loop import request_human_input
+            master_ai = MasterAI()
+            
+            logging.info(f"Dynamic task {task_idx + 1} requires human validation. Pausing execution.")
+            question = master_ai.format_validation_request(last_output)
+            user_feedback = request_human_input(chat_id, question)
+            
+            if user_feedback and user_feedback != "SYSTEM_ABORT":
+                logging.info(f"Processing human feedback for dynamic task {task_idx + 1}...")
+                last_output = master_ai.process_validation_feedback(last_output, user_feedback)
+                # Overwrite memory with the human-edited output
+                memory_manager.write_record(
+                    key=key_name,
+                    content_summary=f"Output of dynamic task {task_idx + 1} by agent '{effective_role} (Human Edited)': {last_output[:500]}",
+                    structured_data={"raw_output": last_output},
+                    agent_role=f"{effective_role} (Human Edited)",
+                )
         
         task_outputs[str(task_idx)] = last_output
         if run_id:
