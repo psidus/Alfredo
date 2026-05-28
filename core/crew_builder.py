@@ -919,7 +919,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     return crew
 
 
-def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None) -> str:
+def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None, progress_callback=None) -> str:
     """
     Builds AND executes a dynamic crew from a JSON plan using memory-centric
     communication.  This is the counterpart of execute_run_with_resume for
@@ -1116,17 +1116,48 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             process='sequential'
         )
 
-        try:
-            result = single_crew.kickoff(inputs=execution_context)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
-                logging.warning(f"Rate limit / 503 encountered at dynamic task {task_idx}: {e}")
-                if run_id:
-                    db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
-                raise RateLimitError(f"Model high demand error (503): {e}", task_idx, task_outputs)
-            else:
-                raise e
+        # --- Retry logic for transient LLM errors (503, empty output, etc.) ---
+        max_retries = 2
+        last_exception = None
+        for attempt in range(max_retries + 1):
+            try:
+                # Rebuild crew for retry attempts (CrewAI objects are not reusable after failure)
+                if attempt > 0:
+                    import time
+                    wait_time = 10 * attempt  # 10s, 20s
+                    logging.warning(f"Retry attempt {attempt}/{max_retries} for dynamic task {task_idx} after {wait_time}s wait...")
+                    time.sleep(wait_time)
+                    single_crew = Crew(
+                        agents=[agent_instance],
+                        tasks=[task_obj],
+                        verbose=True,
+                        process='sequential'
+                    )
+                result = single_crew.kickoff(inputs=execution_context)
+                last_exception = None
+                break  # Success — exit retry loop
+            except Exception as e:
+                last_exception = e
+                err_str = str(e).lower()
+                is_transient = (
+                    "503" in err_str or "unavailable" in err_str or "rate" in err_str
+                    or "empty" in err_str or "none" in err_str
+                    or "model output" in err_str
+                    or "resource" in err_str or "overloaded" in err_str
+                )
+                if is_transient and attempt < max_retries:
+                    logging.warning(f"Transient LLM error at dynamic task {task_idx} (attempt {attempt+1}): {e}")
+                    continue  # Retry
+                elif is_transient:
+                    logging.warning(f"Transient LLM error persisted after {max_retries+1} attempts at task {task_idx}: {e}")
+                    if run_id:
+                        db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
+                    raise RateLimitError(f"Model transient error after retries: {e}", task_idx, task_outputs)
+                else:
+                    raise e
+
+        if last_exception is not None:
+            raise last_exception
                 
         last_output = str(result)
 
@@ -1140,6 +1171,14 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             agent_role=effective_role,
         )
         logging.info(f"[Memory-Centric] Dynamic task {task_idx + 1} completed by '{effective_role}'.")
+
+        # Notify the bot of task progress (best-effort)
+        if progress_callback:
+            try:
+                total_tasks = len(plan['tasks'])
+                progress_callback(task_idx, total_tasks, effective_role)
+            except Exception:
+                pass  # Don't crash the workflow for a notification failure
         
         # Handle Human Validation for Dynamic Plan
         if chat_id and task_data.get('human_validation'):

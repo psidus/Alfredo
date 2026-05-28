@@ -1237,6 +1237,16 @@ def render_task_builder():
         
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         
+        # --- Human Validation (HITL) ---
+        human_validation = st.checkbox(
+            "Pause for Human Validation",
+            key="task_human_validation_cb",
+            value=bool(editing_task.get('human_validation')) if editing_task else False,
+            help="If enabled, execution will pause after this task and ask the user via chat to review the agent's output and provide feedback to change/filter the output before proceeding."
+        )
+        
+        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+        
         # Display Tools inside a collapsible expander containing Premium Cards
         with st.expander("🛠️ Assign Tools (Optional)", expanded=False):
             st.caption("Select the tools this task's agent is authorized to use:")
@@ -1449,15 +1459,6 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
         col_btn1, _ = st.columns([1, 3])
         with col_btn1:
             st.button("➕ Add Variable", on_click=add_row, use_container_width=True)
-
-        # --- Human Validation (HITL) ---
-        st.markdown("---")
-        human_validation = st.checkbox(
-            "Pause for Human Validation",
-            key="task_human_validation_cb",
-            value=bool(editing_task.get('human_validation')) if editing_task else False,
-            help="If enabled, execution will pause after this task and ask the user via chat to review the agent's output and provide feedback to change/filter the output before proceeding."
-        )
 
         st.markdown("---")
         if st.button(submit_label, type="primary", use_container_width=True):

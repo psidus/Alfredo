@@ -2,6 +2,11 @@ import asyncio
 import logging
 import os
 import sys
+import io
+
+# Force UTF-8 encoding for stdout/stderr to prevent CrewAI emoji crashes
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatAction
@@ -773,24 +778,46 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Inject chat_id for tools
         os.environ["CURRENT_CHAT_ID"] = str(chat_id)
 
-        # Background task to keep the 'typing' indicator alive
+        # Background task to keep the 'typing' indicator alive.
+        # Wrapped in try/except to prevent silent death from Telegram API errors.
         async def typing_indicator():
             while True:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                try:
+                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                except Exception:
+                    pass  # Swallow Telegram errors — typing is best-effort
                 await asyncio.sleep(4)
 
         typing_task = asyncio.create_task(typing_indicator())
 
+        # Progress callback: sends a status update to Telegram for each task
+        loop = asyncio.get_event_loop()
+
+        def on_task_progress(task_idx: int, total_tasks: int, agent_role: str):
+            """Called from the worker thread after each task completes."""
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    status_msg.edit_text(
+                        text=(
+                            f"🚀 <b>Execution in progress...</b>\n"
+                            f"<i>Step {task_idx + 1}/{total_tasks} completed</i>\n"
+                            f"Agent: <code>{agent_role[:50]}</code>"
+                        ),
+                        parse_mode=ParseMode.HTML
+                    ),
+                    loop
+                ).result(timeout=10)
+            except Exception:
+                pass  # Best-effort — don't crash the worker thread
+
         try:
             # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
             # to prevent blocking the Telegram bot's event loop.
-            # MEMORY-CENTRIC: Both paths now use task-by-task execution with
-            # ephemeral in-memory ChromaDB for inter-agent communication.
             if final_plan:
                 logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
                 logger.info(f"User {user_id}: Starting execution of Dynamic Workflow.")
                 result_tuple = await asyncio.to_thread(
-                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id)
+                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id), on_task_progress
                 )
             else:
                 logger.info(f"User {user_id}: Starting execution of Workflow ID {workflow_id} (resume from {start_idx}).")
@@ -819,24 +846,31 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             keyboard = [[InlineKeyboardButton("🔄 Try Again (Resume)", callback_data="resume_execution")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await status_msg.edit_text(
-                text=(
-                    "⚠️ <b>High Demand Error (503 UNAVAILABLE)</b>\n\n"
-                    "<i>The AI model is currently experiencing high demand. "
-                    "Don't worry, your progress has been safely saved!</i>\n\n"
-                    "Please wait a moment, then click below to resume execution from where it paused."
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
-            )
+            try:
+                await status_msg.edit_text(
+                    text=(
+                        "⚠️ <b>High Demand Error</b>\n\n"
+                        "<i>The AI model is currently experiencing high demand. "
+                        "Don't worry, your progress has been safely saved!</i>\n\n"
+                        "Please wait a moment, then click below to resume execution from where it paused."
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+            except Exception as tg_err:
+                logger.error(f"Failed to send RateLimit message to Telegram: {tg_err}")
             return ConversationHandler.END
         except Exception as e:
             logger.error(f"Execution error for User {user_id}: {e}", exc_info=True)
             try:
-                safe_e = str(e).replace('<', '&lt;').replace('>', '&gt;')
+                import html
+                safe_e = html.escape(str(e))[:500]  # Truncate very long errors
+                keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data="resume_execution")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
                 await status_msg.edit_text(
                     text=f"❌ <b>Execution Failed</b>\n<i>An error occurred during workflow execution:</i>\n<code>{safe_e}</code>",
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
                 )
             except Exception as inner_e:
                 logger.error(f"Failed to send error message to Telegram: {inner_e}")
