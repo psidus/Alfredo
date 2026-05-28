@@ -22,7 +22,7 @@ def _is_path_safe(file_path: str) -> bool:
 # SANDBOXED TOOLS (only within workspace/)
 # ===========================================================================
 
-@tool("Read File Tool")
+@tool
 def read_file(file_path: str) -> str:
     """
     Reads the content of a specified file from the agent workspace and returns it as a string.
@@ -45,7 +45,7 @@ def read_file(file_path: str) -> str:
         return f"An unexpected error occurred while reading '{file_path}': {e}"
 
 
-@tool("Write File Tool")
+@tool
 def write_file(file_path: str, content: str) -> str:
     """
     Writes the given content to a specified file within the agent workspace.
@@ -72,7 +72,7 @@ def write_file(file_path: str, content: str) -> str:
 # EXTENDED FILE SYSTEM TOOLS (read-only, full PC access)
 # ===========================================================================
 
-@tool("Read Any File Tool")
+@tool
 def read_file_anywhere(file_path: str) -> str:
     """
     Reads the content of any text-based file anywhere on the computer (full path required).
@@ -117,7 +117,7 @@ def read_file_anywhere(file_path: str) -> str:
     return f"Error: Could not read '{abs_path}' as text. It may be a binary file."
 
 
-@tool("Search Files Tool")
+@tool
 def search_files(pattern: str, search_dir: str = "C:\\") -> str:
     """
     Searches for files matching a name pattern across the computer.
@@ -170,7 +170,7 @@ def search_files(pattern: str, search_dir: str = "C:\\") -> str:
 # WEB & COMMUNICATION TOOLS
 # ===========================================================================
 
-@tool("Web Search Tool")
+@tool
 def search_web(query: str) -> str:
     """
     Performs a web search for the given query using DuckDuckGo and returns the top 5 results.
@@ -196,7 +196,7 @@ def search_web(query: str) -> str:
         return f"An error occurred during web search for '{query}': {e}"
 
 
-@tool("Ask Operator")
+@tool
 def ask_operator(question: str) -> str:
     """
     Use this tool to ask the human operator a question when you need clarification,
@@ -214,7 +214,7 @@ def ask_operator(question: str) -> str:
     return f"Human replied: {answer}"
 
 
-@tool("Calculator Tool")
+@tool
 def calculate(expression: str) -> str:
     """
     Evaluates a mathematical expression safely and returns the result.
@@ -253,7 +253,7 @@ def calculate(expression: str) -> str:
         return f"Error evaluating expression '{expression}': {e}"
 
 
-@tool("FileWriteTool")
+@tool
 def write_python_file(file_path: str, content: str) -> str:
     """
     Permette all'agente di prendere il codice generato e salvarlo fisicamente nel tuo progetto come un vero e proprio file .py (es. modello_pirolisi.py).
@@ -303,7 +303,7 @@ def write_python_file(file_path: str, content: str) -> str:
         return f"An unexpected error occurred while writing to '{file_path}': {e}"
 
 
-@tool("FileReadTool")
+@tool
 def read_python_file(file_path: str) -> str:
     """
     Permette all'agente di leggere il contenuto di un file .py generato o salvato nel progetto (es. modello_pirolisi.py).
@@ -351,7 +351,7 @@ def read_python_file(file_path: str) -> str:
 
 
 
-@tool("Python_REPL_Tool")
+@tool
 def python_repl(code: str) -> str:
     """
     Esegue il codice Python fornito in un ambiente isolato (subprocess) e restituisce lo standard output e standard error.

@@ -15,11 +15,14 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-import chromadb
-from langchain_chroma import Chroma
+try:
+    import chromadb  # type: ignore
+    from langchain_chroma import Chroma  # type: ignore
+except Exception:  # pragma: no cover
+    chromadb = None
+    Chroma = None
 
 from core.data_manager import DataManager
-from core.vector_manager import VectorManager
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +38,24 @@ class EphemeralMemoryManager:
 
     def __init__(self, run_id: int):
         self.run_id = run_id
-        self.chroma_client = chromadb.EphemeralClient()
-        self.embedding_function = self._resolve_embedding_function()
+        # If ChromaDB isn't available (common on minimal Windows/Python setups),
+        # we fall back to a pure in-memory dict store. This preserves deterministic
+        # key-based reads and a simple text search, keeping workflow execution alive.
+        self._fallback_records: Dict[str, Dict[str, Any]] = {}
+        self.vector_store = None
 
-        self.vector_store = Chroma(
-            client=self.chroma_client,
-            collection_name=f"run_memory_{run_id}",
-            embedding_function=self.embedding_function,
-        )
+        if chromadb is not None and Chroma is not None:
+            self.chroma_client = chromadb.EphemeralClient()
+            self.embedding_function = self._resolve_embedding_function()
+            self.vector_store = Chroma(
+                client=self.chroma_client,
+                collection_name=f"run_memory_{run_id}",
+                embedding_function=self.embedding_function,
+            )
+        else:
+            self.chroma_client = None
+            self.embedding_function = None
+
         # Local index of all keys written during this session
         self._keys_index: List[Dict[str, Any]] = []
         logger.info(
@@ -63,6 +76,8 @@ class EphemeralMemoryManager:
         """
         DataManager.load_env()
 
+        # Lazy import: VectorManager pulls optional LangChain dependencies.
+        from core.vector_manager import VectorManager
         vm = VectorManager()  # lightweight — only sets up a directory path
 
         # 1. Gemini / Google (Alfredo's default provider)
@@ -105,21 +120,28 @@ class EphemeralMemoryManager:
             structured_data:  Arbitrary JSON-serialisable dict with the payload.
             agent_role:       The role of the agent that produced this record.
         """
-        metadata = {
-            "key": key,
-            "agent_role": agent_role,
-            "run_id": self.run_id,
-            "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
-        }
-
         # Remove any previous record with the same key to avoid duplicates
         self.delete_record(key)
 
-        self.vector_store.add_texts(
-            texts=[content_summary],
-            metadatas=[metadata],
-            ids=[key],
-        )
+        if self.vector_store is not None:
+            metadata = {
+                "key": key,
+                "agent_role": agent_role,
+                "run_id": self.run_id,
+                "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
+            }
+            self.vector_store.add_texts(
+                texts=[content_summary],
+                metadatas=[metadata],
+                ids=[key],
+            )
+        else:
+            self._fallback_records[key] = {
+                "key": key,
+                "agent_role": agent_role,
+                "summary": content_summary,
+                "data": structured_data,
+            }
 
         # Update the local key index
         self._keys_index = [item for item in self._keys_index if item["key"] != key]
@@ -140,10 +162,11 @@ class EphemeralMemoryManager:
 
         Returns ``None`` if the key does not exist.
         """
+        if self.vector_store is None:
+            return self._fallback_records.get(key)
+
         try:
-            results = self.vector_store.get(
-                ids=[key], include=["metadatas", "documents"]
-            )
+            results = self.vector_store.get(ids=[key], include=["metadatas", "documents"])
         except Exception:
             return None
 
@@ -176,10 +199,19 @@ class EphemeralMemoryManager:
             k:            Maximum number of results.
             filter_agent: If set, only return records written by this agent role.
         """
+        if self.vector_store is None:
+            q = (query or "").lower()
+            matches = []
+            for rec in self._fallback_records.values():
+                if filter_agent and rec.get("agent_role") != filter_agent:
+                    continue
+                hay = f"{rec.get('key','')} {rec.get('summary','')}".lower()
+                if (not q) or (q in hay):
+                    matches.append(rec)
+            return matches[:k]
+
         search_filter = {"agent_role": filter_agent} if filter_agent else None
-        results = self.vector_store.similarity_search(
-            query, k=k, filter=search_filter
-        )
+        results = self.vector_store.similarity_search(query, k=k, filter=search_filter)
 
         retrieved = []
         for doc in results:
@@ -204,11 +236,14 @@ class EphemeralMemoryManager:
 
     def delete_record(self, key: str) -> None:
         """Removes a record by key (no-op if it doesn't exist)."""
+        if self.vector_store is None:
+            self._fallback_records.pop(key, None)
+            self._keys_index = [item for item in self._keys_index if item["key"] != key]
+            return
+
         try:
             self.vector_store.delete(ids=[key])
-            self._keys_index = [
-                item for item in self._keys_index if item["key"] != key
-            ]
+            self._keys_index = [item for item in self._keys_index if item["key"] != key]
         except Exception:
             pass
 

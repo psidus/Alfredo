@@ -77,7 +77,7 @@ def _send_file_to_telegram(file_path: str, caption: str = "") -> bool:
 # WORD DOCUMENT TOOLS
 # ===========================================================================
 
-@tool("Create Word Document")
+@tool
 def create_word_document(file_path: str, title: str, content: str) -> str:
     """
     Creates a new Microsoft Word (.docx) document at the specified full path.
@@ -138,7 +138,7 @@ def create_word_document(file_path: str, title: str, content: str) -> str:
         return f"Error creating Word document: {e}"
 
 
-@tool("Edit Word Document")
+@tool
 def edit_word_document(file_path: str, new_content: str, append: bool = False) -> str:
     """
     Edits an existing Microsoft Word (.docx) document by replacing its body content
@@ -202,7 +202,7 @@ def edit_word_document(file_path: str, new_content: str, append: bool = False) -
 # EXCEL DOCUMENT TOOLS
 # ===========================================================================
 
-@tool("Create Excel Document")
+@tool
 def create_excel_document(file_path: str, sheet_name: str, headers: str, rows: str) -> str:
     """
     Creates a new Microsoft Excel (.xlsx) document at the specified full path.
@@ -285,7 +285,7 @@ def create_excel_document(file_path: str, sheet_name: str, headers: str, rows: s
 # SCREENSHOT TOOL
 # ===========================================================================
 
-@tool("Take Screenshot")
+@tool
 def take_screenshot(note: str = "") -> str:
     """
     Takes a screenshot of the current screen and sends it to the operator via Telegram.

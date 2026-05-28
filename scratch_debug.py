@@ -137,7 +137,7 @@ except Exception as e:
 
 print()
 print("  Starting execute_dynamic_crew_with_memory...")
-execution_context = {"idea": "A biomass gasification system for rural areas"}
+execution_context = {"idea": "anaerobic digestion"}
 try:
     result_tuple = execute_dynamic_crew_with_memory(
         optimized, execution_context, None, None, 0, {}, "", "12345"

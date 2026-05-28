@@ -11,8 +11,6 @@ class RateLimitError(Exception):
         self.task_outputs = task_outputs
 
 from crewai import Agent, Task, Crew
-from langchain_openai import ChatOpenAI
-from langchain_community.llms import Ollama
 
 from core.db_manager import DBManager
 from core.data_manager import DataManager
@@ -21,8 +19,6 @@ import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
 import tools.email_tool as email_tool
-from tools.vector_search_tool import VectorSearchTool
-from tools.tabular_query_tool import TabularQueryTool
 from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryTool
 
 # Setup logging
@@ -143,8 +139,12 @@ def _instantiate_llm(model_id):
     if provider == 'openai':
         if not os.getenv("OPENAI_API_KEY"):
             raise EnvironmentError("OPENAI_API_KEY is missing from .env.")
+        # Lazy import so workflow execution doesn't hard-require LangChain packages
+        # when running in minimal environments (e.g. Python 3.14 + CrewAI shim).
+        from langchain_openai import ChatOpenAI  # type: ignore
         return ChatOpenAI(model_name=model_name, temperature=0.7)
     elif provider == 'ollama':
+        # Prefer LiteLLM-style string for compatibility with the CrewAI shim.
         return f"ollama/{model_name}"
     else:
         # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
@@ -191,6 +191,9 @@ def _get_task_tools(tool_names, vector_dbs, is_local_model=False):
     task_tools = _map_tools(tool_names) or []
     
     if 'vector_search' in tool_names:
+        # Lazy imports: these pull optional LangChain/Chroma dependencies.
+        from tools.vector_search_tool import VectorSearchTool
+        from tools.tabular_query_tool import TabularQueryTool
         for db_id in vector_dbs:
             try:
                 db_id_int = int(db_id)
@@ -1115,6 +1118,14 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             verbose=True,
             process='sequential'
         )
+
+        # Notify task starting
+        if progress_callback:
+            try:
+                total_tasks = len(plan['tasks'])
+                progress_callback(task_idx, total_tasks, effective_role, "running")
+            except Exception:
+                pass
 
         # --- Retry logic for transient LLM errors (503, empty output, etc.) ---
         max_retries = 2

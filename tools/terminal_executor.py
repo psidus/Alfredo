@@ -89,7 +89,7 @@ def validate_command(command_str: str) -> tuple[bool, str]:
     return True, "Safe"
 
 # --- Core Execution Logic ---
-@tool("Terminal Executor")
+@tool
 def execute_shell_command(command_str: str, timeout: int = 30) -> str:
     """
     Executes a safe, read-only or authorized local terminal command after strict validation.

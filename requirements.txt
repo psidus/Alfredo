@@ -1,7 +1,9 @@
 streamlit
-crewai
-crewai[tools]
-crewai[google-genai]
+crewai>=0.120.0
+# CrewAI extras used here are managed via separate packages in newer releases.
+crewai-tools>=0.40.0
+# Python 3.14 on Windows needs a modern regex wheel (older versions fail to build).
+regex>=2024.11.6
 python-dotenv
 pyyaml
 litellm

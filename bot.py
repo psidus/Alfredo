@@ -487,7 +487,10 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             
             async def typing_indicator():
                 while True:
-                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                    try:
+                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                    except Exception:
+                        pass
                     await asyncio.sleep(4)
 
             typing_task = asyncio.create_task(typing_indicator())
@@ -793,18 +796,29 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Progress callback: sends a status update to Telegram for each task
         loop = asyncio.get_event_loop()
 
-        def on_task_progress(task_idx: int, total_tasks: int, agent_role: str):
-            """Called from the worker thread after each task completes."""
+        def on_task_progress(task_idx: int, total_tasks: int, agent_role: str, status: str = "completed"):
+            """Called from the worker thread before/after tasks."""
             try:
+                if status == "decomposing":
+                    msg = (
+                        f"🚀 <b>Execution starting...</b>\n"
+                        f"🧠 <i>Master AI is optimizing the workflow plan...</i>"
+                    )
+                elif status == "running":
+                    msg = (
+                        f"🚀 <b>Execution in progress...</b>\n"
+                        f"<i>✅ Completed {task_idx}/{total_tasks} steps</i>\n"
+                        f"⏳ <b>Currently Running:</b> Step {task_idx + 1}\n"
+                        f"🤖 Agent: <code>{agent_role[:50]}</code>"
+                    )
+                else:
+                    msg = (
+                        f"🚀 <b>Execution in progress...</b>\n"
+                        f"<i>✅ Step {task_idx + 1}/{total_tasks} completed</i>\n"
+                        f"🤖 Agent: <code>{agent_role[:50]}</code>"
+                    )
                 asyncio.run_coroutine_threadsafe(
-                    status_msg.edit_text(
-                        text=(
-                            f"🚀 <b>Execution in progress...</b>\n"
-                            f"<i>Step {task_idx + 1}/{total_tasks} completed</i>\n"
-                            f"Agent: <code>{agent_role[:50]}</code>"
-                        ),
-                        parse_mode=ParseMode.HTML
-                    ),
+                    status_msg.edit_text(text=msg, parse_mode=ParseMode.HTML),
                     loop
                 ).result(timeout=10)
             except Exception:

@@ -100,7 +100,7 @@ def _request_confirmation(preview_message: str) -> bool:
 # READ TOOLS (no confirmation required)
 # ===========================================================================
 
-@tool("Read Emails")
+@tool
 def read_emails(folder: str = "INBOX", max_emails: int = 10, unread_only: bool = False) -> str:
     """
     Reads emails from an Outlook mailbox using IMAP.
@@ -187,7 +187,7 @@ def read_emails(folder: str = "INBOX", max_emails: int = 10, unread_only: bool =
         return f"Error reading emails: {e}"
 
 
-@tool("Search Emails")
+@tool
 def search_emails(query: str, folder: str = "INBOX", max_results: int = 10) -> str:
     """
     Searches emails in an Outlook mailbox by subject or sender.
@@ -257,7 +257,7 @@ def search_emails(query: str, folder: str = "INBOX", max_results: int = 10) -> s
 # SEND TOOL (confirmation required)
 # ===========================================================================
 
-@tool("Send Email")
+@tool
 def send_email(to: str, subject: str, body: str, cc: str = "") -> str:
     """
     Sends an email via Outlook SMTP.
