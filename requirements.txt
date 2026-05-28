@@ -8,6 +8,7 @@ litellm
 python-telegram-bot
 langchain-openai
 langchain-community
+langchain-google-genai
 duckduckgo-search>=5.1.0
 requests
 langchain-chroma
@@ -15,3 +16,4 @@ python-docx
 openpyxl
 mss
 Pillow
+

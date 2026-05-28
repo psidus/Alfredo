@@ -417,19 +417,29 @@ def render_knowledge_base():
                 "Local (Ollama) / all-minilm": {"provider": "ollama", "model_name": "all-minilm"}
             }
             
-            if current_env.get("OPENAI_API_KEY") and str(current_env["OPENAI_API_KEY"]).strip():
-                available_embedding_models.update({
-                    "OpenAI / text-embedding-3-small": {"provider": "openai", "model_name": "text-embedding-3-small"},
-                    "OpenAI / text-embedding-3-large": {"provider": "openai", "model_name": "text-embedding-3-large"},
-                    "OpenAI / text-embedding-ada-002": {"provider": "openai", "model_name": "text-embedding-ada-002"}
-                })
-                
-            if (current_env.get("GEMINI_API_KEY") and str(current_env["GEMINI_API_KEY"]).strip()) or \
-               (current_env.get("GOOGLE_API_KEY") and str(current_env["GOOGLE_API_KEY"]).strip()):
-                available_embedding_models.update({
-                    "Gemini / gemini-embedding-2": {"provider": "gemini", "model_name": "models/gemini-embedding-2"},
-                    "Gemini / gemini-embedding-001": {"provider": "gemini", "model_name": "models/gemini-embedding-001"}
-                })
+            # Dynamically load from synced models
+            model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
+            if os.path.exists(model_map_path):
+                model_config = DataManager.load_yaml(model_map_path)
+                provider_map = model_config.get('provider_map', {})
+                for env_key, data in provider_map.items():
+                    # Only add if the key is actually in .env
+                    if current_env.get(env_key) and str(current_env.get(env_key)).strip():
+                        prov_name = data.get('provider', 'Other')
+                        embed_list = data.get('embed_models', [])
+                        # For retro-compatibility with older yamls, if embed_list is empty but we know some hardcoded ones
+                        if not embed_list:
+                            if "OPENAI" in env_key: embed_list = ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"]
+                            if "GEMINI" in env_key or "GOOGLE" in env_key: embed_list = ["models/gemini-embedding-2", "models/gemini-embedding-001"]
+                        
+                        for em in embed_list:
+                            display_name = f"{prov_name} / {em}"
+                            # Standardize provider names for the vector store
+                            v_prov = prov_name.lower()
+                            if "openai" in v_prov: v_prov = "openai"
+                            elif "google" in v_prov or "gemini" in v_prov: v_prov = "gemini"
+                            
+                            available_embedding_models[display_name] = {"provider": v_prov, "model_name": em}
                 
             available_embedding_models["Other (Manual Input)"] = {"provider": "custom", "model_name": "custom"}
                 
@@ -561,14 +571,65 @@ def render_api_vault():
         if submitted_key:
             final_key_name = custom_key.strip() if selected_key == "Custom..." else selected_key
             if final_key_name and key_value:
-                # Sanitize key name (uppercase, no spaces)
                 final_key_name = final_key_name.upper().replace(' ', '_')
                 if "TELEGRAM" in final_key_name:
                     st.error("Telegram bot tokens must be managed in the Telegram Bot Config at the top right, not here.")
                 else:
-                    set_key(env_path, final_key_name, key_value.strip())
-                    st.success(f"Key '{final_key_name}' saved securely!")
-                    st.rerun()
+                    from core.api_verifier import verify_and_fetch_models
+                    with st.spinner("Verifying API Key and fetching models..."):
+                        result = verify_and_fetch_models(final_key_name, key_value.strip())
+                        
+                    if not result.get("success"):
+                        st.error(f"Verification failed: {result.get('error')}")
+                    else:
+                        set_key(env_path, final_key_name, key_value.strip())
+                        
+                        # Update models_map.yaml
+                        model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
+                        model_config = DataManager.load_yaml(model_map_path)
+                        provider_map = model_config.get('provider_map', {})
+                        
+                        if final_key_name not in provider_map:
+                            # Infer provider name
+                            prov_name = "Other"
+                            if "OPENAI" in final_key_name: prov_name = "OpenAI"
+                            elif "GROQ" in final_key_name: prov_name = "Groq"
+                            elif "ANTHROPIC" in final_key_name: prov_name = "Anthropic"
+                            elif "GEMINI" in final_key_name or "GOOGLE" in final_key_name: prov_name = "Google"
+                            
+                            provider_map[final_key_name] = {"provider": prov_name, "models": [], "embed_models": []}
+                            
+                        # Update models in yaml
+                        provider_map[final_key_name]["models"] = result.get("chat_models", [])
+                        provider_map[final_key_name]["embed_models"] = result.get("embed_models", [])
+                        model_config['provider_map'] = provider_map
+                        
+                        # Save yaml
+                        with open(model_map_path, 'w') as f:
+                            yaml.dump(model_config, f, default_flow_style=False)
+                            
+                        # Sync to SQLite DB (only chat models)
+                        prov = provider_map[final_key_name]["provider"]
+                        all_db_models = db.read_all_models()
+                        
+                        # Find existing models in DB for this key
+                        existing_db_models = [m for m in all_db_models if m.get("env_var_name") == final_key_name]
+                        existing_model_names = {m["model_name"]: m["id"] for m in existing_db_models}
+                        
+                        fetched_chat_models = result.get("chat_models", [])
+                        
+                        # Add new models
+                        for m_name in fetched_chat_models:
+                            if m_name not in existing_model_names:
+                                db.create_model(prov, m_name, final_key_name, False)
+                                
+                        # Remove deleted models
+                        for m_name, m_id in existing_model_names.items():
+                            if m_name not in fetched_chat_models:
+                                db.delete_model(m_id)
+                                
+                        st.success(f"Key '{final_key_name}' verified and models synced securely!")
+                        st.rerun()
             else:
                 st.error("Please provide both a valid Key Name and a Value.")
 
@@ -584,76 +645,49 @@ def render_api_vault():
     
     st.markdown("Add or update a model available for agents.")
     
-    # --- NEW: Local vs Cloud Toggle ---
-    is_local = st.toggle("Local Model (Ollama)", help="Enable if running model locally via Ollama")
-    
-    if is_local:
-        provider = "Ollama"
-        env_var_name = ""
-        selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
-        if selected_local == "Other (Manual)...":
-            model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
-        else:
-            model_name = selected_local
+    # --- Only Local Models can be added manually now ---
+    provider = "Ollama"
+    env_var_name = ""
+    is_local = True
+    selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
+    if selected_local == "Other (Manual)...":
+        model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
     else:
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            # --- NEW: Dropdown of keys found in .env ---
-            env_options = sorted([k for k, v in current_env.items() if v and str(v).strip() and "TELEGRAM" not in k.upper()])
-            if not env_options:
-                env_options = ["(No keys found in .env)"]
-            env_var_name = st.selectbox("Link to API Key", options=env_options, help="Select the variable from your .env that contains the API key for this model.")
-        
-        # Default values
-        inferred_provider = "Other"
-        model_options = ["Other (Manual)..."]
-        
-        # Lookup in dictionary
-        if env_var_name in PROVIDER_MAP:
-            inferred_provider = PROVIDER_MAP[env_var_name].get("provider", "Other")
-            model_options = PROVIDER_MAP[env_var_name].get("models", []) + ["Other (Manual)..."]
-        elif env_var_name != "(No keys found in .env)":
-            # Fallback simple heuristic for unknown keys
-            upper_key = env_var_name.upper()
-            if "OPENAI" in upper_key: inferred_provider = "OpenAI"
-            elif "GROQ" in upper_key: inferred_provider = "Groq"
-            elif "ANTHROPIC" in upper_key: inferred_provider = "Anthropic"
-            elif "GEMINI" in upper_key: inferred_provider = "Gemini"
-            elif "COHERE" in upper_key: inferred_provider = "Cohere"
-        
-        with col2:
-            provider = st.text_input("Provider", value=inferred_provider, disabled=(env_var_name in PROVIDER_MAP))
-        with col3:
-            selected_model = st.selectbox("Model Name", options=model_options)
-            if selected_model == "Other (Manual)...":
-                model_name = st.text_input("Type Custom Model Name", placeholder="e.g., gpt-4-turbo")
-            else:
-                model_name = selected_model
+        model_name = selected_local
 
-    submitted = st.button("Add Model", type="primary")
+    submitted = st.button("Add Local Model", type="primary")
     if submitted and provider and model_name:
-        if not is_local and env_var_name == "(No keys found in .env)":
-            st.error("Please add an API Key in the Vault first.")
-        else:
-            db.create_model(provider, model_name, "" if is_local else env_var_name, is_local)
-            st.success(f"Added {'local' if is_local else 'cloud'} model '{model_name}'.")
-            st.rerun()
+        db.create_model(provider, model_name, "", True)
+        st.success(f"Added local model '{model_name}'.")
+        st.rerun()
 
     models = db.read_all_models()
     if models:
         st.write("Registered Models:")
+        
+        # Group by provider
+        providers_dict = {}
         for model in models:
-            col1, col2, col3, col4, col5 = st.columns([0.5, 2, 2, 2, 1])
-            type_icon = "🏠" if model.get('is_local') else "☁️"
-            col1.markdown(type_icon)
-            col2.text(f"P: {model['provider']}")
-            col3.text(f"M: {model['model_name']}")
-            key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
-            col4.text(f"Key: {key_display}")
-            if col5.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
-                db.delete_model(model['id'])
-                st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
-                st.rerun()
+            p = model.get('provider', 'Other')
+            if p not in providers_dict:
+                providers_dict[p] = []
+            providers_dict[p].append(model)
+            
+        for provider_name, p_models in providers_dict.items():
+            st.markdown(f"**{provider_name}**")
+            with st.container(height=250, border=True):
+                for model in p_models:
+                    col1, col2, col3, col4, col5 = st.columns([0.5, 2, 2, 2, 1])
+                    type_icon = "🏠" if model.get('is_local') else "☁️"
+                    col1.markdown(type_icon)
+                    col2.text(f"P: {model['provider']}")
+                    col3.text(f"M: {model['model_name']}")
+                    key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
+                    col4.text(f"Key: {key_display}")
+                    if col5.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
+                        db.delete_model(model['id'])
+                        st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
+                        st.rerun()
     else:
         st.info("No models registered yet.")
 
@@ -915,10 +949,12 @@ def render_agent_caserma():
                             with col_mod:
                                 st.button("Edit", key=f"mod_agent_{agent['id']}", on_click=start_editing_agent, args=(agent['id'],), use_container_width=True)
                             with col_del:
-                                if st.button("Del", key=f"del_agent_{agent['id']}", type="primary", use_container_width=True):
-                                    db.delete_agent(agent['id'])
-                                    st.toast(f"Discharged agent {agent['name']}", icon="🗑️")
-                                    st.rerun()
+                                with st.popover("Del", use_container_width=True):
+                                    st.markdown("Are you sure?")
+                                    if st.button("Yes", key=f"yes_del_agent_{agent['id']}", type="primary", use_container_width=True):
+                                        db.delete_agent(agent['id'])
+                                        st.toast(f"Discharged agent {agent['name']}", icon="🗑️")
+                                        st.rerun()
 
 def render_task_builder():
     """Renders Tab 3: UI for creating, viewing, updating, and deleting tasks."""
@@ -1540,12 +1576,14 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                 with col1:
                                     st.button("Edit", key=f"edit_{task['id']}", on_click=start_editing_task, args=(task['id'],), use_container_width=True)
                                 with col2:
-                                    if st.button("Delete", key=f"delete_{task['id']}", type="primary", use_container_width=True):
-                                        db.delete_task(task['id'])
-                                        if 'wf_selected_task_ids' in st.session_state:
-                                            del st.session_state.wf_selected_task_ids
-                                        st.toast(f"Deleted task {task['id']}", icon="🗑️")
-                                        st.rerun()
+                                    with st.popover("Delete", use_container_width=True):
+                                        st.markdown("Are you sure?")
+                                        if st.button("Yes", key=f"yes_del_{task['id']}", type="primary", use_container_width=True):
+                                            db.delete_task(task['id'])
+                                            if "last_editing_task_id" in st.session_state and st.session_state.last_editing_task_id == task['id']:
+                                                del st.session_state.last_editing_task_id
+                                            st.toast(f"Deleted task {task['id']}", icon="🗑️")
+                                            st.rerun()
 
         # Handle tasks with no valid agent (orphaned tasks)
         if "unknown" in tasks_by_agent and tasks_by_agent["unknown"]:
@@ -1561,12 +1599,14 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                         with col1:
                             st.button("Edit", key=f"edit_unk_{task['id']}", on_click=start_editing_task, args=(task['id'],), use_container_width=True)
                         with col2:
-                            if st.button("Delete", key=f"delete_unk_{task['id']}", type="primary", use_container_width=True):
-                                db.delete_task(task['id'])
-                                if 'wf_selected_task_ids' in st.session_state:
-                                    del st.session_state.wf_selected_task_ids
-                                st.toast(f"Deleted orphaned task {task['id']}", icon="🗑️")
-                                st.rerun()
+                            with st.popover("Delete", use_container_width=True):
+                                st.markdown("Are you sure?")
+                                if st.button("Yes", key=f"yes_del_unk_{task['id']}", type="primary", use_container_width=True):
+                                    db.delete_task(task['id'])
+                                    if "last_editing_task_id" in st.session_state and st.session_state.last_editing_task_id == task['id']:
+                                        del st.session_state.last_editing_task_id
+                                    st.toast(f"Deleted orphaned task {task['id']}", icon="🗑️")
+                                    st.rerun()
 
 def render_workflow_assembler():
     """Renders Tab 4: UI for creating, viewing, and exporting workflows."""
@@ -1697,11 +1737,15 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
     default_wf_name = (editing_workflow['name'] or "") if editing_workflow else ""
     default_wf_human_check = editing_workflow['requires_human_check'] if editing_workflow else False
     default_wf_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
+    
+    raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
+    default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
 
     if "last_editing_workflow_id" not in st.session_state:
         st.session_state.last_editing_workflow_id = current_editing_wf_id
         st.session_state.wf_name_input = default_wf_name
         st.session_state.wf_human_check = default_wf_human_check
+        st.session_state.wf_expected_exports = default_wf_expected_exports
         st.session_state.wf_selected_task_ids = default_wf_task_ids
         for k in list(st.session_state.keys()):
             if k.startswith("wf_check_"):
@@ -1710,6 +1754,7 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
         st.session_state.last_editing_workflow_id = current_editing_wf_id
         st.session_state.wf_name_input = default_wf_name
         st.session_state.wf_human_check = default_wf_human_check
+        st.session_state.wf_expected_exports = default_wf_expected_exports
         st.session_state.wf_selected_task_ids = default_wf_task_ids
         for k in list(st.session_state.keys()):
             if k.startswith("wf_check_"):
@@ -1740,6 +1785,45 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
             
         workflow_name = st.text_input("Workflow Name", key="wf_name_input")
         requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
+        
+        try:
+            from core.export_tools import EXPORT_TOOL_MAP
+            available_exports = list(EXPORT_TOOL_MAP.keys())
+        except ImportError:
+            available_exports = ["python", "json", "markdown", "text", "word", "excel"]
+
+        # Ensure default values are valid options
+        current_defaults = st.session_state.get("wf_expected_exports", [])
+        valid_defaults = [x for x in current_defaults if x in available_exports]
+
+        parsed_exports = st.multiselect(
+            "Expected File Outputs (Generated by Master AI)",
+            options=available_exports,
+            default=valid_defaults,
+            key="wf_expected_exports_multiselect"
+        )
+        
+        # Keep session state updated with the selected list so if validation fails it persists
+        st.session_state.wf_expected_exports = parsed_exports
+
+        # --- Export Instructions (optional guidance for the Master AI) ---
+        default_export_instructions = ""
+        if editing_workflow:
+            default_export_instructions = editing_workflow.get("export_instructions", "") or ""
+        
+        if "wf_export_instructions" not in st.session_state or st.session_state.get("last_editing_workflow_id") != current_editing_wf_id:
+            st.session_state.wf_export_instructions = default_export_instructions
+
+        export_instructions = st.text_area(
+            "📝 Export Instructions (Optional)",
+            key="wf_export_instructions_input",
+            value=st.session_state.wf_export_instructions,
+            placeholder="e.g., For Python: extract the simulation model from the Developer agent. For Excel: use the metrics from the Analyst agent. For Word: write a full report.",
+            help="Guide the Master AI on what to extract from each agent's output for each file format. Leave empty to let the AI decide automatically.",
+            height=100
+        )
+        st.session_state.wf_export_instructions = export_instructions
+
         
         st.markdown("---")
         st.markdown("**📋 Select Tasks — Grouped by Agent**")
@@ -1843,7 +1927,7 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                     if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
                         st.error("Workflow Name and at least one Task are required.")
                     else:
-                        db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
+                        db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
                         st.success(f"Workflow '{sane_workflow_name}' updated successfully!")
                         st.session_state.editing_workflow_id = None
                         if 'last_editing_workflow_id' in st.session_state:
@@ -1854,6 +1938,10 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                             del st.session_state.wf_name_input
                         if 'wf_human_check' in st.session_state:
                             del st.session_state.wf_human_check
+                        if 'wf_expected_exports' in st.session_state:
+                            del st.session_state.wf_expected_exports
+                        if 'wf_export_instructions' in st.session_state:
+                            del st.session_state.wf_export_instructions
                         for k in list(st.session_state.keys()):
                             if k.startswith("wf_check_"):
                                 del st.session_state[k]
@@ -1869,6 +1957,10 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                         del st.session_state.wf_name_input
                     if 'wf_human_check' in st.session_state:
                         del st.session_state.wf_human_check
+                    if 'wf_expected_exports' in st.session_state:
+                        del st.session_state.wf_expected_exports
+                    if 'wf_export_instructions' in st.session_state:
+                        del st.session_state.wf_export_instructions
                     for k in list(st.session_state.keys()):
                         if k.startswith("wf_check_"):
                             del st.session_state[k]
@@ -1879,7 +1971,7 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                 if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
                     st.error("Workflow Name and at least one Task are required.")
                 else:
-                    db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check)
+                    db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
                     st.success(f"Workflow '{sane_workflow_name}' created successfully!")
                     if 'wf_selected_task_ids' in st.session_state:
                         del st.session_state.wf_selected_task_ids
@@ -1887,6 +1979,10 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                         del st.session_state.wf_name_input
                     if 'wf_human_check' in st.session_state:
                         del st.session_state.wf_human_check
+                    if 'wf_expected_exports' in st.session_state:
+                        del st.session_state.wf_expected_exports
+                    if 'wf_export_instructions' in st.session_state:
+                        del st.session_state.wf_export_instructions
                     for k in list(st.session_state.keys()):
                         if k.startswith("wf_check_"):
                             del st.session_state[k]
@@ -1962,14 +2058,16 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                             del st.session_state.last_editing_workflow_id
                         st.rerun()
                 with col_del:
-                    if st.button("Delete", key=f"del_wf_{workflow['id']}", type="primary", use_container_width=True):
-                        db.delete_workflow(workflow['id'])
-                        st.toast(f"Deleted workflow {workflow['name']}", icon="🗑️")
-                        if st.session_state.get('editing_workflow_id') == workflow['id']:
-                            st.session_state.editing_workflow_id = None
-                            if 'last_editing_workflow_id' in st.session_state:
-                                del st.session_state.last_editing_workflow_id
-                        st.rerun()
+                    with st.popover("Delete", use_container_width=True):
+                        st.markdown("Are you sure?")
+                        if st.button("Yes", key=f"yes_del_wf_{workflow['id']}", type="primary", use_container_width=True):
+                            db.delete_workflow(workflow['id'])
+                            st.toast(f"Deleted workflow {workflow['name']}", icon="🗑️")
+                            if st.session_state.get('editing_workflow_id') == workflow['id']:
+                                st.session_state.editing_workflow_id = None
+                                if 'last_editing_workflow_id' in st.session_state:
+                                    del st.session_state.last_editing_workflow_id
+                            st.rerun()
                 with col_export:
                     st.download_button(
                         label="Export to YAML",
@@ -2103,8 +2201,8 @@ def render_history_monitoring():
                         with st.spinner("Resuming execution..."):
                             try:
                                 from core.crew_builder import execute_run_with_resume
-                                result = execute_run_with_resume(run['id'])
-                                db.update_run(run['id'], status='completed', result=result)
+                                last_output, global_context = execute_run_with_resume(run['id'])
+                                db.update_run(run['id'], status='completed', result=last_output)
                                 st.toast("Run resumed and completed successfully!", icon="✅")
                                 st.rerun()
                             except Exception as e:

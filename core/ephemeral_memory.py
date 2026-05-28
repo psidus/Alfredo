@@ -234,3 +234,51 @@ class EphemeralMemoryManager:
                 summary = summary[:117] + "..."
             table += f"| `{item['key']}` | **{item['agent_role']}** | {summary} |\n"
         return table
+
+    # ------------------------------------------------------------------
+    # Full dump (for Master AI post-processing)
+    # ------------------------------------------------------------------
+
+    def dump_all_records(self) -> list:
+        """
+        Returns a list of ALL records stored in the ephemeral memory.
+
+        Each entry is a dict with keys: ``key``, ``agent_role``, ``summary``,
+        ``data``.  This is used at the end of a workflow run to pass the
+        complete execution context to the Master AI for export generation.
+        """
+        records = []
+        for item in self._keys_index:
+            full_record = self.read_record(item["key"])
+            if full_record:
+                records.append(full_record)
+            else:
+                # Fallback: use the index entry itself
+                records.append({
+                    "key": item["key"],
+                    "agent_role": item["agent_role"],
+                    "summary": item["summary"],
+                    "data": {},
+                })
+        return records
+
+    def load_from_dump(self, dump_json: str) -> None:
+        """
+        Re-populates the ephemeral memory from a JSON dump of a previous session.
+        This allows new workflows to immediately query and access past context.
+        """
+        if not dump_json:
+            return
+        try:
+            records = json.loads(dump_json)
+            for record in records:
+                self.write_record(
+                    key=record.get("key", "unknown_key"),
+                    agent_role=record.get("agent_role", "Unknown"),
+                    content_summary=record.get("summary", ""),
+                    structured_data=record.get("data", {})
+                )
+            logger.info(f"[EphemeralMemory] Re-populated {len(records)} records from JSON dump.")
+        except Exception as e:
+            logger.error(f"[EphemeralMemory] Failed to load from dump: {e}")
+

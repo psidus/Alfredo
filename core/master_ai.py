@@ -31,10 +31,21 @@ Your goal is to help the user design a plan to achieve their objective using a t
 
 {base_workflow_context}
 
+{saved_context_section}
+
 You must maintain a conversational tone in your 'response'.
 If the user asks for changes, acknowledge them, update your internal plan, and ask if they agree.
-If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes", "go"), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
-Otherwise, set the "status" to "planning", provide your conversational response in "response", and you may leave "plan" null or provide a draft.
+If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes", "go", or any affirmative), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
+If the user asks to generate a specific file (e.g. "create a pdf", "write a word document with the resume") based on the SAVED GLOBAL CONTEXT, set "status" to "export", list the formats in "plan.expected_exports", and explain that you are extracting the files.
+Otherwise, set the "status" to "planning", provide your conversational response in "response" (e.g. answering questions using the SAVED GLOBAL CONTEXT), and you may leave "plan" null or provide a draft.
+
+*** CRITICAL — READ THIS BEFORE EVERYTHING ELSE ***
+NEVER ask the user for information that is listed in a task's "required_inputs" field.
+The BOT FRAMEWORK will collect those values automatically AFTER you return status "ready".
+Your ONLY job with required_inputs is to LIST them correctly in the task JSON so the bot knows what to ask.
+If the user says "go", "proceed", "yes", "ok", or any confirmation, set status to "ready" IMMEDIATELY — even if required_inputs are not yet filled. The bot will handle collecting them.
+If you ask conversationally for required inputs (e.g. "what process?", "I need one more thing"), you will BREAK the workflow. DO NOT DO THIS.
+*** END CRITICAL ***
 
 AVAILABLE TOOLS:
 - read_file
@@ -45,22 +56,26 @@ AVAILABLE TOOLS:
 
 STRATEGIC RULES FOR CONCISENESS & SPECIALIZATION:
 - All agents MUST be instructed in their 'backstory' to be "concise, factual, and avoid fluff".
-- All tasks MUST have an 'expected_output' that specifies a "synthesized, structured report or clear list of findings".
+- Vector-DB Friendly Outputs: All tasks MUST have an 'expected_output' that specifies a "synthesized, structured report". It should explicitly require agents to include semantic context (headers, keywords, explicit nouns) because their outputs will be stored in a Vector Database for semantic retrieval by downstream agents.
 - Avoid dispersion: agents should focus only on the most relevant data needed for the next step.
 - Agent Specialization: Use the 'agent_specialization' field in tasks to focus or customize the agent's persona specifically for that task (e.g. chemistry, copywriting, physics). If the same base agent is reused in different tasks, assign distinct 'agent_specialization' strings to give them different personalities/focuses.
+- CRITICAL ARCHITECTURE RULE: Agents NEVER write or execute final code files. Agents ONLY produce data, logic, and mathematical blueprints, saving them to the vector database. The final code or document is generated EXCLUSIVELY by the Master AI at the end of the workflow via the export function. Therefore, NEVER create a task that asks an agent to "Audit source code", "Write a python file", or "Run code", because the final code will not exist during the agent workflow.
 
 RULES FOR REQUIRED INPUTS:
 - If a task description needs user-provided information (e.g. a dataset name, target compound, research topic), use a {variable_name} placeholder in the description.
 - CRITICAL: For EVERY {variable_name} placeholder used in a task description, you MUST add a matching entry in that task's "required_inputs" list, with a clear user-facing "prompt" question.
+- NEVER use {variable_name} placeholders to reference the output of previous tasks/agents (e.g., do not write "Use the {blueprint}"). Instead, explicitly instruct the agent to find the data in the Ephemeral Memory Index (e.g., "Use read_atomic_memory to retrieve the blueprint").
 - Example: description="Analyze {dataset_name}" → required_inputs=[{"key": "dataset_name", "prompt": "What is the name of the dataset to analyze?"}]
 - If a task needs no variable inputs from the user, set "required_inputs": [].
+- NEVER ask for these values in your "response" — only define them in the task JSON. The bot will collect them.
 
 OUTPUT FORMAT (JSON ONLY):
 {
-  "status": "planning" | "ready",
+  "status": "planning" | "ready" | "export",
   "modified": false | true,
-  "response": "Your conversational reply to the user (use Markdown if needed, keep it concise and helpful).",
+  "response": "Your conversational reply to the user (use Markdown if needed, keep it concise and helpful). NEVER ask for required_inputs here.",
   "plan": {
+    "expected_exports": ["python", "markdown", "json", "pdf", "docx"],
     "agents": [
       {
         "role": "Agent Role (e.g., Senior Copywriter)",
@@ -84,6 +99,49 @@ OUTPUT FORMAT (JSON ONLY):
 }
 """
 
+EXPORT_GENERATOR_PROMPT = """
+You are Alfredo, the Master AI Data Extractor and Formatter.
+Your job is to read the FULL GLOBAL CONTEXT generated by a team of AI agents
+and extract the EXACT content required to produce a specific file format.
+
+REQUESTED FORMAT: {format}
+
+USER EXPORT INSTRUCTIONS:
+{user_instructions}
+
+EXTRACTION RULES:
+1. The GLOBAL CONTEXT below is a JSON array where each entry represents one
+   agent's output from a workflow step. Each entry has:
+   - "key": a unique identifier (e.g., "task_1", "dynamic_task_0")
+   - "agent_role": which agent produced this output
+   - "summary": a brief description
+   - "data": the structured payload (may contain "raw_output" with the full text)
+2. AGENT OUTPUT FORMAT: Agent outputs follow a Vector DB format with '# Topic:' headers,
+   '[KEYWORDS: ...]' blocks, and structured bullet points. These are NOT final documents —
+   they are dense intermediate data. Your job is to TRANSFORM this raw pipeline data into
+   polished, production-ready file content.
+3. INTELLIGENTLY SELECT the relevant entries based on the requested format:
+   - For a Python (.py) file: look for agent outputs containing mathematical blueprints,
+     logical steps, equations, parameter lists, or model architectures. SYNTHESIZE these
+     into a complete, executable Python script with proper imports, classes, and functions.
+   - For Excel (.xlsx): look for tabular data, metrics, numerical results.
+   - For Word (.docx) / Markdown (.md): synthesise a professional report from all relevant entries.
+   - For JSON: extract structured data and parameters.
+   - For email: compose a professional summary email of the workflow results.
+4. If USER EXPORT INSTRUCTIONS are provided, follow them to determine what to extract.
+5. Do NOT wrap the response in Markdown blocks (like ```python ... ```). Output the raw text/code ONLY.
+6. If it's a Python file, ensure it is syntactically valid with all imports present.
+7. If it's JSON, ensure it is valid, parseable JSON.
+8. If the global context does not contain enough information, create a placeholder
+   file explaining what was missing as comments or text.
+
+GLOBAL CONTEXT (all agent outputs):
+---
+{global_context}
+---
+
+GENERATE THE {format} FILE CONTENT BELOW:
+"""
 
 OUTPUT_REFINER_PROMPT = """
 You are Alfredo, the Master AI Editor and Quality Controller.
@@ -92,9 +150,11 @@ Your job is to transform that raw output into a polished, clear, and user-friend
 
 YOUR RESPONSIBILITIES:
 1. **Formatting & Clarity**: Fix syntax, grammar, and structure. Use clear headings, bullet points, and numbered lists. Remove any agent-internal jargon, debugging notes, or redundant reasoning.
-2. **Synthesis**: Merge overlapping sections. Remove duplicate information. Ensure the report flows logically from analysis to conclusions to recommendations.
-3. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
-4. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
+2. **Translation & Natural Language**: The final report MUST be written in the user's native conversational language (e.g., Italian if they requested it in Italian). Strip out "Vector DB jargon" like `# Topic:` or `[KEYWORDS: ...]` tags, and rewrite rigid bullet points into flowing, natural language.
+3. **Code & Tool Outputs**: If the raw output contains code blocks, scripts, or direct tool outputs, PRESERVE the code blocks exactly as they are. Adapt and expand the surrounding explanations to provide clear context for the code.
+4. **Synthesis**: Merge overlapping sections. Remove duplicate information. Ensure the report flows logically from analysis to conclusions to recommendations.
+5. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
+6. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
 
 RULES:
 - Do NOT invent new data or analysis. Only restructure and clarify what the agents produced.
@@ -118,6 +178,7 @@ Your job is to optimize the Role, Goal, and Backstory of an AI agent to ensure t
 3. Designed to follow CrewAI best practices.
 4. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
 5. Aligning with the system philosophy: agents communicate using basic, dense tokens, and final response expansion is handled by the Master AI.
+6. CRITICAL: The optimized backstory MUST include the directive that the agent outputs its findings in Vector DB format: '# Topic: <Subject>' header, 1-line summary, '[KEYWORDS: ...]' block, then self-contained noun-heavy bullet points. This ensures pipeline coherence between agents.
 
 Input Agent Details:
 - Role: {role}
@@ -128,7 +189,7 @@ Optimize and return a JSON object with:
 {{
   "role": "Optimized role description",
   "goal": "Optimized goal, clear and focused",
-  "backstory": "Optimized backstory, concise and professional, describing key expertise, tone, and directives (e.g. be concise, avoid fluff)"
+  "backstory": "Optimized backstory, concise and professional, describing key expertise, tone, and directives (e.g. be concise, avoid fluff, output in Vector DB format)"
 }}
 """
 
@@ -136,10 +197,16 @@ TASK_OPTIMIZER_PROMPT = """
 You are Alfredo, a Senior Prompt Engineer and Workflow Architect.
 Your job is to optimize the Description and Expected Output of an AI task to ensure they are:
 1. Optimized to minimize token consumption. Focus purely on required inputs, steps, and structure.
-2. Structured for basic, dense intermediate pipeline communication between agents (no conversational outputs, no preambles, structured lists only).
+2. Structured for basic, dense intermediate pipeline communication between agents.
 3. Specific, unambiguous, and focused on producing measurable outcomes.
 4. Written in the SAME language as the input (keep it Italian if input is Italian, English if input is English, etc.).
 5. CRITICAL: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like `{{nome_variabile}}` or `{{user_input}}` or `{{previous_result}}`. Keep them exactly as they are.
+6. CRITICAL ARCHITECTURE RULE: Agents NEVER write or execute final code files. Agents ONLY produce data, logic, and mathematical blueprints, saving them to the vector database. The final code is generated EXCLUSIVELY by the Master AI at the end of the workflow. If the task asks an agent to "Audit source code", "Write a python file", or "Run code", you MUST rewrite it to focus on outputting a "logical blueprint" or "validation rules" to the vector DB instead.
+7. VECTOR DB FORMAT REQUIRED: The optimized 'expected_output' MUST explicitly instruct the agent to output its findings in the following format:
+   - Begin with a clear '# Topic: <Subject>' header
+   - Provide a 1-line summary
+   - Provide a '[KEYWORDS: ...]' block
+   - Provide the main content as self-contained, noun-heavy bullet points or structured data.
 
 Input Task Details:
 - Description: {description}
@@ -148,7 +215,7 @@ Input Task Details:
 Optimize and return a JSON object with:
 {{
   "description": "Optimized task description, preserving all curly brace placeholders",
-  "expected_output": "Optimized expected output description, preserving all curly brace placeholders"
+  "expected_output": "Optimized expected output description, preserving all placeholders, and strictly requiring the Vector DB format (Topic, summary, KEYWORDS, bullet points)"
 }}
 """
 
@@ -169,7 +236,8 @@ For each generated subtask, you must:
 4. Assign it to one of the available agents.
 5. Provide a specific 'agent_specialization' to tailor their persona for this micro-step.
 6. Crucial: Do NOT resolve, edit, or remove any variables/placeholders in curly braces like {{nome_variabile}} or {{user_input}}. Keep them exactly as they are in the original task description so they can be resolved at runtime.
-7. CRITICAL: The original task has a list of 'required_inputs'. You MUST distribute these required inputs into the 'required_inputs' array of the relevant subtasks where they are needed.
+7. CRITICAL ARCHITECTURE RULE: Agents NEVER write or execute final code files. Agents ONLY produce data, logic, and mathematical blueprints, saving them to the vector database. The final code is generated EXCLUSIVELY by the Master AI at the end of the workflow. If the original task asks an agent to "Audit source code", "Write a python file", or "Run code", you MUST decompose it into subtasks that focus on generating "logical blueprints" or "validation rules" for the vector DB instead.
+8. CRITICAL: The original task has a list of 'required_inputs'. You MUST distribute these required inputs into the 'required_inputs' array of the relevant subtasks where they are needed.
 
 Available Agents:
 {available_agents}
@@ -539,7 +607,7 @@ class MasterAI:
             # Graceful fallback: return the raw output if refinement fails
             return raw_str
 
-    def chat_plan(self, user_message: str, chat_history: list = None, base_workflow: dict = None) -> Dict[str, Any]:
+    def chat_plan(self, user_message: str, chat_history: list = None, base_workflow: dict = None, saved_context: str = None) -> Dict[str, Any]:
         """
         Engages in a conversational planning phase with the user to dynamically build
         or refine a crew of agents and tasks.
@@ -548,6 +616,7 @@ class MasterAI:
             user_message: The latest message from the user.
             chat_history: List of dicts [{"role": "user"|"assistant", "content": "..."}]
             base_workflow: Optional dictionary containing an existing workflow to start from.
+            saved_context: Optional JSON dump of the previous workflow's vector database.
         """
         chat_history = chat_history or []
         
@@ -604,7 +673,16 @@ CRITICAL INSTRUCTIONS FOR PREDEFINED WORKFLOW:
         else:
             base_workflow_context = "No base workflow loaded. You must design a custom plan from scratch based on the user's request, and set \"modified\": true."
             
-        system_prompt = CHAT_PLANNER_PROMPT.replace("{base_workflow_context}", base_workflow_context)
+        saved_context_section = ""
+        if saved_context:
+            saved_context_section = f"""
+SAVED GLOBAL CONTEXT (from previous run):
+{saved_context}
+
+CRITICAL: The user's prompt might reference this data. You can answer questions about it directly in your 'response'. If they want to start a new workflow based on this data, assume the agents will have access to it via memory and plan accordingly.
+"""
+
+        system_prompt = CHAT_PLANNER_PROMPT.replace("{base_workflow_context}", base_workflow_context).replace("{saved_context_section}", saved_context_section)
         
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(chat_history)
@@ -728,6 +806,104 @@ CRITICAL INSTRUCTIONS FOR PREDEFINED WORKFLOW:
                 "description": description,
                 "expected_output": expected_output
             }
+
+    def generate_export_files(self, final_text: str, expected_exports: list, output_dir: str, global_context: str = None, export_instructions: str = None) -> list:
+        """
+        Reads the accumulated global context (or falls back to final_text) and
+        generates physical files for each format requested in `expected_exports`.
+
+        Args:
+            final_text:          The last agent's output (used as fallback).
+            expected_exports:    List of format keys (e.g. ["python", "excel"]).
+            output_dir:          Directory where files will be written.
+            global_context:      JSON string with the full memory dump from all agents.
+            export_instructions: Optional user instructions for the Master AI.
+
+        Returns a list of generated file paths.
+        """
+        if not expected_exports:
+            return []
+            
+        if isinstance(expected_exports, str):
+            try:
+                expected_exports = json.loads(expected_exports)
+                if isinstance(expected_exports, str):
+                    expected_exports = [expected_exports]
+            except json.JSONDecodeError:
+                expected_exports = [expected_exports]
+                
+        try:
+            from core.export_tools import EXPORT_TOOL_MAP
+        except ImportError:
+            logger.error("Could not import EXPORT_TOOL_MAP from core.export_tools.")
+            EXPORT_TOOL_MAP = {}
+            
+        generated_files = []
+        os.makedirs(output_dir, exist_ok=True)
+        
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        # Use global context if available, otherwise fall back to final_text
+        context_for_export = global_context if global_context else final_text
+        instructions_text = export_instructions.strip() if export_instructions else "No specific instructions provided. Use your best judgement."
+
+        for ext in expected_exports:
+            ext = ext.strip().lower()
+            if not ext:
+                continue
+                
+            logger.info(f"MasterAI generating export file for format: {ext}")
+            system_prompt = EXPORT_GENERATOR_PROMPT.format(
+                format=ext,
+                global_context=context_for_export,
+                user_instructions=instructions_text
+            )
+            
+            try:
+                raw_content = self._call_llm_with_retry(
+                    model=model_string,
+                    messages=[
+                        {"role": "user", "content": system_prompt}
+                    ],
+                    temperature=0.1
+                )
+                
+                # Strip leading/trailing markdown blocks if the LLM ignored instructions
+                raw_content = raw_content.strip()
+                if raw_content.startswith(f"```{ext}"):
+                    raw_content = raw_content[len(ext)+3:]
+                elif raw_content.startswith("```"):
+                    raw_content = raw_content[3:]
+                if raw_content.endswith("```"):
+                    raw_content = raw_content[:-3]
+                    
+                raw_content = raw_content.strip()
+                
+                # Check if the requested export is supported in our tool map
+                if ext in EXPORT_TOOL_MAP:
+                    tool = EXPORT_TOOL_MAP[ext]
+                    func = tool["func"]
+                    actual_ext = tool["ext"]
+                    file_path = os.path.join(output_dir, f"output.{actual_ext}")
+                    
+                    # Execute the mapped function
+                    generated_path = func(raw_content, file_path)
+                    generated_files.append(generated_path)
+                else:
+                    # Fallback for unknown extensions
+                    logger.warning(f"No specific tool found for export '{ext}'. Falling back to raw text.")
+                    file_path = os.path.join(output_dir, f"output.{ext}")
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(raw_content)
+                    generated_files.append(file_path)
+            except Exception as e:
+                logger.error(f"Failed to generate export file {ext}: {e}")
+                
+        return generated_files
 
     def decompose_task_if_complex(self, task: Dict[str, Any], available_agents: list) -> list:
         """

@@ -132,8 +132,10 @@ class DBManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 task_ids_json TEXT NOT NULL, -- List of task IDs as JSON
+                expected_exports TEXT DEFAULT '[]', -- List of output formats as JSON
                 requires_human_check INTEGER DEFAULT 0,
-                has_deletion_warning INTEGER DEFAULT 0
+                has_deletion_warning INTEGER DEFAULT 0,
+                export_instructions TEXT DEFAULT '' -- Optional guidance for Master AI export generation
             );
             """,
             """
@@ -260,6 +262,13 @@ class DBManager:
             except sqlite3.OperationalError:
                 pass
 
+            # Migration to add export_instructions to workflows (for Master AI guidance)
+            try:
+                self.cursor.execute("ALTER TABLE workflows ADD COLUMN export_instructions TEXT DEFAULT '';")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
         except sqlite3.Error as e:
             print(f"Error creating tables: {e}")
             self.conn.rollback()
@@ -299,6 +308,11 @@ class DBManager:
             except json.JSONDecodeError:
                 data['vector_dbs'] = [] 
             del data['vector_dbs_json']
+        if 'expected_exports' in data and isinstance(data['expected_exports'], str):
+            try:
+                data['expected_exports'] = json.loads(data['expected_exports'])
+            except json.JSONDecodeError:
+                data['expected_exports'] = [data['expected_exports']] if data['expected_exports'] else []
         return data
 
     # --- Vector Databases CRUD ---
@@ -539,10 +553,12 @@ class DBManager:
         self.conn.commit()
 
     # --- Workflows CRUD ---
-    def create_workflow(self, name: str, task_ids: List[int], requires_human_check: bool) -> int:
+    def create_workflow(self, name: str, task_ids: List[int], requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
         task_ids_json = json.dumps(task_ids)
-        sql = "INSERT INTO workflows (name, task_ids_json, requires_human_check) VALUES (?, ?, ?)"
-        self.cursor.execute(sql, (name, task_ids_json, requires_human_check))
+        expected_exports_json = json.dumps(expected_exports or [])
+        export_instructions_str = export_instructions or ""
+        sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions) VALUES (?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -565,14 +581,16 @@ class DBManager:
             processed_rows.append(self._process_json_fields(workflow_dict))
         return processed_rows
 
-    def update_workflow(self, workflow_id: int, name: str, task_ids: List[int], requires_human_check: bool) -> int:
+    def update_workflow(self, workflow_id: int, name: str, task_ids: List[int], requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
         task_ids_json = json.dumps(task_ids)
+        expected_exports_json = json.dumps(expected_exports or [])
+        export_instructions_str = export_instructions or ""
         sql = """
         UPDATE workflows 
-        SET name = ?, task_ids_json = ?, requires_human_check = ? 
+        SET name = ?, task_ids_json = ?, expected_exports = ?, requires_human_check = ?, export_instructions = ? 
         WHERE id = ?
         """
-        self.cursor.execute(sql, (name, task_ids_json, requires_human_check, workflow_id))
+        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str, workflow_id))
         self.conn.commit()
         return self.cursor.rowcount
 

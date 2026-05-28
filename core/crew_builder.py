@@ -3,6 +3,13 @@ import os
 import logging
 import re
 
+class RateLimitError(Exception):
+    """Exception raised when an LLM returns a 503 or rate limit error."""
+    def __init__(self, message, current_task_idx, task_outputs):
+        super().__init__(message)
+        self.current_task_idx = current_task_idx
+        self.task_outputs = task_outputs
+
 from crewai import Agent, Task, Crew
 from langchain_openai import ChatOpenAI
 from langchain_community.llms import Ollama
@@ -30,8 +37,8 @@ db = DBManager()
 # MEMORY-CENTRIC: Agents are now instructed to use the ephemeral memory tools.
 AGENT_COMMS_DIRECTIVE = """
 
---- COMMUNICATION PROTOCOL (MEMORY-CENTRIC) ---
-You are part of a sequential AI agent pipeline. Your output will be consumed by the NEXT AI agent, not a human.
+--- COMMUNICATION PROTOCOL (VECTOR MEMORY-CENTRIC) ---
+You are part of a sequential AI agent pipeline. Your output will be consumed by the NEXT AI agent and stored in a Semantic Vector Database (ChromaDB).
 INTER-AGENT MEMORY:
 - You have access to 'write_atomic_memory' and 'read_atomic_memory' tools.
 - Results from previous steps are stored in an ephemeral in-memory database.
@@ -39,21 +46,23 @@ INTER-AGENT MEMORY:
 - Use 'read_atomic_memory' with the exact 'key' to retrieve a specific record,
   or use a 'query' string for semantic search when the key is unknown.
 - ALWAYS use 'write_atomic_memory' to store your final output so that downstream agents can access it.
-OUTPUT RULES:
-1. Output ONLY the essential findings as a structured list.
-2. Use bullet points (•) for each key finding.
-3. Start with a one-line SUMMARY of your conclusion.
-4. Maximum 10 bullet points. Prioritize by relevance.
-5. NO preamble, NO "In conclusion...", NO filler phrases.
-6. If you reference data, cite it inline (source, number, date).
+OUTPUT RULES (OPTIMIZED FOR VECTOR RETRIEVAL):
+1. Start with a descriptive header: `# Topic: [Core Subject of your task]`.
+2. Provide a comma-separated keywords block: `[KEYWORDS: tag1, tag2, tag3]`.
+3. Provide a concise 1-2 sentence Context Summary.
+4. Output your key findings as a structured list (max 10 points).
+5. CRITICAL: Use explicit, descriptive nouns in every bullet point. NEVER use pronouns like "it", "they", or "this" because context is lost during vector chunking.
+6. NO preamble, NO "In conclusion...", NO filler phrases.
 """
 
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
+# NOTE: Document-creation tools (Word, Excel, file_write, etc.) are intentionally
+# EXCLUDED.  They live in core/export_tools.py and are called deterministically
+# by the Master AI at the end of a workflow — never by individual agents.
 ALLOWED_TOOLS = {
-    # Workspace (sandboxed)
+    # Workspace (sandboxed, read-only)
     "read_file": local_tools.read_file,
-    "write_file": local_tools.write_file,
     # Full PC (read-only)
     "read_file_anywhere": local_tools.read_file_anywhere,
     "search_files": local_tools.search_files,
@@ -62,26 +71,19 @@ ALLOWED_TOOLS = {
     "ask_operator": local_tools.ask_operator,
     # Terminal
     "execute_shell_command": terminal_executor.execute_shell_command,
-    # Office (write = confirmation required)
-    "create_word_document": office_tool.create_word_document,
-    "edit_word_document": office_tool.edit_word_document,
-    "create_excel_document": office_tool.create_excel_document,
     # Screenshot
     "take_screenshot": office_tool.take_screenshot,
-    # Email (send = confirmation required)
-    "manage_email": None,  # Sentinel — expanded at task build time (see _build_task)
+    # Email (READ/SEARCH only — send_email is reserved for Master AI exports)
+    "manage_email": None,  # Sentinel — expanded at task build time into read + search only
     "read_emails": email_tool.read_emails,
     "search_emails": email_tool.search_emails,
-    "send_email": email_tool.send_email,
     # Vector search — expanded at task build time into VectorSearchTool instances
     "vector_search": None,  # Sentinel
     # Tabular query — auto-injected at task build time when structured CSVs exist
     "tabular_query": None,  # Sentinel
     # Calculator
     "calculator": local_tools.calculate,
-    # Code Management Tools
-    "file_read_tool": local_tools.read_python_file,
-    "file_write_tool": local_tools.write_python_file,
+    # Code tools (read + execute only — writing is handled by Master AI exports)
     "python_repl_tool": local_tools.python_repl,
     # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
     "read_atomic_memory": None,   # Sentinel
@@ -161,14 +163,14 @@ def _map_tools(tool_names):
 
     instantiated_tools = []
     for tool_name in tool_names:
-        # 'manage_email' is a UI label — expand to the actual email tools
+        # 'manage_email' is a UI label — expand to read/search only
+        # (send_email is reserved for Master AI export phase)
         if tool_name == "manage_email":
             instantiated_tools.extend([
                 email_tool.read_emails,
                 email_tool.search_emails,
-                email_tool.send_email,
             ])
-            logging.info("Expanded 'manage_email' sentinel into 3 email tools.")
+            logging.info("Expanded 'manage_email' sentinel into 2 email tools (read + search).")
         elif tool_name in ALLOWED_TOOLS:
             tool_fn = ALLOWED_TOOLS[tool_name]
             if tool_fn is not None:  # Skip None sentinels
@@ -237,6 +239,7 @@ def _build_agent(agent_id, specialization=None, model_id_override=None):
     # to control exactly where the specialization string is injected.
     base_role = agent_record['role']
     base_backstory = agent_record['backstory'] or ""
+    base_goal = agent_record.get('goal', '') or ""
 
     if specialization:
         if "{specialization}" in base_role:
@@ -253,11 +256,23 @@ def _build_agent(agent_id, specialization=None, model_id_override=None):
                 f"focused on **{specialization}**. Apply all your base skills strictly within "
                 f"this specialized domain. Do not stray outside it."
             )
+            
+        if "{specialization}" in base_goal:
+            effective_goal = base_goal.replace("{specialization}", specialization)
+        else:
+            effective_goal = f"{base_goal} (specialized in {specialization})"
+
         logging.info(f"Agent '{agent_record['name']}' specialized as: '{effective_role}'")
     else:
         # Clean up any `{specialization}` placeholders from the base role and backstory
         effective_role = base_role.replace(" specialized in {specialization}", "").replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
         effective_backstory = base_backstory.replace("{specialization}", "").strip()
+        effective_goal = base_goal.replace("{specialization}", "").strip()
+
+    # Safeguard against any other unreplaced variables
+    effective_role = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[missing input: \1]', effective_role)
+    effective_backstory = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[missing input: \1]', effective_backstory)
+    effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[missing input: \1]', effective_goal)
 
     # --- BACKSTORY INJECTION: Enforce conciseness at identity level ---
     conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
@@ -268,12 +283,12 @@ def _build_agent(agent_id, specialization=None, model_id_override=None):
     agent = Agent(
         role=effective_role,
         backstory=enhanced_backstory,
-        goal=f"Act as {agent_record['name']} with the role: {effective_role}",
+        goal=effective_goal,
         llm=llm_instance,
         tools=agent_tools,
         verbose=True,
         allow_delegation=False,
-        max_iter=5  # Prevent infinite reasoning loops
+        max_iter=15  # Prevent infinite reasoning loops
     )
     logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model}, specialization={specialization!r})")
     return agent
@@ -366,9 +381,14 @@ def _build_task(task_id, agents_cache):
     task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
 
     # Enhance expected_output to enforce structured format
+    # Enhance expected_output for Vector DB structured format
     base_expected = task_record['expected_output']
-    if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
-        base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
+    vector_format_directive = (
+        " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
+        "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
+    )
+    if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+        base_expected += vector_format_directive
 
     task = Task(
         description=task_description,
@@ -490,7 +510,7 @@ def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
     )
 
 
-def execute_run_with_resume(run_id: int, status_callback=None) -> str:
+def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None) -> str:
     """
     Executes a workflow run task-by-task with MEMORY-CENTRIC communication.
 
@@ -547,6 +567,8 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
 
     # --- MEMORY-CENTRIC: Initialise ephemeral vector store for this run ---
     memory_manager = EphemeralMemoryManager(run_id=run_id)
+    if accumulated_context:
+        memory_manager.load_from_dump(accumulated_context)
     read_memory_tool = ReadAtomicMemoryTool(memory_manager=memory_manager)
     write_memory_tool = WriteAtomicMemoryTool(memory_manager=memory_manager)
 
@@ -587,16 +609,7 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
         # --- MEMORY-CENTRIC: Inject memory tools into agent & task ---
         _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
 
-        # Inject user-provided inputs into the task description
-        original_desc = task_obj.description
-
-        for k, v in inputs.items():
-            original_desc = original_desc.replace(f"{{{k}}}", str(v))
-        original_desc = original_desc.replace("{user_input}", inputs.get('user_input', ''))
-        original_desc = original_desc.replace("{previous_result}", last_output)
-        original_desc = original_desc.replace("{context}", last_output)
-        original_desc = original_desc.replace("{flexible_input}", inputs.get('user_input', last_output))
-
+        # --- Placeholder resolution (task names, IDs, aliases) ---
         # --- Placeholder resolution (task names, IDs, aliases) ---
         def normalize_name(s: str) -> str:
             if not s:
@@ -656,7 +669,24 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
                 return lookup[lower_key]
             return match.group(0)
 
-        original_desc = pattern.sub(repl, original_desc)
+        def apply_interpolation(text: str) -> str:
+            if not text:
+                return text
+            for k, v in inputs.items():
+                text = text.replace(f"{{{k}}}", str(v))
+            text = text.replace("{user_input}", inputs.get('user_input', ''))
+            text = text.replace("{previous_result}", last_output)
+            text = text.replace("{context}", last_output)
+            text = text.replace("{flexible_input}", inputs.get('user_input', last_output))
+            text = pattern.sub(repl, text)
+            # Safeguard: Prevent CrewAI from crashing on unreplaced template variables
+            # Convert {variable} to <variable> so the agent sees it conceptually and can search for it
+            text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', text)
+            return text
+
+        # Apply interpolations to both description and expected_output
+        original_desc = apply_interpolation(task_obj.description)
+        original_expected = apply_interpolation(task_obj.expected_output)
 
         # --- MEMORY-CENTRIC: Replace prompt-stuffing with Memory Index Table ---
         # Instead of appending the full text of every previous output (which
@@ -675,6 +705,7 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
             original_desc += context_str
 
         task_obj.description = original_desc
+        task_obj.expected_output = original_expected
 
         # Create a single-task Crew and execute
         single_task_crew = Crew(
@@ -684,7 +715,20 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
             process='sequential'
         )
 
-        result = single_task_crew.kickoff()
+        try:
+            result = single_task_crew.kickoff()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
+                logging.warning(f"Rate limit / 503 encountered at task {i}: {e}")
+                # Save state to DB before raising so it's safely stored
+                db.update_run(run_id, status='paused', result=str(e), current_task_idx=i, task_outputs=task_outputs)
+                raise RateLimitError(f"Model high demand error (503): {e}", i, task_outputs)
+            elif "none or empty" in err_str:
+                logging.warning(f"Agent reached max iterations or hallucinatory loop: {e}")
+                raise RuntimeError(f"Agent failed to generate a valid output (likely hit max iterations due to loop or missing tools). Please check the tools available. Original error: {e}")
+            else:
+                raise e
         last_output = str(result)
 
         # --- MEMORY-CENTRIC: Auto-save task output to ephemeral memory ---
@@ -695,8 +739,13 @@ def execute_run_with_resume(run_id: int, status_callback=None) -> str:
         task_outputs[str(task_id)] = last_output
         db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
 
-    # Final output
-    return last_output
+    # --- Build global context dump for Master AI ---
+    import json as _json
+    all_records = memory_manager.dump_all_records()
+    global_context = _json.dumps(all_records, indent=2, ensure_ascii=False)
+
+    # Return both the last output (for the chat message) and the full context (for exports)
+    return last_output, global_context
 
 def build_dynamic_crew(plan: dict, default_model_id=None):
     """
@@ -811,9 +860,14 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
         # Enhance expected_output for structured format
+        # Enhance expected_output for Vector DB structured format
         base_expected = task_data.get('expected_output', 'Task Output')
-        if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
-            base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
+        vector_format_directive = (
+            " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
+            "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
+        )
+        if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+            base_expected += vector_format_directive
 
         task = Task(
             description=task_description,
@@ -840,7 +894,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     return crew
 
 
-def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None) -> str:
+def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None) -> str:
     """
     Builds AND executes a dynamic crew from a JSON plan using memory-centric
     communication.  This is the counterpart of execute_run_with_resume for
@@ -889,14 +943,19 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     import time
     dynamic_run_id = int(time.time()) % 1_000_000  # Pseudo-unique ID
     memory_manager = EphemeralMemoryManager(run_id=dynamic_run_id)
+    if accumulated_context:
+        memory_manager.load_from_dump(accumulated_context)
     read_memory_tool = ReadAtomicMemoryTool(memory_manager=memory_manager)
     write_memory_tool = WriteAtomicMemoryTool(memory_manager=memory_manager)
 
     agents_cache = {}
+    task_outputs = initial_task_outputs or {}
     last_output = ""
-    task_outputs = {}
+    if start_idx > 0 and str(start_idx - 1) in task_outputs:
+        last_output = task_outputs[str(start_idx - 1)]
 
-    for task_idx, task_data in enumerate(plan['tasks']):
+    for task_idx in range(start_idx, len(plan['tasks'])):
+        task_data = plan['tasks'][task_idx]
         if run_id:
             db.update_run(run_id, status='running', current_task_idx=task_idx, task_outputs=task_outputs)
 
@@ -910,13 +969,16 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         agent_info = agents_data_by_role[agent_role]
 
         # Resolve persona
+        base_role = agent_info['role']
+        base_backstory = agent_info.get('backstory', '') or ""
+        base_goal = agent_info.get('goal', '') or ""
+
         if specialization:
-            base_role = agent_info['role']
-            base_backstory = agent_info.get('backstory', '') or ""
             if "{specialization}" in base_role:
                 effective_role = base_role.replace("{specialization}", specialization)
             else:
                 effective_role = f"{base_role} specialized in {specialization}"
+            
             if "{specialization}" in base_backstory:
                 effective_backstory = base_backstory.replace("{specialization}", specialization)
             else:
@@ -925,11 +987,20 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                     f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
                     f"focused on **{specialization}**."
                 )
+
+            if "{specialization}" in base_goal:
+                effective_goal = base_goal.replace("{specialization}", specialization)
+            else:
+                effective_goal = f"{base_goal} (specialized in {specialization})"
         else:
-            base_role = agent_info['role']
-            base_backstory = agent_info.get('backstory', '') or ""
             effective_role = base_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
             effective_backstory = base_backstory.replace("{specialization}", "").strip()
+            effective_goal = base_goal.replace("{specialization}", "").strip()
+
+        # Safeguard against any other unreplaced variables
+        effective_role = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_role)
+        effective_backstory = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_backstory)
+        effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_goal)
 
         # Build or reuse agent
         if not specialization and agent_role in agents_cache:
@@ -944,7 +1015,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             agent_instance = Agent(
                 role=effective_role,
                 backstory=enhanced_backstory,
-                goal=agent_info.get('goal', ''),
+                goal=effective_goal,
                 llm=llm_instance,
                 tools=agent_tools,
                 verbose=True,
@@ -976,9 +1047,25 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 "--- [END MEMORY INDEX] ---\n"
             )
 
+        # Enhance expected_output for Vector DB structured format
         base_expected = task_data.get('expected_output', 'Task Output')
-        if "bullet" not in base_expected.lower() and "list" not in base_expected.lower():
-            base_expected += " Format: Start with a 1-line summary, then key findings as bullet points (max 10)."
+        vector_format_directive = (
+            " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
+            "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
+        )
+        if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+            base_expected += vector_format_directive
+
+        # Apply interpolations to expected_output
+        for k, v in execution_context.items():
+            base_expected = base_expected.replace(f"{{{k}}}", str(v))
+        base_expected = base_expected.replace("{user_input}", execution_context.get('user_input', ''))
+        base_expected = base_expected.replace("{previous_result}", last_output)
+        base_expected = base_expected.replace("{context}", last_output)
+
+        # Safeguard: Prevent CrewAI from crashing on unreplaced template variables
+        task_description = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', task_description)
+        base_expected = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', base_expected)
 
         task_obj = Task(
             description=task_description,
@@ -998,7 +1085,18 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             process='sequential'
         )
 
-        result = single_crew.kickoff(inputs=execution_context)
+        try:
+            result = single_crew.kickoff(inputs=execution_context)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
+                logging.warning(f"Rate limit / 503 encountered at dynamic task {task_idx}: {e}")
+                if run_id:
+                    db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
+                raise RateLimitError(f"Model high demand error (503): {e}", task_idx, task_outputs)
+            else:
+                raise e
+                
         last_output = str(result)
 
         # Auto-save to ephemeral memory
@@ -1016,7 +1114,12 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         if run_id:
             db.update_run(run_id, status='running', result=last_output, current_task_idx=task_idx + 1, task_outputs=task_outputs)
 
-    return last_output
+    # --- Build global context dump for Master AI ---
+    import json as _json
+    all_records = memory_manager.dump_all_records()
+    global_context = _json.dumps(all_records, indent=2, ensure_ascii=False)
+
+    return last_output, global_context
 
 if __name__ == '__main__':
     # Example usage (for testing purposes)

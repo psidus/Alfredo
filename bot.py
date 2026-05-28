@@ -138,16 +138,35 @@ def format_plan_summary(plan: dict) -> str:
     """Formats the JSON plan into a human-readable summary for Telegram."""
     if not plan:
         return ""
+    
+    import html as html_module
+    def esc(text):
+        """Escape HTML entities in dynamic text to prevent Telegram parse errors."""
+        return html_module.escape(str(text)) if text else ""
 
     summary = "<b>📋 Proposed Workflow Plan:</b>\n\n"
 
-    # 1. Agents Section
+    # 1. Expected Exports
+    expected_exports = plan.get("expected_exports", [])
+    if expected_exports:
+        exports_str = ", ".join([esc(x).upper() for x in expected_exports])
+        summary += f"<b>📁 Expected Files:</b> {exports_str}\n\n"
+
+    # 2. Agents Section
     summary += "<b>👥 Team Composition:</b>\n"
     agents = plan.get("agents", [])
     if not agents:
         summary += "<i>No agents defined yet.</i>\n"
     for i, agent in enumerate(agents):
-        summary += f"{i+1}. <b>{agent.get('role')}</b>\n   🎯 <i>Goal:</i> {agent.get('goal')}\n"
+        role_str = agent.get('role', '').replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+        goal_str = agent.get('goal', '').replace("{specialization}", "").strip()
+        
+        # Safeguard any other unreplaced brackets just in case
+        import re
+        role_str = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[\1]', role_str)
+        goal_str = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[\1]', goal_str)
+        
+        summary += f"{i+1}. <b>{esc(role_str)}</b>\n   🎯 <i>Goal:</i> {esc(goal_str)}\n"
 
     # 2. Tasks Section
     summary += "\n<b>📝 Execution Steps:</b>\n"
@@ -157,22 +176,33 @@ def format_plan_summary(plan: dict) -> str:
     for i, task in enumerate(tasks):
         desc = task.get('description', '')
         short_desc = (desc[:120] + '...') if len(desc) > 120 else desc
-        summary += f"{i+1}. {short_desc}\n   👤 <i>Assignee:</i> {task.get('agent_role')}\n"
+        
+        raw_role = task.get('agent_role', '')
+        clean_role = raw_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+        clean_role = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[\1]', clean_role)
+        
+        assignee_text = esc(clean_role)
+        specialization = task.get('agent_specialization')
+        if specialization:
+            assignee_text += f" <b>{{{esc(specialization)}}}</b>"
+            
+        summary += f"{i+1}. {esc(short_desc)}\n   👤 <i>Assignee:</i> {assignee_text}\n"
         # Show required inputs that will be collected before execution
         req_inputs = task.get('required_inputs') or []
         if req_inputs:
             keys = []
             for ri in req_inputs:
                 if isinstance(ri, dict):
-                    keys.append(f"<code>{ri.get('key', '?')}</code>")
+                    keys.append(f"<code>{esc(ri.get('key', '?'))}</code>")
                 elif isinstance(ri, str):
-                    keys.append(f"<code>{ri}</code>")
+                    keys.append(f"<code>{esc(ri)}</code>")
             if keys:
                 input_keys = ', '.join(keys)
                 summary += f"   📋 <i>Inputs needed:</i> {input_keys}\n"
 
     summary += "\n<i>Do you want to proceed or make any changes?</i>"
     return summary
+
 
 
 # --- Command Handlers ---
@@ -198,6 +228,15 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
 
     context.user_data["base_workflow"] = workflow
     context.user_data["chat_history"] = []
+    # Clear any stale plan state from a previous session
+    context.user_data["final_plan"] = None
+    context.user_data["plan_confirmed"] = False
+    context.user_data["pending_inputs"] = []
+    context.user_data["collected_inputs"] = {}
+    context.user_data["execution_context"] = {}
+    
+    # Wipe the saved JSON context from the database to start completely fresh
+    db.update_context(str(update.effective_chat.id), last_output="", accumulated_context="")
 
     await query.edit_message_text(
         f"📝 <b>Loading Workflow '{workflow['name']}'...</b>", parse_mode=ParseMode.HTML
@@ -264,13 +303,55 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["base_workflow"] = None
     context.user_data["chat_history"] = []
 
-    result = await asyncio.to_thread(master_ai.chat_plan, user_input)
+    past_context_record = db.get_context(str(chat_id))
+    accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
+
+    result = await asyncio.to_thread(master_ai.chat_plan, user_input, saved_context=accumulated_context)
 
     context.user_data["chat_history"].append({"role": "user", "content": user_input})
     context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
 
     await status_msg.edit_text(result["response"])
+    
+    if result.get("status") == "export" and accumulated_context:
+        plan = result.get("plan", {})
+        exports = plan.get("expected_exports", [])
+        if exports:
+            await status_msg.edit_text(result["response"] + "\n\n<i>Generating requested files...</i>", parse_mode=ParseMode.HTML)
+            try:
+                export_dir = os.path.join("exports", f"chat_{chat_id}")
+                generated_files = await asyncio.to_thread(
+                    master_ai.generate_export_files, 
+                    accumulated_context,  # final_text fallback
+                    exports,
+                    export_dir,           # output_dir
+                    accumulated_context   # global_context
+                )
+                for file_path in generated_files:
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            await context.bot.send_document(chat_id=chat_id, document=f)
+            except Exception as e:
+                logger.error(f"Dynamic export failed: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generating files: {e}")
+        return PLANNING_MODE
+
     return PLANNING_MODE
+
+
+@whitelist_check
+async def confirm_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data["plan_confirmed"] = True
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.error(f"Failed to remove inline keyboard: {e}")
+        
+    logger.info("User confirmed plan via inline button. Routing to collect_required_inputs.")
+    return await collect_required_inputs(update, context)
 
 
 @whitelist_check
@@ -285,6 +366,30 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return PLANNING_MODE
 
+    # SAFETY NET: If the plan was already confirmed and decomposed, skip re-planning.
+    # This catches the case where the LLM asked conversationally for required_inputs
+    # instead of returning status "ready", and the user answered that question.
+    # In this case, we must go straight to input collection / execution.
+    if context.user_data.get("final_plan") and context.user_data.get("plan_confirmed"):
+        logger.info("handle_planning_chat: Plan already confirmed. Routing to collect_required_inputs.")
+        # Treat user's message as the first input answer if we have pending_inputs
+        pending = context.user_data.get("pending_inputs", [])
+        if pending:
+            # Re-route to input collection handler logic directly
+            return await handle_input_collection(update, context)
+        # Otherwise just proceed to execution
+        await execute_crew(update, context)
+        return ConversationHandler.END
+
+    # If we have a decomposed plan waiting for confirmation:
+    if context.user_data.get("final_plan") and not context.user_data.get("plan_confirmed"):
+        user_input_lower = user_input.strip().lower()
+        if user_input_lower in ["go", "confirm", "proceed", "yes", "ok"]:
+            context.user_data["plan_confirmed"] = True
+            logger.info("handle_planning_chat: User confirmed plan via text. Routing to collect_required_inputs.")
+            return await collect_required_inputs(update, context)
+
+
     chat_history = context.user_data.get("chat_history", [])
     base_workflow = context.user_data.get("base_workflow")
 
@@ -292,7 +397,10 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         "🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML
     )
 
-    result = await asyncio.to_thread(master_ai.chat_plan, user_input, chat_history, base_workflow)
+    past_context_record = db.get_context(str(chat_id))
+    accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
+
+    result = await asyncio.to_thread(master_ai.chat_plan, user_input, chat_history, base_workflow, accumulated_context)
 
     chat_history.append({"role": "user", "content": user_input})
     chat_history.append({"role": "assistant", "content": result["response"]})
@@ -300,10 +408,34 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await status_msg.edit_text(result["response"])
 
+    if result.get("status") == "export" and accumulated_context:
+        plan = result.get("plan", {})
+        exports = plan.get("expected_exports", [])
+        if exports:
+            await status_msg.edit_text(result["response"] + "\n\n<i>Generating requested files...</i>", parse_mode=ParseMode.HTML)
+            try:
+                export_dir = os.path.join("exports", f"chat_{chat_id}")
+                generated_files = await asyncio.to_thread(
+                    master_ai.generate_export_files, 
+                    accumulated_context,  # final_text fallback
+                    exports,
+                    export_dir,           # output_dir
+                    accumulated_context   # global_context
+                )
+                for file_path in generated_files:
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            await context.bot.send_document(chat_id=chat_id, document=f)
+            except Exception as e:
+                logger.error(f"Dynamic export failed: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generating files: {e}")
+        return PLANNING_MODE
+
     if result.get("status") == "ready":
         plan = result.get("plan")
         is_modified = result.get("modified", True)  # default True for safety
         use_predefined = base_workflow and not is_modified
+        logger.info(f"handle_planning_chat: status=READY | is_modified={is_modified} | use_predefined={use_predefined} | plan_is_none={plan is None}")
 
         # 1. If it's a predefined workflow without changes, build a plan representation from DB
         if use_predefined and not plan:
@@ -372,15 +504,45 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     pass
 
-            final_summary = format_plan_summary(plan)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ <b>Plan Confirmed and Expanded!</b>\n\n{final_summary}",
-                parse_mode=ParseMode.HTML
-            )
+            # --- Send expanded plan summary (robustly) ---
+            # This MUST NOT crash, or collect_required_inputs will never be reached.
+            try:
+                final_summary = format_plan_summary(plan)
+                full_text = f"✅ <b>Plan Expanded!</b>\n\n{final_summary}"
+                # Truncate if it exceeds Telegram's 4096 char limit
+                if len(full_text) > 4000:
+                    full_text = full_text[:3950] + "\n\n<i>... (plan truncated for display)</i>"
+                
+                keyboard = [[InlineKeyboardButton("✅ Confirm & Proceed", callback_data="confirm_plan")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=full_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+            except Exception as summary_err:
+                logger.error(f"Failed to send plan summary: {summary_err}. Falling back to plain text.")
+                try:
+                    # Fallback: send without HTML parse mode
+                    task_count = len(plan.get('tasks', []))
+                    agent_count = len(plan.get('agents', []))
+                    
+                    keyboard = [[InlineKeyboardButton("✅ Confirm & Proceed", callback_data="confirm_plan")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"✅ Plan Expanded!\n\n{agent_count} agents, {task_count} tasks ready to execute.\n\nDo you want to proceed or make any changes?",
+                        reply_markup=reply_markup
+                    )
+                except Exception as fallback_err:
+                    logger.error(f"Even fallback summary failed: {fallback_err}")
             
             # Save the expanded plan as the final execution plan
             context.user_data["final_plan"] = plan
+            context.user_data["plan_confirmed"] = False  # Wait for explicit confirmation
             if base_workflow:
                 context.user_data["current_workflow_id"] = base_workflow["id"]
         else:
@@ -393,17 +555,25 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             "user_input": " ".join([m['content'] for m in chat_history])
         }
 
-        # Transition to input collection before executing
-        return await collect_required_inputs(update, context)
+        logger.info("handle_planning_chat: Plan decomposed. Waiting for confirmation.")
+        # Wait for user confirmation
+        return PLANNING_MODE
+
 
     else:
         # Still planning — show draft plan if available
+        logger.info(f"handle_planning_chat: status=PLANNING. Staying in PLANNING_MODE.")
         draft_plan = result.get("plan")
         if draft_plan:
-            draft_summary = format_plan_summary(draft_plan)
-            await context.bot.send_message(
-                chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
-            )
+            try:
+                draft_summary = format_plan_summary(draft_plan)
+                if len(draft_summary) > 4000:
+                    draft_summary = draft_summary[:3950] + "\n\n<i>... (truncated)</i>"
+                await context.bot.send_message(
+                    chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
+                )
+            except Exception as draft_err:
+                logger.error(f"Failed to send draft summary: {draft_err}")
 
     return PLANNING_MODE
 
@@ -413,8 +583,11 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
 async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Collects all required inputs from the confirmed workflow/plan before execution.
-    For predefined workflows: reads required_inputs from DB task records.
-    For dynamic plans: reads required_inputs from task objects generated by the LLM.
+    
+    SOURCE PRIORITY (to avoid LLM hallucinations on prompts):
+    1. If a base_workflow exists: ALWAYS read required_inputs from DB task records (authoritative).
+    2. Only if there is NO base_workflow (fully dynamic plan): read from final_plan tasks.
+    
     Deduplicates by key, then asks the user each question in sequence.
     Returns COLLECTING_INPUTS if questions remain, or ConversationHandler.END after execute_crew.
     """
@@ -425,8 +598,30 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
     all_inputs = []
     seen_keys = set()
 
-    if final_plan:
-        # Dynamic plan: extract required_inputs from each task object
+    if base_workflow:
+        # AUTHORITATIVE SOURCE: Predefined workflow — always read from DB task records.
+        # This guarantees correct preset prompts are shown regardless of what the LLM generated.
+        task_ids = base_workflow.get('task_ids') or []
+        logger.info(f"collect_required_inputs: Reading inputs from DB for {len(task_ids)} tasks in workflow '{base_workflow.get('name')}'")
+        for tid in task_ids:
+            t_rec = db.read_task(tid)
+            if t_rec:
+                for ri in (t_rec.get('required_inputs') or []):
+                    if isinstance(ri, dict):
+                        key = ri.get("key")
+                        if key and key not in seen_keys:
+                            all_inputs.append(ri)
+                            seen_keys.add(key)
+                            logger.info(f"  Added required input '{key}' from DB task {tid}")
+                    elif isinstance(ri, str):
+                        key = ri
+                        if key and key not in seen_keys:
+                            all_inputs.append({"key": key, "prompt": f"Please provide a value for '{key}':"})
+                            seen_keys.add(key)
+                            logger.info(f"  Added required input '{key}' (string) from DB task {tid}")
+    elif final_plan:
+        # FALLBACK: Fully dynamic (no predefined workflow) — read from LLM-generated plan.
+        logger.info(f"collect_required_inputs: No base_workflow. Reading inputs from dynamic plan ({len(final_plan.get('tasks', []))} tasks).")
         for task in final_plan.get("tasks", []):
             for ri in (task.get("required_inputs") or []):
                 if isinstance(ri, dict):
@@ -439,31 +634,15 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
                     if key and key not in seen_keys:
                         all_inputs.append({"key": key, "prompt": f"Please provide a value for '{key}':"})
                         seen_keys.add(key)
-    if base_workflow:
-        # Predefined workflow: read required_inputs from DB task records
-        task_ids = base_workflow.get('task_ids') or []
-        for tid in task_ids:
-            t_rec = db.read_task(tid)
-            if t_rec:
-                for ri in (t_rec.get('required_inputs') or []):
-                    if isinstance(ri, dict):
-                        key = ri.get("key")
-                        if key and key not in seen_keys:
-                            all_inputs.append(ri)
-                            seen_keys.add(key)
-                    elif isinstance(ri, str):
-                        key = ri
-                        if key and key not in seen_keys:
-                            all_inputs.append({"key": key, "prompt": f"Please provide a value for '{key}':"})
-                            seen_keys.add(key)
 
     context.user_data["pending_inputs"] = all_inputs
     context.user_data["collected_inputs"] = {}
 
-    logger.error(f"DEBUG_INPUTS: final_plan_tasks={len(final_plan.get('tasks', [])) if final_plan else 0}, base_workflow={bool(base_workflow)}, all_inputs={all_inputs}")
+    logger.info(f"collect_required_inputs: {len(all_inputs)} total inputs to collect: {[i['key'] for i in all_inputs]}")
 
     if not all_inputs:
         # No inputs needed — proceed directly to execution
+        logger.info("collect_required_inputs: No inputs needed, proceeding to execution.")
         await execute_crew(update, context)
         return ConversationHandler.END
 
@@ -471,6 +650,7 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
     total = len(all_inputs)
     first = all_inputs[0]
     prompt_text = first.get("prompt") or f"Please provide a value for '{first.get('key')}':"
+    logger.info(f"collect_required_inputs: Asking question 1/{total} for key '{first.get('key')}'. Transitioning to COLLECTING_INPUTS state.")
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"📝 <b>Input required (1/{total}):</b>\n\n{prompt_text}",
@@ -488,8 +668,14 @@ async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_
     pending = context.user_data.get("pending_inputs", [])
     collected = context.user_data.get("collected_inputs", {})
 
+    logger.info(f"handle_input_collection: pending={[p.get('key') for p in pending]}, collected_keys={list(collected.keys())}")
+
     if not pending:
         # No pending questions — should not happen, but handle gracefully
+        logger.warning("handle_input_collection: No pending inputs found, forcing execution.")
+        exec_ctx = context.user_data.get("execution_context", {})
+        exec_ctx.update(collected)
+        context.user_data["execution_context"] = exec_ctx
         await execute_crew(update, context)
         return ConversationHandler.END
 
@@ -498,6 +684,7 @@ async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_
     collected[current["key"]] = user_answer
     context.user_data["pending_inputs"] = pending
     context.user_data["collected_inputs"] = collected
+    logger.info(f"handle_input_collection: Recorded answer for key '{current['key']}'. Remaining: {len(pending)}")
 
     if pending:
         # Ask the next question
@@ -516,6 +703,7 @@ async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_
         exec_ctx = context.user_data.get("execution_context", {})
         exec_ctx.update(collected)
         context.user_data["execution_context"] = exec_ctx
+        logger.info(f"handle_input_collection: All inputs collected. execution_context keys: {list(exec_ctx.keys())}. Launching execute_crew.")
 
         await context.bot.send_message(
             chat_id=chat_id,
@@ -539,6 +727,11 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     final_plan = context.user_data.get("final_plan")
     execution_context = context.user_data.get("execution_context", {})
 
+    paused_state = context.user_data.get("dynamic_run_state", {})
+    start_idx = paused_state.get("start_idx", 0)
+    initial_outputs = paused_state.get("initial_task_outputs", {})
+    run_id = paused_state.get("run_id")
+
     if not workflow_id and not final_plan:
         logger.error(f"User {user_id}: Neither Workflow ID nor Dynamic Plan found.")
         await context.bot.send_message(
@@ -554,14 +747,21 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
     # Create a run record if it's a predefined workflow
-    run_id = None
-    if workflow_id:
+    if not run_id and workflow_id:
         run_id = db.create_run(workflow_id, status='running', inputs=execution_context)
+
+    # Clear any leftover paused flag so we can succeed properly if it goes through
+    if "paused" in context.user_data:
+        del context.user_data["paused"]
+        
+    # Fetch previous context if continuing a conversation
+    past_context_record = db.get_context(str(chat_id))
+    accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
 
     try:
         from core.crew_builder import (
             build_crew, build_dynamic_crew,
-            execute_run_with_resume, execute_dynamic_crew_with_memory
+            execute_run_with_resume, execute_dynamic_crew_with_memory, RateLimitError
         )
 
         # Update message to show execution started
@@ -588,14 +788,49 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             # ephemeral in-memory ChromaDB for inter-agent communication.
             if final_plan:
                 logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
-                final_result = await asyncio.to_thread(
-                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id
+                result_tuple = await asyncio.to_thread(
+                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context
                 )
             else:
                 logger.info(
                     f"User {user_id}: Kicking off Memory-Centric Crew with resume tracking for Run ID {run_id}"
                 )
-                final_result = await asyncio.to_thread(execute_run_with_resume, run_id)
+                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, None, accumulated_context)
+
+            # Unpack the (last_output, global_context) tuple
+            if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                final_result, global_context = result_tuple
+            else:
+                # Backward compatibility: if somehow a plain string is returned
+                final_result = str(result_tuple)
+                global_context = None
+
+            logger.info(f"User {user_id}: CrewAI execution finished.")
+        except RateLimitError as rle:
+            logger.warning(f"RateLimitError caught: {rle}")
+            
+            # Save state for dynamic workflows to enable resumption
+            context.user_data["paused"] = True
+            context.user_data["dynamic_run_state"] = {
+                "start_idx": rle.current_task_idx,
+                "initial_task_outputs": rle.task_outputs,
+                "run_id": run_id
+            }
+            
+            keyboard = [[InlineKeyboardButton("🔄 Try Again (Resume)", callback_data="resume_execution")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await status_msg.edit_text(
+                text=(
+                    "⚠️ <b>High Demand Error (503 UNAVAILABLE)</b>\n\n"
+                    "<i>The AI model is currently experiencing high demand. "
+                    "Don't worry, your progress has been safely saved!</i>\n\n"
+                    "Please wait a moment, then click below to resume execution from where it paused."
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+            )
+            return ConversationHandler.END
         except Exception as e:
             logger.error(f"Execution error for User {user_id}: {e}", exc_info=True)
             await status_msg.edit_text(
@@ -612,7 +847,6 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except asyncio.CancelledError:
                 pass
 
-        logger.info(f"User {user_id}: CrewAI execution finished.")
 
         # --- AUTOMATIC POST-PROCESSING: Master AI Refinement ---
         await status_msg.edit_text(
@@ -621,7 +855,10 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
         try:
-            refined_result = await asyncio.to_thread(master_ai.refine_output, str(final_result))
+            # Pass global context (all agents' outputs) to the refiner so the
+            # polished report covers the ENTIRE workflow, not just the last task.
+            refiner_input = global_context if global_context else str(final_result)
+            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input)
             logger.info(f"User {user_id}: Output refinement complete.")
         except Exception as refine_err:
             logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
@@ -631,16 +868,62 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if run_id:
             db.update_run(run_id, status='completed', result=refined_result)
 
-        # Save refined output to context memory for continuation
-        db.update_context(str(chat_id), refined_result)
+        # Save refined output and global context to memory for continuation
+        # NOTE: global_context is ALREADY a JSON string from crew_builder.py,
+        # so we must NOT json.dumps() it again (that would double-escape it).
+        accumulated_context_str = global_context if isinstance(global_context, str) else ""
+        db.update_context(str(chat_id), last_output=refined_result, accumulated_context=accumulated_context_str)
 
         # Send completion notification
         wf_name = "Dynamic Workflow"
+        expected_exports = []
         if workflow_id:
             workflow = db.read_workflow(workflow_id)
             wf_name = workflow["name"] if workflow else "Unknown"
+            expected_exports = workflow.get("expected_exports", [])
+        elif final_plan:
+            expected_exports = final_plan.get("expected_exports", [])
+
+        # Safeguard: ensure expected_exports is always a list, never a bare string
+        if isinstance(expected_exports, str):
+            try:
+                import json as _json
+                expected_exports = _json.loads(expected_exports)
+                if isinstance(expected_exports, str):
+                    expected_exports = [expected_exports]
+            except (json.JSONDecodeError, ValueError):
+                expected_exports = [expected_exports] if expected_exports else []
 
         notifier.notify_workflow_completion(wf_name, refined_result, chat_id=chat_id)
+
+        # --- GENERATE PHYSICAL FILES ---
+        generated_files = []
+        export_instructions = None
+        if workflow_id:
+            workflow_for_instructions = db.read_workflow(workflow_id)
+            if workflow_for_instructions:
+                export_instructions = workflow_for_instructions.get("export_instructions", "")
+        elif final_plan:
+            export_instructions = final_plan.get("export_instructions", "")
+
+        if expected_exports:
+            await status_msg.edit_text(
+                text="📁 <b>Generating requested files...</b>\n<i>Master AI is building your documents from the global context.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            try:
+                export_dir = os.path.join("exports", str(run_id) if run_id else f"chat_{chat_id}")
+                generated_files = await asyncio.to_thread(
+                    master_ai.generate_export_files,
+                    str(final_result),
+                    expected_exports,
+                    export_dir,
+                    global_context,
+                    export_instructions
+                )
+                logger.info(f"Generated {len(generated_files)} files for User {user_id}")
+            except Exception as e:
+                logger.error(f"File generation failed for User {user_id}: {e}")
 
         keyboard = [
             [
@@ -671,6 +954,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=reply_markup
             )
+            # SEND GENERATED DOCUMENTS
+            for file_path in generated_files:
+                if os.path.exists(file_path):
+                    with open(file_path, "rb") as f:
+                        await context.bot.send_document(
+                            chat_id=chat_id,
+                            document=f
+                        )
         except Exception as e:
             if "Can't parse entities" in str(e):
                 logger.warning(
@@ -684,6 +975,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     text=fallback_text,
                     reply_markup=reply_markup
                 )
+                # SEND GENERATED DOCUMENTS (fallback)
+                for file_path in generated_files:
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=f
+                            )
             else:
                 raise e
 
@@ -703,8 +1002,9 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await context.bot.send_message(chat_id=chat_id, text=error_message)
 
     finally:
-        # Clean up user_data for the next conversation
-        context.user_data.clear()
+        # Clean up user_data for the next conversation ONLY if not paused
+        if not context.user_data.get("paused"):
+            context.user_data.clear()
 
 
 # --- Cancellation & Navigation ---
@@ -764,6 +1064,17 @@ async def handle_restart_button(update: Update, context: ContextTypes.DEFAULT_TY
     await _send_workflow_list(update.effective_chat.id, context.bot)
 
 
+@whitelist_check
+async def resume_execution_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Try Again' button to resume a paused execution."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_reply_markup(reply_markup=None)
+    
+    # We just call execute_crew again; it will read 'dynamic_run_state'
+    await execute_crew(update, context)
+
+
 # --- Main Function ---
 
 def main() -> None:
@@ -783,6 +1094,7 @@ def main() -> None:
                     filters.Regex(r'(?i)^\s*stop\s*$') & ~filters.COMMAND,
                     cancel_conversation
                 ),
+                CallbackQueryHandler(confirm_plan_callback, pattern=r"^confirm_plan$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_planning_chat),
             ],
             COLLECTING_INPUTS: [
@@ -806,6 +1118,7 @@ def main() -> None:
     # Global callback handlers (registered after ConversationHandler)
     application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
     application.add_handler(CallbackQueryHandler(handle_restart_button, pattern=r"^restart_bot$"))
+    application.add_handler(CallbackQueryHandler(resume_execution_callback, pattern=r"^resume_execution$"))
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

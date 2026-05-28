@@ -3,10 +3,7 @@ tools_registry:
     display_name: "Local: Read File (Workspace)"
     description: "Allows agents to read files inside the agent's workspace/ folder."
     required_secrets: []
-  write_file:
-    display_name: "Local: Write File (Workspace)"
-    description: "Allows agents to create and modify files inside the agent's workspace/ folder."
-    required_secrets: []
+
   read_file_anywhere:
     display_name: "Local: Read Any File (Full PC)"
     description: "Reads any text file at any location on the computer. Read-only — no modifications allowed."
@@ -27,25 +24,14 @@ tools_registry:
     display_name: "Local: Ask Operator"
     description: "Allows the agent to pause and ask the operator a question via Telegram in case of ambiguity."
     required_secrets: []
-  create_word_document:
-    display_name: "Office: Create Word Document (.docx)"
-    description: "Creates a Word file with a title and content. Requires Telegram confirmation before creating."
-    required_secrets: []
-  edit_word_document:
-    display_name: "Office: Edit Word Document (.docx)"
-    description: "Edits an existing Word file. Shows a preview and requires Telegram confirmation."
-    required_secrets: []
-  create_excel_document:
-    display_name: "Office: Create Excel Spreadsheet (.xlsx)"
-    description: "Creates an Excel file with headers and data rows. Requires Telegram confirmation."
-    required_secrets: []
+
   take_screenshot:
     display_name: "Local: Take Screenshot"
     description: "Captures a screenshot of the monitor and sends it to the operator via Telegram."
     required_secrets: []
   manage_email:
-    display_name: "Email: Outlook Manager (Read/Send)"
-    description: "Reads, searches, and sends emails via Outlook SMTP/IMAP. Sending requires Telegram confirmation."
+    display_name: "Email: Outlook Reader (Read/Search Only)"
+    description: "Reads and searches emails via Outlook IMAP. Sending is handled by Master AI as an export option."
     required_secrets:
       - OUTLOOK_EMAIL
       - OUTLOOK_APP_PASSWORD
@@ -59,14 +45,7 @@ tools_registry:
     display_name: "Local: Calculator Tool"
     description: "Evaluates mathematical expressions safely (supports +, -, *, /, sqrt, log, etc.)."
     required_secrets: []
-  file_read_tool:
-    display_name: "Code: File Reader (.py only)"
-    description: "Reads Python code from a .py file physically located in the project root."
-    required_secrets: []
-  file_write_tool:
-    display_name: "Code: File Writer (.py only)"
-    description: "Saves Python code physically in the project as a .py file."
-    required_secrets: []
+
   python_repl_tool:
     display_name: "Code: Python REPL (Compile/Run)"
     description: "Executes Python code in a subprocess to test syntax, compile, and verify imports."
