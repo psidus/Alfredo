@@ -175,6 +175,12 @@ class VectorManager:
         `structured/` subfolder inside the database directory.
         """
         db_path = os.path.join(self.storage_dir, db_name)
+        
+        # Prevent embedding mismatch corruption: If the user creates a DB that already exists, 
+        # wipe it clean before creating it to ensure no mixed embeddings crash the system.
+        if os.path.exists(db_path):
+            shutil.rmtree(db_path)
+            
         structured_dir = os.path.join(db_path, "structured")
         os.makedirs(db_path, exist_ok=True)
 
