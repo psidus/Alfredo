@@ -2,7 +2,9 @@ import os
 import re
 import shutil
 import logging
-from typing import List, Dict, Any, Optional
+import time
+import math
+from typing import List, Dict, Any, Optional, Callable
 
 import pandas as pd
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
@@ -18,6 +20,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # File extensions that should be stored as structured CSV data, not vectorized
 TABULAR_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
+
+# --- Batch Embedding Constants ---
+DEFAULT_BATCH_SIZE = 50       # Chunks per API call
+MAX_RETRIES = 5               # Max retries per batch on transient errors
+INITIAL_BACKOFF_SECONDS = 10  # First retry wait (doubles each attempt)
 
 class VectorManager:
     """
@@ -58,7 +65,127 @@ class VectorManager:
         else:
             raise ValueError(f"Unsupported embedding provider: {provider}")
 
-    def load_documents(self, file_paths: List[str]) -> tuple[List[Any], List[str]]:
+    @staticmethod
+    def _is_retryable_error(error: Exception) -> bool:
+        """Check if an error is a transient/rate-limit error worth retrying."""
+        error_str = str(error).lower()
+        retryable_keywords = [
+            "429", "resource_exhausted", "rate limit", "quota",
+            "too many requests", "overloaded", "503", "service unavailable",
+            "timeout", "timed out", "connection", "temporarily unavailable"
+        ]
+        return any(kw in error_str for kw in retryable_keywords)
+
+    @staticmethod
+    def _extract_retry_delay(error: Exception) -> Optional[float]:
+        """Try to extract a suggested retry delay from the error message."""
+        import re as _re
+        error_str = str(error)
+        # Look for patterns like "retry in 52.284350429s" or "retryDelay": "52s"
+        match = _re.search(r'retry\s*(?:in|Delay["\s:]*)\s*["\']?(\d+\.?\d*)\s*s', error_str, _re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+        return None
+
+    def _embed_in_batches(
+        self,
+        chunks: List[Any],
+        embedding_function: Any,
+        db_path: str,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None
+    ) -> Dict[str, Any]:
+        """
+        Embeds chunks into ChromaDB in batches with automatic retry and exponential backoff.
+        
+        Args:
+            chunks: List of LangChain Document objects to embed.
+            embedding_function: The embedding function to use.
+            db_path: Path to the ChromaDB persist directory.
+            batch_size: Number of chunks per batch.
+            progress_callback: Optional callback(current_batch, total_batches, message).
+            
+        Returns:
+            Dict with 'status' ('success'/'partial'/'error'), 'embedded_count', 'failed_batches'.
+        """
+        total_chunks = len(chunks)
+        total_batches = math.ceil(total_chunks / batch_size)
+        embedded_count = 0
+        failed_batches = []
+        vector_store = None
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, total_chunks)
+            batch = chunks[start:end]
+            batch_label = f"Batch {batch_idx + 1}/{total_batches} (chunks {start+1}-{end})"
+
+            if progress_callback:
+                progress_callback(batch_idx + 1, total_batches, f"⏳ Embedding {batch_label}...")
+
+            success = False
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    if vector_store is None:
+                        # First batch: create the store
+                        vector_store = Chroma.from_documents(
+                            documents=batch,
+                            embedding=embedding_function,
+                            persist_directory=db_path
+                        )
+                    else:
+                        # Subsequent batches: add to existing store
+                        vector_store.add_documents(batch)
+
+                    embedded_count += len(batch)
+                    logging.info(f"✅ {batch_label} embedded successfully ({embedded_count}/{total_chunks} total)")
+                    success = True
+                    break  # Exit retry loop on success
+
+                except Exception as e:
+                    if self._is_retryable_error(e) and attempt < MAX_RETRIES:
+                        # Calculate wait time: use API-suggested delay or exponential backoff
+                        suggested_delay = self._extract_retry_delay(e)
+                        wait_time = suggested_delay if suggested_delay else INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                        wait_time = min(wait_time, 120)  # Cap at 2 minutes
+
+                        logging.warning(
+                            f"⚠️ {batch_label} — Attempt {attempt}/{MAX_RETRIES} failed (rate limit). "
+                            f"Retrying in {wait_time:.0f}s..."
+                        )
+                        if progress_callback:
+                            progress_callback(
+                                batch_idx + 1, total_batches,
+                                f"⏸️ Rate limit hit on {batch_label}. "
+                                f"Waiting {wait_time:.0f}s before retry ({attempt}/{MAX_RETRIES})..."
+                            )
+                        time.sleep(wait_time)
+                    else:
+                        # Non-retryable error or max retries exhausted
+                        logging.error(f"❌ {batch_label} failed permanently: {e}")
+                        failed_batches.append({
+                            "batch": batch_idx + 1,
+                            "chunks": f"{start+1}-{end}",
+                            "error": str(e)
+                        })
+                        break  # Move to next batch
+
+        # Determine final status
+        if embedded_count == total_chunks:
+            status = "success"
+        elif embedded_count > 0:
+            status = "partial"
+        else:
+            status = "error"
+
+        return {
+            "status": status,
+            "embedded_count": embedded_count,
+            "total_chunks": total_chunks,
+            "failed_batches": failed_batches
+        }
+
+    def load_documents(self, file_paths: List[str], progress_callback: Optional[Callable[[int, int, str], None]] = None) -> tuple[List[Any], List[str]]:
         """
         Loads vectorizable documents from various file types.
         CSV, XLSX, and XLS files are intentionally excluded here — they are
@@ -67,7 +194,12 @@ class VectorManager:
         """
         documents = []
         skipped_files = []
-        for file_path in file_paths:
+        total_files = len(file_paths)
+        
+        for i, file_path in enumerate(file_paths):
+            if progress_callback:
+                progress_callback(i + 1, total_files, f"📄 Extracting text from {os.path.basename(file_path)}...")
+                
             if not os.path.exists(file_path):
                 skipped_files.append(f"File not found: {file_path}")
                 continue
@@ -82,7 +214,7 @@ class VectorManager:
                 if ext == '.pdf':
                     loader = PyPDFLoader(file_path)
                     documents.extend(loader.load())
-                elif ext in ('.txt', '.md'):
+                elif ext in ('.txt', '.md', '.js', '.py', '.json', '.html', '.css'):
                     loader = TextLoader(file_path, encoding='utf-8')
                     documents.extend(loader.load())
                 elif ext == '.docx':
@@ -168,11 +300,14 @@ class VectorManager:
         df.reset_index(drop=True, inplace=True)
         return df
 
-    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> Dict[str, Any]:
+    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
         Creates a new vector database from a list of files with customizable chunking.
         Excel/CSV files are NOT vectorized — they are cleaned and saved as CSVs in a
         `structured/` subfolder inside the database directory.
+        
+        Uses batched embedding with automatic retry and exponential backoff to handle
+        API rate limits (429 errors) gracefully without losing progress.
         """
         db_path = os.path.join(self.storage_dir, db_name)
         
@@ -214,7 +349,10 @@ class VectorManager:
                 "skipped_files": all_skipped
             }
 
-        documents, load_skipped = self.load_documents(vectorizable_files)
+        if progress_callback:
+            progress_callback(0, 0, "📄 Loading documents...")
+
+        documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
         all_skipped.extend(load_skipped)
 
         if not documents:
@@ -229,6 +367,9 @@ class VectorManager:
             return {"status": "error", "message": "No valid documents could be loaded.", "skipped_files": all_skipped}
 
         # 3. Split documents into chunks
+        if progress_callback:
+            progress_callback(0, 0, f"✂️ Splitting {len(documents)} document(s) into chunks...")
+
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(documents)
 
@@ -245,23 +386,40 @@ class VectorManager:
         except Exception as e:
             return {"status": "error", "message": f"Embedding error: {str(e)}", "skipped_files": all_skipped}
 
-        # 5. Create and persist vector store
-        try:
-            Chroma.from_documents(
-                documents=chunks,
-                embedding=embedding_function,
-                persist_directory=db_path
-            )
-            summary_parts.insert(0, f"{len(documents)} document(s) → {len(chunks)} chunk(s) vectorized")
+        # 5. Embed in batches with automatic retry
+        logging.info(f"Starting batched embedding: {len(chunks)} chunks in batches of {batch_size}")
+        embed_result = self._embed_in_batches(
+            chunks=chunks,
+            embedding_function=embedding_function,
+            db_path=db_path,
+            batch_size=batch_size,
+            progress_callback=progress_callback
+        )
+
+        embedded = embed_result["embedded_count"]
+        total = embed_result["total_chunks"]
+
+        if embed_result["status"] == "success":
+            summary_parts.insert(0, f"{len(documents)} document(s) → {total} chunk(s) vectorized")
             return {
                 "status": "success",
                 "message": "Successfully processed: " + " | ".join(summary_parts),
                 "db_path": db_path,
                 "skipped_files": all_skipped
             }
-        except Exception as e:
-            logging.error(f"Error creating vector database: {e}", exc_info=True)
-            return {"status": "error", "message": f"ChromaDB error: {str(e)}", "skipped_files": all_skipped}
+        elif embed_result["status"] == "partial":
+            failed_info = "; ".join([f"Batch {fb['batch']}: {fb['error'][:80]}" for fb in embed_result["failed_batches"]])
+            summary_parts.insert(0, f"{embedded}/{total} chunks embedded (some batches failed)")
+            return {
+                "status": "partial",
+                "message": "Partially processed: " + " | ".join(summary_parts) + f" | Failures: {failed_info}",
+                "db_path": db_path,
+                "skipped_files": all_skipped,
+                "failed_batches": embed_result["failed_batches"]
+            }
+        else:
+            failed_info = embed_result["failed_batches"][0]["error"] if embed_result["failed_batches"] else "Unknown error"
+            return {"status": "error", "message": f"Embedding failed: {failed_info}", "skipped_files": all_skipped}
 
     def delete_database(self, db_name: str) -> bool:
         """
@@ -395,9 +553,10 @@ class VectorManager:
                 
         return False
 
-    def add_files_to_database(self, db_path: str, provider: str, model_name: str, file_paths: List[str], chunk_size: int = 1000, chunk_overlap: int = 200) -> Dict[str, Any]:
+    def add_files_to_database(self, db_path: str, provider: str, model_name: str, file_paths: List[str], chunk_size: int = 1000, chunk_overlap: int = 200, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
         Adds new files (tabular or vectorized) to an existing database directory.
+        Uses batched embedding with retry for rate-limit resilience.
         """
         structured_dir = os.path.join(db_path, "structured")
         all_skipped = []
@@ -414,7 +573,9 @@ class VectorManager:
         # 2. Vectorized files
         vectorizable_files = [p for p in file_paths if os.path.splitext(p)[1].lower() not in TABULAR_EXTENSIONS]
         if vectorizable_files:
-            documents, load_skipped = self.load_documents(vectorizable_files)
+            if progress_callback:
+                progress_callback(0, 0, "📄 Loading additional documents...")
+            documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
             all_skipped.extend(load_skipped)
             
             if documents:
@@ -423,9 +584,21 @@ class VectorManager:
                 if chunks:
                     try:
                         embedding_function = self._get_embedding_function(provider, model_name)
-                        vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
-                        vector_store.add_documents(chunks)
-                        summary_parts.append(f"{len(documents)} document(s) → {len(chunks)} chunk(s) vectorized")
+                        # Use batched embedding with retry
+                        embed_result = self._embed_in_batches(
+                            chunks=chunks,
+                            embedding_function=embedding_function,
+                            db_path=db_path,
+                            progress_callback=progress_callback
+                        )
+                        if embed_result["status"] in ("success", "partial"):
+                            summary_parts.append(
+                                f"{embed_result['embedded_count']}/{embed_result['total_chunks']} chunk(s) from "
+                                f"{len(documents)} document(s) vectorized"
+                            )
+                        if embed_result["failed_batches"]:
+                            for fb in embed_result["failed_batches"]:
+                                all_skipped.append(f"Batch {fb['batch']} failed: {fb['error'][:100]}")
                     except Exception as e:
                         all_skipped.append(f"Vectorization error: {str(e)}")
                         

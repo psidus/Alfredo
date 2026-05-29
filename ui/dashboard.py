@@ -400,10 +400,10 @@ def render_knowledge_base():
             
             # File Uploader supports drag & drop inherently
             uploaded_files = st.file_uploader(
-                "Drag & Drop Documents (PDF, TXT, DOCX, CSV, Excel)",
+                "Drag & Drop Documents (PDF, TXT, DOCX, CSV, Excel, Code)",
                 accept_multiple_files=True,
-                type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls'],
-                help="📄 PDF/TXT/DOCX/MD → vectorized for semantic search.  📊 CSV/XLSX/XLS → cleaned and saved as structured tables, queryable by agents via the tabular_query tool."
+                type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls', 'js', 'py', 'json', 'html', 'css'],
+                help="📄 PDF/TXT/DOCX/MD/Code → vectorized for semantic search.  📊 CSV/XLSX/XLS → cleaned and saved as structured tables, queryable by agents via the tabular_query tool."
             )
             
             # Model Selection
@@ -489,7 +489,18 @@ def render_knowledge_base():
                         # Process
                         with st.status(f"Processing {len(file_paths)} files...", expanded=True) as status:
                             st.write("Extracting text and generating embeddings...")
+                            progress_placeholder = st.empty()
                             vm = VectorManager()
+                            
+                            def ui_progress_callback(current_batch, total_batches, message):
+                                """Live progress feedback inside the st.status widget."""
+                                if total_batches > 0:
+                                    pct = int((current_batch / total_batches) * 100)
+                                    progress_placeholder.markdown(
+                                        f"**Progress: {pct}%** — {message}"
+                                    )
+                                else:
+                                    progress_placeholder.markdown(f"**{message}**")
                             
                             result = vm.create_database(
                                 db_name=safe_db_name,
@@ -497,11 +508,12 @@ def render_knowledge_base():
                                 provider=selected_provider,
                                 model_name=selected_model_name,
                                 chunk_size=chunk_size,
-                                chunk_overlap=chunk_overlap
+                                chunk_overlap=chunk_overlap,
+                                progress_callback=ui_progress_callback
                             )
                             
-                            if result["status"] == "success":
-                                # Save to metadata DB
+                            if result["status"] in ("success", "partial"):
+                                # Save to metadata DB — even partial is usable
                                 db.create_vector_db(
                                     name=safe_db_name,
                                     path=result['db_path'],
@@ -513,8 +525,12 @@ def render_knowledge_base():
                                     st.warning("Some files were skipped:")
                                     for skipped in result["skipped_files"]:
                                         st.write(f"- {skipped}")
-                                status.update(label="Embedding Complete!", state="complete")
-                                st.success(f"Database '{safe_db_name}' created successfully!")
+                                if result["status"] == "partial":
+                                    status.update(label="Embedding Partial — Some batches failed (rate limit)", state="complete")
+                                    st.warning(f"⚠️ Database '{safe_db_name}' created with partial data. You can add the missing files later via 'Manage Files'.")
+                                else:
+                                    status.update(label="Embedding Complete!", state="complete")
+                                    st.success(f"Database '{safe_db_name}' created successfully!")
                                 st.rerun()
                             else:
                                 st.error(result["message"])
