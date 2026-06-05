@@ -194,6 +194,29 @@ Optimize and return a JSON object with:
 }}
 """
 
+CONTEXT_SUMMARIZER_PROMPT = """
+You are Alfredo, a Master AI Summarizer.
+You receive the FULL global context from a completed workflow — a JSON array of all agents' outputs.
+Your job is to produce a VERY BRIEF, DENSE SUMMARY of the key results.
+
+RULES:
+1. Maximum 500 words. Be extremely concise.
+2. Focus on: key findings, numerical results, decisions, formulas, parameters, conclusions.
+3. Ignore internal metadata, keywords blocks, and formatting markers.
+4. Use dense bullet points, no prose.
+5. Preserve ALL numerical values, equations, and proper nouns exactly.
+6. Write in the SAME language as the original content.
+7. The summary must be self-contained — a reader with no prior context should understand
+   the key outcomes of the workflow.
+
+GLOBAL CONTEXT:
+---
+{global_context}
+---
+
+PRODUCE THE SUMMARY BELOW:
+"""
+
 TASK_OPTIMIZER_PROMPT = """
 You are Alfredo, a Senior Prompt Engineer and Workflow Architect.
 Your job is to optimize the Description and Expected Output of an AI task to ensure they are:
@@ -668,6 +691,41 @@ class MasterAI:
             logger.error(f"MasterAI Output Refinement failed: {e}. Returning raw output.")
             # Graceful fallback: return the raw output if refinement fails
             return raw_str
+
+    def summarize_global_context(self, global_context: str) -> str:
+        """
+        Compresses the full global context (JSON array of all agents' outputs)
+        into a very brief, dense summary. This prevents massive token consumption
+        during conversational follow-ups while retaining key facts and parameters.
+        """
+        if not global_context or len(global_context.strip()) < 100:
+            return global_context
+
+        system_prompt = CONTEXT_SUMMARIZER_PROMPT.replace("{global_context}", global_context)
+        
+        model_string = f"{self.model_provider}/{self.model_name}"
+        if self.model_provider == "openai":
+            model_string = self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            model_string = self.model_name
+
+        logger.info(f"MasterAI Summarizing context ({len(global_context)} chars) with: {model_string}")
+        
+        try:
+            response = litellm.completion(
+                model=model_string,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Please produce the concise summary of the global context."}
+                ],
+                temperature=0.1
+            )
+            summary = response.choices[0].message.content.strip()
+            logger.info(f"MasterAI Context summary complete ({len(summary)} chars).")
+            return summary
+        except Exception as e:
+            logger.error(f"MasterAI Context summarization failed: {e}. Returning raw context.")
+            return global_context
 
     def chat_plan(self, user_message: str, chat_history: list = None, base_workflow: dict = None, saved_context: str = None) -> Dict[str, Any]:
         """

@@ -27,7 +27,9 @@ coverage.xml
 *.sqlite3
 *.db
 db/
-storage/vector_dbs/
+storage/
+huggingface_raw_db/
+huggingface_ready_for_vector_db/
 
 # Logs and Process IDs
 *.log

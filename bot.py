@@ -78,6 +78,7 @@ else:
 # --- ConversationHandler States ---
 PLANNING_MODE = 1
 COLLECTING_INPUTS = 2
+AWAITING_FEEDBACK = 3
 
 
 # --- Whitelist Check Decorator ---
@@ -919,10 +920,18 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if run_id:
             db.update_run(run_id, status='completed', result=refined_result)
 
-        # Save refined output and global context to memory for continuation
-        # NOTE: global_context is ALREADY a JSON string from crew_builder.py,
-        # so we must NOT json.dumps() it again (that would double-escape it).
-        accumulated_context_str = global_context if isinstance(global_context, str) else ""
+        # Save refined output and summarize global context for conversational continuation
+        await status_msg.edit_text(
+            text="🧠 <b>Compressing context...</b>\n<i>Master AI is summarizing memory for follow-up chats.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        try:
+            accumulated_context_str = await asyncio.to_thread(master_ai.summarize_global_context, global_context)
+            logger.info(f"User {user_id}: Context summarization complete.")
+        except Exception as summarize_err:
+            logger.error(f"Context summarization failed: {summarize_err}. Using raw context.")
+            accumulated_context_str = global_context if isinstance(global_context, str) else ""
+
         db.update_context(str(chat_id), last_output=refined_result, accumulated_context=accumulated_context_str)
 
         # Send completion notification
@@ -934,6 +943,10 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             expected_exports = workflow.get("expected_exports", [])
         elif final_plan:
             expected_exports = final_plan.get("expected_exports", [])
+
+        # Save run metadata for potential feedback submission
+        context.user_data["last_run_id"] = run_id
+        context.user_data["last_workflow_name"] = wf_name
 
         # Safeguard: ensure expected_exports is always a list, never a bare string
         if isinstance(expected_exports, str):
@@ -978,8 +991,9 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         keyboard = [
             [
-                InlineKeyboardButton("🔄 Continue (Use this result)", callback_data="context_continue"),
-                InlineKeyboardButton("🆕 New Conversation", callback_data="context_new")
+                InlineKeyboardButton("🔄 Continue", callback_data="context_continue"),
+                InlineKeyboardButton("🆕 Reset", callback_data="context_new"),
+                InlineKeyboardButton("📝 Leave Feedback", callback_data="context_feedback")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1086,7 +1100,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @whitelist_check
 async def handle_context_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the user's choice to continue or start a new conversation."""
+    """Handles the user's choice to continue, reset, or leave feedback."""
     query = update.callback_query
     await query.answer()
 
@@ -1105,6 +1119,101 @@ async def handle_context_choice(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=chat_id,
             text="Perfect, I will keep the last result in mind for the next workflow! 🔄"
         )
+    elif choice == "context_feedback":
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "📝 *Leave your feedback below.*\n\n"
+                "Tell me what should have been done differently. "
+                "For example:\n"
+                "- _\"The report should use bullet points, not paragraphs\"_\n"
+                "- _\"Use metric units, never imperial\"_\n"
+                "- _\"Always include source URLs\"_\n\n"
+                "Your feedback will be saved and automatically applied "
+                "to future similar workflows.\n\n"
+                "Type your feedback now (or /skip to cancel):"
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        # Set flag so the next text message is captured as feedback
+        context.user_data["awaiting_feedback"] = True
+
+
+async def handle_feedback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Captures the user's feedback text after they clicked 'Leave Feedback'.
+    Saves it to the persistent LearningMemoryManager.
+    """
+    # Only process if we are actually awaiting feedback
+    if not context.user_data.get("awaiting_feedback"):
+        return
+
+    feedback_text = update.message.text
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    # Clear the flag immediately
+    context.user_data["awaiting_feedback"] = False
+
+    # Retrieve run metadata saved at the end of execute_crew
+    run_id = context.user_data.get("last_run_id")
+    workflow_name = context.user_data.get("last_workflow_name", "Unknown")
+
+    # Extract task descriptions and agent roles from the run record
+    task_descriptions = []
+    agent_roles = []
+    if run_id:
+        run_record = db.read_run(run_id)
+        if run_record:
+            # Parse task_outputs if available
+            task_outputs = run_record.get("task_outputs")
+            if isinstance(task_outputs, str):
+                try:
+                    task_outputs = json.loads(task_outputs)
+                except (json.JSONDecodeError, ValueError):
+                    task_outputs = None
+            if isinstance(task_outputs, dict):
+                for key, val in task_outputs.items():
+                    task_descriptions.append(str(val.get("description", key))[:200])
+                    agent_roles.append(str(val.get("agent_role", "Unknown")))
+
+    # Fallback: if we couldn't extract task info, use the workflow name
+    if not task_descriptions:
+        task_descriptions = [f"Workflow execution: {workflow_name}"]
+        agent_roles = ["General"]
+
+    # Save to persistent learning memory
+    try:
+        from core.learning_memory import get_learning_memory
+        lm = get_learning_memory()
+        success = lm.save_feedback(workflow_name, task_descriptions, agent_roles, feedback_text)
+        if success:
+            await update.message.reply_text(
+                "✅ *Feedback saved!*\n\n"
+                "Your feedback has been stored in the learning database and will be "
+                "automatically applied to similar tasks in future workflow executions.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            logger.info(f"User {user_id}: Feedback saved for workflow '{workflow_name}'")
+        else:
+            await update.message.reply_text(
+                "⚠️ Feedback could not be saved. The learning memory may not be initialized."
+            )
+    except Exception as e:
+        logger.error(f"Failed to save user feedback: {e}")
+        await update.message.reply_text(
+            f"❌ Error saving feedback: {e}"
+        )
+
+
+async def skip_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles /skip command to cancel feedback submission."""
+    if context.user_data.get("awaiting_feedback"):
+        context.user_data["awaiting_feedback"] = False
+        await update.message.reply_text("Feedback cancelled. ✅")
+    else:
+        await update.message.reply_text("Nothing to skip.")
 
 
 async def handle_restart_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1170,6 +1279,14 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
     application.add_handler(CallbackQueryHandler(handle_restart_button, pattern=r"^restart_bot$"))
     application.add_handler(CallbackQueryHandler(resume_execution_callback, pattern=r"^resume_execution$"))
+
+    # Feedback text handler — catches free text ONLY when awaiting_feedback flag is set.
+    # group=1 ensures it runs alongside (but independently from) the ConversationHandler.
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_feedback_text),
+        group=1
+    )
+    application.add_handler(CommandHandler("skip", skip_feedback))
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

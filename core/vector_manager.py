@@ -13,6 +13,7 @@ from langchain_chroma import Chroma
 
 # Embedding imports
 from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.embeddings import OllamaEmbeddings
 from core.data_manager import DataManager
 
@@ -52,7 +53,7 @@ class VectorManager:
         elif provider == 'gemini' or provider == 'google':
             # Needs langchain_google_genai
             try:
-                from langchain_google_genai import GoogleGenerativeAIEmbeddings
+                
                 api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
                 if not api_key:
                     DataManager.load_env()
@@ -72,7 +73,8 @@ class VectorManager:
         retryable_keywords = [
             "429", "resource_exhausted", "rate limit", "quota",
             "too many requests", "overloaded", "503", "service unavailable",
-            "timeout", "timed out", "connection", "temporarily unavailable"
+            "timeout", "timed out", "connection", "temporarily unavailable",
+            "readonly", "locked", "malformed"
         ]
         return any(kw in error_str for kw in retryable_keywords)
 
@@ -93,7 +95,8 @@ class VectorManager:
         embedding_function: Any,
         db_path: str,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        existing_db: bool = False
     ) -> Dict[str, Any]:
         """
         Embeds chunks into ChromaDB in batches with automatic retry and exponential backoff.
@@ -104,6 +107,7 @@ class VectorManager:
             db_path: Path to the ChromaDB persist directory.
             batch_size: Number of chunks per batch.
             progress_callback: Optional callback(current_batch, total_batches, message).
+            existing_db: If True, the DB already exists on disk (adding files).
             
         Returns:
             Dict with 'status' ('success'/'partial'/'error'), 'embedded_count', 'failed_batches'.
@@ -113,6 +117,7 @@ class VectorManager:
         embedded_count = 0
         failed_batches = []
         vector_store = None
+        db_initialized = existing_db  # If adding to existing DB, skip from_documents path
 
         for batch_idx in range(total_batches):
             start = batch_idx * batch_size
@@ -127,14 +132,24 @@ class VectorManager:
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     if vector_store is None:
-                        # First batch: create the store
-                        vector_store = Chroma.from_documents(
-                            documents=batch,
-                            embedding=embedding_function,
-                            persist_directory=db_path
-                        )
+                        if db_initialized:
+                            # Reconnect to existing ChromaDB after a DB error reset
+                            logging.info(f"🔄 Reconnecting to ChromaDB at {db_path}...")
+                            vector_store = Chroma(
+                                persist_directory=db_path,
+                                embedding_function=embedding_function
+                            )
+                            vector_store.add_documents(batch)
+                        else:
+                            # First batch ever: create the store
+                            vector_store = Chroma.from_documents(
+                                documents=batch,
+                                embedding=embedding_function,
+                                persist_directory=db_path
+                            )
+                            db_initialized = True
                     else:
-                        # Subsequent batches: add to existing store
+                        # Normal path: add to existing in-memory store
                         vector_store.add_documents(batch)
 
                     embedded_count += len(batch)
@@ -149,14 +164,21 @@ class VectorManager:
                         wait_time = suggested_delay if suggested_delay else INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1))
                         wait_time = min(wait_time, 120)  # Cap at 2 minutes
 
+                        # If it's a DB-level error (readonly/locked/malformed from OneDrive sync),
+                        # reset the vector_store so the next attempt reconnects fresh to ChromaDB.
+                        error_lower = str(e).lower()
+                        if any(kw in error_lower for kw in ("readonly", "locked", "malformed")):
+                            logging.warning(f"⚠️ {batch_label} — DB connection error, will reconnect on retry.")
+                            vector_store = None
+
                         logging.warning(
-                            f"⚠️ {batch_label} — Attempt {attempt}/{MAX_RETRIES} failed (rate limit). "
-                            f"Retrying in {wait_time:.0f}s..."
+                            f"⚠️ {batch_label} — Attempt {attempt}/{MAX_RETRIES} failed. "
+                            f"Retrying in {wait_time:.0f}s... Error: {str(e)[:120]}"
                         )
                         if progress_callback:
                             progress_callback(
                                 batch_idx + 1, total_batches,
-                                f"⏸️ Rate limit hit on {batch_label}. "
+                                f"⏸️ Retryable error on {batch_label}. "
                                 f"Waiting {wait_time:.0f}s before retry ({attempt}/{MAX_RETRIES})..."
                             )
                         time.sleep(wait_time)
@@ -318,6 +340,20 @@ class VectorManager:
             
         structured_dir = os.path.join(db_path, "structured")
         os.makedirs(db_path, exist_ok=True)
+        
+        # Save advanced parameters to config.json for future consistency when adding files
+        config_path = os.path.join(db_path, "config.json")
+        try:
+            import json
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "chunk_size": chunk_size,
+                    "chunk_overlap": chunk_overlap,
+                    "provider": provider,
+                    "model_name": model_name
+                }, f, indent=4)
+        except Exception as e:
+            logging.error(f"Could not save config.json to {db_path}: {e}")
 
         all_skipped: List[str] = []
         summary_parts: List[str] = []
@@ -553,6 +589,22 @@ class VectorManager:
                 
         return False
 
+    def get_database_config(self, db_path: str) -> Dict[str, Any]:
+        """
+        Reads advanced parameters (chunk_size, chunk_overlap) from config.json.
+        Returns defaults if not found.
+        """
+        config_path = os.path.join(db_path, "config.json")
+        try:
+            import json
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Error reading config.json from {db_path}: {e}")
+            
+        return {"chunk_size": 1000, "chunk_overlap": 200}
+
     def add_files_to_database(self, db_path: str, provider: str, model_name: str, file_paths: List[str], chunk_size: int = 1000, chunk_overlap: int = 200, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
         Adds new files (tabular or vectorized) to an existing database directory.
@@ -584,12 +636,13 @@ class VectorManager:
                 if chunks:
                     try:
                         embedding_function = self._get_embedding_function(provider, model_name)
-                        # Use batched embedding with retry
+                        # Use batched embedding with retry (existing_db=True since we're adding to an existing DB)
                         embed_result = self._embed_in_batches(
                             chunks=chunks,
                             embedding_function=embedding_function,
                             db_path=db_path,
-                            progress_callback=progress_callback
+                            progress_callback=progress_callback,
+                            existing_db=True
                         )
                         if embed_result["status"] in ("success", "partial"):
                             summary_parts.append(

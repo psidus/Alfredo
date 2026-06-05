@@ -122,6 +122,10 @@ def render_knowledge_base():
     st.header("Add Database (Vector Knowledge Base)")
     st.markdown("Create local vector databases from your documents to provide context to agents.")
     
+    if "vdb_success_msg" in st.session_state:
+        st.success(st.session_state.vdb_success_msg)
+        del st.session_state.vdb_success_msg
+    
     col_list, col_main = st.columns([1, 2.5])
     
     with col_list:
@@ -147,7 +151,12 @@ def render_knowledge_base():
                         if csv_count:
                             label += f" 📊 ({csv_count} table{'s' if csv_count > 1 else ''})"
                         st.markdown(label)
-                    st.caption(f"Provider: {vdb['provider']} | Model: {vdb['model_name']}")
+                    if folder_exists:
+                        db_config = vm.get_database_config(vdb['path'])
+                        st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
+                    else:
+                        st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
+                        
                     if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
                         if folder_exists:
                             vm.delete_database(vdb['name'])
@@ -202,9 +211,32 @@ def render_knowledge_base():
                         imp_models["Gemini / gemini-embedding-2"] = {"provider": "gemini", "model_name": "models/gemini-embedding-2"}
                         imp_models["Gemini / gemini-embedding-001"] = {"provider": "gemini", "model_name": "models/gemini-embedding-001"}
 
+                    # Read model and provider from config.json if available
+                    disc_config = vm.get_database_config(disc_path)
+                    disc_provider = disc_config.get("provider")
+                    disc_model = disc_config.get("model_name")
+                    matched_key = None
+
+                    if disc_provider and disc_model:
+                        st.markdown(f"✨ **Detected Embedding:** `{disc_provider} / {disc_model}`")
+                        # Try to match detected provider/model with options in imp_models
+                        for k, v in imp_models.items():
+                            if v["provider"] == disc_provider.lower() and v["model_name"] == disc_model:
+                                matched_key = k
+                                break
+                        
+                        if not matched_key:
+                            custom_key = f"Detected: {disc_provider.capitalize()} / {disc_model}"
+                            imp_models = {custom_key: {"provider": disc_provider.lower(), "model_name": disc_model}, **imp_models}
+                            matched_key = custom_key
+
+                    options = list(imp_models.keys())
+                    default_idx = options.index(matched_key) if matched_key in options else 0
+
                     sel = st.selectbox(
                         "Embedding model used to create this DB",
-                        options=list(imp_models.keys()),
+                        options=options,
+                        index=default_idx,
                         key=f"disc_model_{disc_name}"
                     )
                     if st.button("Import", key=f"disc_import_{disc_name}", use_container_width=True):
@@ -312,11 +344,14 @@ def render_knowledge_base():
                                     
             # Form to add files to this database
             st.markdown("### ➕ Add Files to this Database")
+            db_config = vm.get_database_config(vdb['path'])
+            st.caption(f"Files will be vectorized using **{vdb['provider']} / {vdb['model_name']}** with Chunk Size: **{db_config['chunk_size']}** and Overlap: **{db_config['chunk_overlap']}**.")
+            
             with st.form("add_files_to_db_form"):
                 new_files = st.file_uploader(
                     "Select documents/spreadsheets to add",
                     accept_multiple_files=True,
-                    type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls'],
+                    type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls', 'js', 'py', 'json', 'html', 'css'],
                     key="manage_upload_files"
                 )
                 
@@ -328,35 +363,92 @@ def render_knowledge_base():
                     if not new_files:
                         st.warning("Please upload at least one file.")
                     else:
-                        with st.spinner("Processing files..."):
-                            temp_paths = []
-                            for f in new_files:
-                                suffix = os.path.splitext(f.name)[1]
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_f:
-                                    temp_f.write(f.read())
-                                    temp_paths.append(temp_f.name)
-                                    
-                            try:
-                                res = vm.add_files_to_database(
-                                    db_path=vdb['path'],
-                                    provider=vdb['provider'],
-                                    model_name=vdb['model_name'],
-                                    file_paths=temp_paths
-                                )
-                                for p in temp_paths:
+                        # --- Deduplication: get existing file names ---
+                        existing_files = vm.get_database_files(vdb['path'], vdb['provider'], vdb['model_name'])
+                        existing_vectorized_basenames = {os.path.basename(f) for f in existing_files.get('vectorized', [])}
+                        existing_structured_basenames = set(existing_files.get('structured', []))
+                        
+                        # Save uploaded files preserving original names (not random temp names)
+                        temp_dir_obj = tempfile.mkdtemp()
+                        temp_paths = []
+                        skipped_duplicates = []
+                        
+                        for f in new_files:
+                            original_name = f.name
+                            ext = os.path.splitext(original_name)[1].lower()
+                            
+                            # Check for duplicates
+                            if ext in ('.csv', '.xlsx', '.xls'):
+                                # For tabular: check sanitized name against structured/
+                                safe_base = re.sub(r'[^a-z0-9_-]', '_', os.path.splitext(original_name)[0].lower()).strip('_')
+                                if ext == '.csv':
+                                    check_name = f"{safe_base}.csv"
+                                else:
+                                    check_name = safe_base  # Excel sheets get appended, partial match
+                                if any(check_name in s for s in existing_structured_basenames):
+                                    skipped_duplicates.append(original_name)
+                                    continue
+                            else:
+                                # For vectorized: check original filename against source basenames
+                                if original_name in existing_vectorized_basenames:
+                                    skipped_duplicates.append(original_name)
+                                    continue
+                            
+                            temp_path = os.path.join(temp_dir_obj, original_name)
+                            with open(temp_path, "wb") as out_f:
+                                out_f.write(f.read())
+                            temp_paths.append(temp_path)
+                        
+                        if skipped_duplicates:
+                            st.warning(f"⏭️ Skipped {len(skipped_duplicates)} duplicate(s) already in DB: {', '.join(skipped_duplicates)}")
+                        
+                        if not temp_paths:
+                            st.info("All uploaded files are already in the database. Nothing to add.")
+                        else:
+                            with st.status(f"Adding {len(temp_paths)} new file(s) to database...", expanded=True) as add_status:
+                                st.write("Extracting text and generating embeddings...")
+                                add_progress = st.empty()
+                                
+                                def add_progress_callback(current_batch, total_batches, message):
+                                    """Live progress feedback for Add Files."""
+                                    if total_batches > 0:
+                                        pct = int((current_batch / total_batches) * 100)
+                                        add_progress.markdown(f"**Progress: {pct}%** — {message}")
+                                    else:
+                                        add_progress.markdown(f"**{message}**")
+                                
+                                try:
+                                    res = vm.add_files_to_database(
+                                        db_path=vdb['path'],
+                                        provider=vdb['provider'],
+                                        model_name=vdb['model_name'],
+                                        file_paths=temp_paths,
+                                        chunk_size=db_config['chunk_size'],
+                                        chunk_overlap=db_config['chunk_overlap'],
+                                        progress_callback=add_progress_callback
+                                    )
+                                    # Clean up temp files
+                                    for p in temp_paths:
+                                        try:
+                                            os.remove(p)
+                                        except Exception:
+                                            pass
                                     try:
-                                        os.remove(p)
+                                        os.rmdir(temp_dir_obj)
                                     except Exception:
                                         pass
-                                        
-                                if res.get('status') == 'success':
-                                    st.success(res.get('message'))
-                                    st.toast("Files added successfully!", icon="✅")
-                                    st.rerun()
-                                else:
-                                    st.error(res.get('message'))
-                            except Exception as add_err:
-                                st.error(f"Error adding files: {add_err}")
+                                            
+                                    if res.get('status') == 'success':
+                                        add_status.update(label="Files added successfully!", state="complete")
+                                        st.success(res.get('message'))
+                                        st.toast("Files added successfully!", icon="✅")
+                                        st.rerun()
+                                    else:
+                                        add_status.update(label="Error adding files", state="error")
+                                        st.error(res.get('message'))
+                                except Exception as add_err:
+                                    add_status.update(label="Error adding files", state="error")
+                                    st.error(f"Error adding files: {add_err}")
             st.divider()
 
         if "query_vdb" in st.session_state:
@@ -396,13 +488,14 @@ def render_knowledge_base():
 
         with st.form("create_vdb_form"):
             st.subheader("Create New Database")
-            db_name = st.text_input("Database Name", placeholder="e.g. project_docs_2026")
+            db_name = st.text_input("Database Name", placeholder="e.g. project_docs_2026", key="create_vdb_name")
             
             # File Uploader supports drag & drop inherently
             uploaded_files = st.file_uploader(
                 "Drag & Drop Documents (PDF, TXT, DOCX, CSV, Excel, Code)",
                 accept_multiple_files=True,
                 type=['pdf', 'txt', 'md', 'docx', 'csv', 'xlsx', 'xls', 'js', 'py', 'json', 'html', 'css'],
+                key="create_vdb_files",
                 help="📄 PDF/TXT/DOCX/MD/Code → vectorized for semantic search.  📊 CSV/XLSX/XLS → cleaned and saved as structured tables, queryable by agents via the tabular_query tool."
             )
             
@@ -411,13 +504,10 @@ def render_knowledge_base():
             env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
             current_env = dotenv_values(env_path)
             
-            available_embedding_models = {
-                "Local (Ollama) / nomic-embed-text": {"provider": "ollama", "model_name": "nomic-embed-text"},
-                "Local (Ollama) / mxbai-embed-large": {"provider": "ollama", "model_name": "mxbai-embed-large"},
-                "Local (Ollama) / all-minilm": {"provider": "ollama", "model_name": "all-minilm"}
-            }
+            # Build embedding model dropdown: cloud models FIRST (best default), then local
+            available_embedding_models = {}
             
-            # Dynamically load from synced models
+            # 1. Dynamically load CLOUD models first (so they become the default when available)
             model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
             if os.path.exists(model_map_path):
                 model_config = DataManager.load_yaml(model_map_path)
@@ -440,6 +530,11 @@ def render_knowledge_base():
                             elif "google" in v_prov or "gemini" in v_prov: v_prov = "gemini"
                             
                             available_embedding_models[display_name] = {"provider": v_prov, "model_name": em}
+            
+            # 2. Then add local Ollama models as fallback options
+            available_embedding_models["Local (Ollama) / nomic-embed-text"] = {"provider": "ollama", "model_name": "nomic-embed-text"}
+            available_embedding_models["Local (Ollama) / mxbai-embed-large"] = {"provider": "ollama", "model_name": "mxbai-embed-large"}
+            available_embedding_models["Local (Ollama) / all-minilm"] = {"provider": "ollama", "model_name": "all-minilm"}
                 
             available_embedding_models["Other (Manual Input)"] = {"provider": "custom", "model_name": "custom"}
                 
@@ -488,6 +583,9 @@ def render_knowledge_base():
                             
                         # Process
                         with st.status(f"Processing {len(file_paths)} files...", expanded=True) as status:
+                            st.markdown(f"**🧠 Model in use:** `{selected_provider} / {selected_model_name}`")
+                            st.info("💡 **How to Stop/Pause:** To stop the embedding process, click the 'Stop' (🛑) button at the top right of the screen. Your progress is saved after every batch, so you won't lose data. You can resume later by clicking 'Manage Files' -> 'Add Files'.")
+                            
                             st.write("Extracting text and generating embeddings...")
                             progress_placeholder = st.empty()
                             vm = VectorManager()
@@ -526,11 +624,15 @@ def render_knowledge_base():
                                     for skipped in result["skipped_files"]:
                                         st.write(f"- {skipped}")
                                 if result["status"] == "partial":
-                                    status.update(label="Embedding Partial — Some batches failed (rate limit)", state="complete")
-                                    st.warning(f"⚠️ Database '{safe_db_name}' created with partial data. You can add the missing files later via 'Manage Files'.")
+                                    st.session_state.vdb_success_msg = f"⚠️ Database '{safe_db_name}' created with partial data. You can add the missing files later via 'Manage Files'."
                                 else:
-                                    status.update(label="Embedding Complete!", state="complete")
-                                    st.success(f"Database '{safe_db_name}' created successfully!")
+                                    st.session_state.vdb_success_msg = f"✅ Database '{safe_db_name}' created successfully!"
+                                
+                                # Clear the inputs to reset the UI
+                                st.session_state.create_vdb_name = ""
+                                if "create_vdb_files" in st.session_state:
+                                    del st.session_state["create_vdb_files"]
+                                
                                 st.rerun()
                             else:
                                 st.error(result["message"])

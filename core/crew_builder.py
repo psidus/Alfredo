@@ -388,6 +388,17 @@ def _build_task(task_id, agents_cache):
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
 
+    # --- LEARNING MEMORY INJECTION ---
+    try:
+        from core.learning_memory import get_learning_memory
+        lm = get_learning_memory()
+        learned_feedback = lm.get_relevant_feedback(task_record['description'])
+        if learned_feedback:
+            task_description += learned_feedback
+            logging.info(f"Injected learning feedback into task {task_id}")
+    except Exception as lm_err:
+        logging.warning(f"Learning memory injection failed for task {task_id}: {lm_err}")
+
     # Enhance expected_output to enforce structured format
     # Enhance expected_output for Vector DB structured format
     base_expected = task_record['expected_output']
@@ -886,6 +897,17 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
 
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
+        # --- LEARNING MEMORY INJECTION ---
+        try:
+            from core.learning_memory import get_learning_memory
+            lm = get_learning_memory()
+            learned_feedback = lm.get_relevant_feedback(task_data['description'])
+            if learned_feedback:
+                task_description += learned_feedback
+                logging.info(f"Injected learning feedback into dynamic task for agent {agent_role}")
+        except Exception as lm_err:
+            logging.warning(f"Learning memory injection failed: {lm_err}")
+
         # Enhance expected_output for structured format
         # Enhance expected_output for Vector DB structured format
         base_expected = task_data.get('expected_output', 'Task Output')
@@ -1060,6 +1082,17 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         combined_tools = list(set(agent_t + task_t))
         task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], is_local_model)
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+
+        # --- LEARNING MEMORY INJECTION ---
+        try:
+            from core.learning_memory import get_learning_memory
+            lm = get_learning_memory()
+            learned_feedback = lm.get_relevant_feedback(task_data['description'])
+            if learned_feedback:
+                task_description += learned_feedback
+                logging.info(f"Injected learning feedback into memory-centric task for agent {agent_role}")
+        except Exception as lm_err:
+            logging.warning(f"Learning memory injection failed: {lm_err}")
 
         # Inject user inputs
         for k, v in execution_context.items():
