@@ -137,44 +137,49 @@ def render_knowledge_base():
         if not vector_dbs:
             st.info("No databases created yet.")
         else:
-            for vdb in vector_dbs:
+            # Display cards in a 2-column grid
+            grid_cols = st.columns(2)
+            for i, vdb in enumerate(vector_dbs):
                 folder_exists = os.path.isdir(vdb['path'])
-                with st.container(border=True):
-                    if not folder_exists:
-                        st.markdown(f"**{vdb['name']}** ⚠️")
-                        st.caption("Missing on disk — folder was deleted externally.")
-                    else:
-                        # Count structured CSVs if present
-                        structured_dir = os.path.join(vdb['path'], "structured")
-                        csv_count = len([f for f in os.listdir(structured_dir) if f.endswith('.csv')]) if os.path.isdir(structured_dir) else 0
-                        label = f"**{vdb['name']}**"
-                        if csv_count:
-                            label += f" 📊 ({csv_count} table{'s' if csv_count > 1 else ''})"
-                        st.markdown(label)
-                    if folder_exists:
-                        db_config = vm.get_database_config(vdb['path'])
-                        st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
-                    else:
-                        st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
+                with grid_cols[i % 2]:
+                    with st.container(height=350, border=True):
+                        short_name = vdb['name'][:25] + "..." if len(vdb['name']) > 25 else vdb['name']
+                        if not folder_exists:
+                            st.markdown(f"**{short_name}** ⚠️")
+                            st.caption("Missing on disk — folder was deleted externally.")
+                        else:
+                            # Count structured CSVs if present
+                            structured_dir = os.path.join(vdb['path'], "structured")
+                            csv_count = len([f for f in os.listdir(structured_dir) if f.endswith('.csv')]) if os.path.isdir(structured_dir) else 0
+                            label = f"**{short_name}**"
+                            if csv_count:
+                                label += f" 📊 ({csv_count})"
+                            st.markdown(label)
                         
-                    if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
                         if folder_exists:
-                            vm.delete_database(vdb['name'])
-                        db.delete_vector_db(vdb['id'])
-                        st.toast(f"Database {vdb['name']} removed", icon="🗑️")
-                        st.rerun()
+                            db_config = vm.get_database_config(vdb['path'])
+                            st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
+                        else:
+                            st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
+                            
+                        if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
+                            if folder_exists:
+                                vm.delete_database(vdb['name'])
+                            db.delete_vector_db(vdb['id'])
+                            st.toast(f"Database {vdb['name']} removed", icon="🗑️")
+                            st.rerun()
 
-                    if folder_exists and st.button("Manage Files", key=f"manage_vdb_{vdb['id']}", use_container_width=True):
-                        st.session_state.manage_vdb = vdb
-                        if "query_vdb" in st.session_state:
-                            del st.session_state.query_vdb
-                        st.rerun()
+                        if folder_exists and st.button("Manage Files", key=f"manage_vdb_{vdb['id']}", use_container_width=True):
+                            st.session_state.manage_vdb = vdb
+                            if "query_vdb" in st.session_state:
+                                del st.session_state.query_vdb
+                            st.rerun()
 
-                    if folder_exists and st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
-                        st.session_state.query_vdb = vdb
-                        if "manage_vdb" in st.session_state:
-                            del st.session_state.manage_vdb
-                        st.rerun()
+                        if folder_exists and st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
+                            st.session_state.query_vdb = vdb
+                            if "manage_vdb" in st.session_state:
+                                del st.session_state.manage_vdb
+                            st.rerun()
 
         # --- Auto-Discovery: Detect manually added DB folders not in metadata ---
         registered_names = {vdb['name'] for vdb in vector_dbs}
@@ -628,10 +633,8 @@ def render_knowledge_base():
                                 else:
                                     st.session_state.vdb_success_msg = f"✅ Database '{safe_db_name}' created successfully!"
                                 
-                                # Clear the inputs to reset the UI
-                                st.session_state.create_vdb_name = ""
-                                if "create_vdb_files" in st.session_state:
-                                    del st.session_state["create_vdb_files"]
+                                # We don't manually clear the form inputs here to avoid StreamlitAPIException.
+                                # The user can manually clear the form if they want to create another DB.
                                 
                                 st.rerun()
                             else:
@@ -1027,7 +1030,7 @@ def render_agent_caserma():
                 if i + j < len(agents):
                     agent = agents[i + j]
                     with cols[j]:
-                        with st.container(border=True):
+                        with st.container(height=380, border=True):
                             avatar_url = get_agent_avatar_url(agent)
                             
                             # st.image handles external URLs
@@ -1037,8 +1040,11 @@ def render_agent_caserma():
                             with col_img:
                                 st.image(avatar_url, width=100)
                             
-                            st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px; font-size: 18px;'>{agent['name']}</h4>", unsafe_allow_html=True)
-                            st.markdown(f"<p style='text-align: center; color: gray; font-size: 14px; margin-top: 0px;'>{agent['role']}</p>", unsafe_allow_html=True)
+                            short_name = agent['name'][:20] + "..." if len(agent['name']) > 20 else agent['name']
+                            short_role = agent['role'][:30] + "..." if len(agent['role']) > 30 else agent['role']
+                            
+                            st.markdown(f"<h4 style='text-align: center; margin-bottom: 0px; font-size: 18px;' title='{html.escape(agent['name'])}'>{short_name}</h4>", unsafe_allow_html=True)
+                            st.markdown(f"<p style='text-align: center; color: gray; font-size: 14px; margin-top: 0px;' title='{html.escape(agent['role'])}'>{short_role}</p>", unsafe_allow_html=True)
                             
                             with st.expander("Details"):
                                 backstory_content = agent['backstory'] or ""
