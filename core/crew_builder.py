@@ -610,109 +610,90 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     agents_cache = {}
     last_output = ""
     if start_idx > 0:
-        prev_task_id = task_ids[start_idx - 1]
-        last_output = task_outputs.get(str(prev_task_id), "")
+        prev_step = task_ids[start_idx - 1]
+        if isinstance(prev_step, dict) and prev_step.get("type") == "batch_loop":
+            last_inner = prev_step.get("task_ids", [])[-1]
+            last_output = task_outputs.get(str(last_inner), "")
+        else:
+            prev_task_id = prev_step if isinstance(prev_step, int) else prev_step.get("task_id")
+            last_output = task_outputs.get(str(prev_task_id), "")
 
-    for i in range(start_idx, len(task_ids)):
-        task_id = task_ids[i]
+    def _execute_task_instance(task_id, current_inputs, log_msg):
+        nonlocal last_output, task_outputs, memory_manager
 
         if status_callback:
             try:
-                status_callback(f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})...")
+                status_callback(log_msg)
             except Exception:
                 pass
 
-        # Build task object (and agent)
         task_obj = _build_task(task_id, agents_cache)
-
-        # --- MEMORY-CENTRIC: Inject memory tools into agent & task ---
         _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
 
-        # --- Placeholder resolution (task names, IDs, aliases) ---
-        # --- Placeholder resolution (task names, IDs, aliases) ---
         def normalize_name(s: str) -> str:
-            if not s:
-                return ""
+            if not s: return ""
             s_norm = s.lower().replace('_', ' ').replace('-', ' ')
             return " ".join(s_norm.split())
 
         workflow_tasks = []
-        for tid in task_ids:
-            try:
-                t_rec = db.read_task(tid)
-                if t_rec:
-                    workflow_tasks.append(t_rec)
-                else:
+        for step in task_ids:
+            tids = step.get('task_ids', []) if isinstance(step, dict) and step.get('type') == 'batch_loop' else [step if isinstance(step, int) else step.get('task_id')]
+            for tid in tids:
+                try:
+                    t_rec = db.read_task(tid)
+                    if t_rec: workflow_tasks.append(t_rec)
+                    else: workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
+                except Exception:
                     workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
-            except Exception:
-                workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
 
         lookup = {}
-        for idx in range(i):
-            t_rec = workflow_tasks[idx]
-            t_id = t_rec['id']
+        for t_rec in workflow_tasks:
+            tid = t_rec['id']
             t_name = t_rec.get('name')
-            t_output = task_outputs.get(str(t_id), "")
+            t_out = task_outputs.get(str(tid), "")
+            if t_out:
+                if t_name:
+                    norm = normalize_name(t_name)
+                    if norm: lookup[norm] = t_out
+                lookup[f"task {tid}"] = t_out
+                lookup[f"task_{tid}"] = t_out
+                lookup[str(tid)] = t_out
 
-            if t_name:
-                norm = normalize_name(t_name)
-                if norm:
-                    lookup[norm] = t_output
-
-            lookup[f"task {t_id}"] = t_output
-            lookup[f"task_{t_id}"] = t_output
-            lookup[str(t_id)] = t_output
-
-        if i > 0:
-            prev_t_id = task_ids[i - 1]
-            prev_output = task_outputs.get(str(prev_t_id), "")
-            lookup["previous task"] = prev_output
-            lookup["previous_task"] = prev_output
-            lookup["previous"] = prev_output
-            lookup["task precedente"] = prev_output
-            lookup["task_precedente"] = prev_output
+        lookup["previous task"] = last_output
+        lookup["previous_task"] = last_output
+        lookup["previous"] = last_output
+        lookup["task precedente"] = last_output
+        lookup["task_precedente"] = last_output
 
         pattern = re.compile(r'\{task:([^\}]+)\}|\{([^\}]+)\}')
-
         def repl(match):
             g1 = match.group(1)
             g2 = match.group(2)
             key = g1 if g1 is not None else g2
-            if not key:
-                return match.group(0)
+            if not key: return match.group(0)
             norm_key = normalize_name(key)
-            if norm_key in lookup:
-                return lookup[norm_key]
+            if norm_key in lookup: return lookup[norm_key]
             lower_key = key.strip().lower()
-            if lower_key in lookup:
-                return lookup[lower_key]
+            if lower_key in lookup: return lookup[lower_key]
             return match.group(0)
 
         def apply_interpolation(text: str) -> str:
-            if not text:
-                return text
-            for k, v in inputs.items():
+            if not text: return text
+            for k, v in current_inputs.items():
                 text = text.replace(f"{{{k}}}", str(v))
-            text = text.replace("{user_input}", inputs.get('user_input', ''))
+            text = text.replace("{user_input}", current_inputs.get('user_input', ''))
             text = text.replace("{previous_result}", last_output)
             text = text.replace("{context}", last_output)
-            text = text.replace("{flexible_input}", inputs.get('user_input', last_output))
+            text = text.replace("{flexible_input}", current_inputs.get('user_input', last_output))
             text = pattern.sub(repl, text)
-            # Safeguard: Prevent CrewAI from crashing on unreplaced template variables
-            # Convert {variable} to <variable> so the agent sees it conceptually and can search for it
             text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', text)
             return text
 
-        # Apply interpolations to both description and expected_output
         original_desc = apply_interpolation(task_obj.description)
         original_expected = apply_interpolation(task_obj.expected_output)
 
-        # --- MEMORY-CENTRIC: Replace prompt-stuffing with Memory Index Table ---
-        # Instead of appending the full text of every previous output (which
-        # consumes O(n²) tokens across n tasks), we append only a compact
-        # index table.  The agent uses read_atomic_memory to fetch details.
-        if i > 0:
-            index_table = memory_manager.get_memory_index_table()
+        index_table = memory_manager.get_memory_index_table()
+        if "EPHEMERAL WORKSPACE MEMORY INDEX" not in index_table:
             context_str = (
                 "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
                 "Results from previous steps are stored in the ephemeral in-memory database.\n"
@@ -726,54 +707,78 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         task_obj.description = original_desc
         task_obj.expected_output = original_expected
 
-        # Create a single-task Crew and execute
-        single_task_crew = Crew(
-            agents=[task_obj.agent],
-            tasks=[task_obj],
-            verbose=True,
-            process='sequential'
-        )
+        single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
 
         try:
             result = single_task_crew.kickoff()
         except Exception as e:
             err_str = str(e).lower()
             if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
-                logging.warning(f"Rate limit / 503 encountered at task {i}: {e}")
-                # Save state to DB before raising so it's safely stored
-                db.update_run(run_id, status='paused', result=str(e), current_task_idx=i, task_outputs=task_outputs)
-                raise RateLimitError(f"Model high demand error (503): {e}", i, task_outputs)
+                logging.warning(f"Rate limit / 503 encountered: {e}")
+                raise RateLimitError(f"Model high demand error (503): {e}", 0, task_outputs)
             elif "none or empty" in err_str:
-                logging.warning(f"Agent reached max iterations or hallucinatory loop: {e}")
-                raise RuntimeError(f"Agent failed to generate a valid output (likely hit max iterations due to loop or missing tools). Please check the tools available. Original error: {e}")
+                raise RuntimeError(f"Agent failed to generate a valid output: {e}")
             else:
                 raise e
+        
         last_output = str(result)
-
-        # --- MEMORY-CENTRIC: Auto-save task output to ephemeral memory ---
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, last_output, agent_role)
 
-        # Handle Human Validation
-        t_rec = workflow_tasks[i]
-        if chat_id and t_rec.get('human_validation'):
+        t_rec = db.read_task(task_id)
+        if t_rec and chat_id and t_rec.get('human_validation'):
             from core.master_ai import MasterAI
             from core.human_in_the_loop import request_human_input
             master_ai = MasterAI()
-            
-            logging.info(f"Task {task_id} requires human validation. Pausing execution.")
             question = master_ai.format_validation_request(last_output)
             user_feedback = request_human_input(chat_id, question)
-            
             if user_feedback and user_feedback != "SYSTEM_ABORT":
-                logging.info(f"Processing human feedback for task {task_id}...")
                 last_output = master_ai.process_validation_feedback(last_output, user_feedback)
-                # Overwrite memory with the human-edited output
                 _auto_save_to_memory(memory_manager, task_id, last_output, f"{agent_role} (Human Edited)")
 
-        # Persist to DB for resume support (fallback)
         task_outputs[str(task_id)] = last_output
-        db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
+        return last_output
+
+    for i in range(start_idx, len(task_ids)):
+        step_def = task_ids[i]
+        is_batch = isinstance(step_def, dict) and step_def.get('type') == 'batch_loop'
+
+        if not is_batch:
+            task_id = step_def if isinstance(step_def, int) else step_def.get('task_id')
+            log_msg = f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})..."
+            _execute_task_instance(task_id, inputs, log_msg)
+            db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
+        else:
+            batch_tasks = step_def.get('task_ids', [])
+            batch_size = int(step_def.get('batch_size', 5))
+            
+            data_str = last_output
+            try:
+                json_match = re.search(r'\[.*\]', data_str, re.DOTALL)
+                if json_match:
+                    items = json.loads(json_match.group(0))
+                else:
+                    items = json.loads(data_str)
+                if not isinstance(items, list):
+                    raise ValueError("Extracted data is not a JSON array")
+            except Exception as e:
+                logging.error(f"Failed to parse source data for batch loop: {e}")
+                items = [{"raw_data": data_str}]
+            
+            for batch_start in range(0, len(items), batch_size):
+                batch_chunk = items[batch_start:batch_start+batch_size]
+                chunk_str = json.dumps(batch_chunk)
+                
+                batch_inputs = inputs.copy()
+                batch_inputs['current_batch'] = chunk_str
+                
+                memory_manager.clear_memory()
+                
+                for b_idx, inner_task_id in enumerate(batch_tasks):
+                    log_msg = f"Executing Batch Loop {i+1}/{len(task_ids)} - Chunk {batch_start//batch_size + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
+                    _execute_task_instance(inner_task_id, batch_inputs, log_msg)
+            
+            db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
 
     # --- Build global context dump for Master AI ---
     import json as _json

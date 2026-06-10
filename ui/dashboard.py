@@ -1960,98 +1960,96 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
 
         
         st.markdown("---")
-        st.markdown("**📋 Select Tasks — Grouped by Agent**")
+        st.markdown("**📋 Add Workflow Blocks**")
         
-        if not agents:
-            st.info("No agents available.")
-        else:
-            # Determine currently selected agent for the UI
-            agent_options = [f"{a['name']} - {a['role']}" for a in agents]
-            current_agent = agents[0]
-            if "wf_agent_selectbox" in st.session_state:
-                sel_val = st.session_state.wf_agent_selectbox
-                current_agent = next((a for a in agents if f"{a['name']} - {a['role']}" == sel_val), agents[0])
-            
-            col_agent, col_tasks = st.columns([1, 2])
-            
-            with col_agent:
-                # Avatar above
-                avatar_url = get_agent_avatar_url(current_agent)
-                st.markdown("<div style='display: flex; justify-content: center; margin-bottom: 10px;'>", unsafe_allow_html=True)
-                st.image(avatar_url, width=100)
-                st.markdown("</div>", unsafe_allow_html=True)
-                
-                # Dropdown below
-                st.selectbox("Select Agent", options=agent_options, key="wf_agent_selectbox")
-            
-            with col_tasks:
-                st.markdown(f"**Tasks for {current_agent['name']}**")
-                agent_tasks = tasks_by_agent.get(current_agent['id'], [])
-                if not agent_tasks:
-                    st.info("No tasks assigned to this agent.")
+        block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], horizontal=True)
+
+        if block_type == "Single Task":
+            if not agents:
+                st.info("No agents available.")
+            else:
+                agent_options = {f"{a['name']} - {a['role']}": a['id'] for a in agents}
+                sel_agent_str = st.selectbox("Select Agent", list(agent_options.keys()), key="wf_single_agent")
+                agent_id = agent_options[sel_agent_str]
+                agent_tasks = tasks_by_agent.get(agent_id, [])
+                if agent_tasks:
+                    task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
+                    sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
+                    if st.button("➕ Add Single Task"):
+                        st.session_state.wf_selected_task_ids.append(task_options[sel_task_str])
+                        st.rerun()
                 else:
-                    # Scrollable container for tasks
-                    with st.container(height=300, border=True):
-                        for task in agent_tasks:
-                            is_selected = task['id'] in st.session_state.wf_selected_task_ids
-                            expanded_key = f"wf_task_expanded_{task['id']}"
-                            if expanded_key not in st.session_state:
-                                st.session_state[expanded_key] = False
-                                
-                            desc_len = len(task['description'])
-                            has_truncation = desc_len > 80
-                            
-                            # Layout as columns: checkbox on the left, clickable text on the right
-                            col_chk, col_txt = st.columns([1, 14], gap="small")
-                            with col_chk:
-                                if st.checkbox("Select", value=is_selected, key=f"wf_check_{task['id']}", label_visibility="collapsed"):
-                                    if task['id'] not in st.session_state.wf_selected_task_ids:
-                                        st.session_state.wf_selected_task_ids.append(task['id'])
-                                else:
-                                    if task['id'] in st.session_state.wf_selected_task_ids:
-                                        st.session_state.wf_selected_task_ids.remove(task['id'])
-                            with col_txt:
-                                st.markdown('<div class="task-text-marker" style="display:none;"></div>', unsafe_allow_html=True)
-                                task_display_name = task.get('name') if task.get('name') else f"Task #{task['id']}"
-                                label = f"{task_display_name}: {task['description'][:75]}{'...' if has_truncation else ''}"
-                                # Clicking this button ONLY toggles expansion
-                                if st.button(label, key=f"wf_txt_btn_{task['id']}", help="Clicca per mostrare/nascondere i dettagli del task", use_container_width=True):
-                                    st.session_state[expanded_key] = not st.session_state[expanded_key]
-                                    st.rerun()
-                                        
-                            if st.session_state[expanded_key]:
-                                with st.container(border=True):
-                                    st.markdown(f"📄 **Full Description:**\n{task['description']}")
-                                    st.markdown(f"🎯 **Expected Output:**\n{task['expected_output']}")
-                                    if task.get('agent_specialization'):
-                                        st.markdown(f"⚙️ **Specialization:** `{task['agent_specialization']}`")
-                                    if task.get('tools'):
-                                        pretty_t = [t.replace('_', ' ').title() for t in task['tools']]
-                                        st.markdown(f"🛠️ **Assigned Tools:** `{', '.join(pretty_t)}`")
-        
+                    st.info("No tasks assigned to this agent.")
+
+        elif block_type == "Batch Loop":
+            with st.container(border=True):
+                st.markdown("**Batch Loop Properties**")
+                b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=5)
+                b_source = st.text_input("Source Variable", value="{previous_result}", help="The variable or output holding the JSON array to iterate over.")
+                
+                st.markdown("**Select inner loop tasks (in order):**")
+                if tasks:
+                    all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
+                    sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()))
+                    if st.button("➕ Add Batch Loop"):
+                        inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
+                        if inner_ids:
+                            new_block = {
+                                "type": "batch_loop",
+                                "task_ids": inner_ids,
+                                "batch_size": b_size,
+                                "source_variable": b_source
+                            }
+                            st.session_state.wf_selected_task_ids.append(new_block)
+                            st.rerun()
+                        else:
+                            st.error("Select at least one inner task.")
+                else:
+                    st.info("No tasks available.")
+
         # --- Ordered Task Preview ---
         st.markdown("---")
         st.markdown("**⚙️ Workflow Steps (in order)**")
         
         if not st.session_state.wf_selected_task_ids:
-            st.info("No tasks selected yet. Expand an agent above to add tasks.")
+            st.info("No tasks selected yet.")
         else:
-            for i, t_id in enumerate(st.session_state.wf_selected_task_ids):
-                task = task_id_map.get(int(t_id))
-                agent = agent_id_map.get(task['agent_id']) if task else None
-                
+            def rem_step(idx):
+                st.session_state.wf_selected_task_ids.pop(idx)
+
+            for i, step in enumerate(st.session_state.wf_selected_task_ids):
                 with st.container(border=True):
-                    col_num, col_av, col_txt, col_up, col_down, col_rem = st.columns([0.5, 1, 8, 0.7, 0.7, 0.7])
+                    col_num, col_main, col_up, col_down, col_rem = st.columns([0.5, 8, 0.7, 0.7, 0.7])
                     col_num.markdown(f"**{i+1}**")
-                    if agent:
-                        col_av.image(get_agent_avatar_url(agent), width=36)
-                    if task:
-                        t_name_display = task.get('name') if task.get('name') else f"Task #{task['id']}"
-                        col_txt.markdown(f"**{t_name_display}**: {task['description'][:70]}{'...' if len(task['description']) > 70 else ''}")
+                    
+                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                    if not is_batch:
+                        task_id = step if isinstance(step, int) else step.get("task_id")
+                        task = task_id_map.get(int(task_id))
+                        if task:
+                            agent = agent_id_map.get(task['agent_id'])
+                            a_name = agent['name'] if agent else "Unknown Agent"
+                            t_name = task.get('name') or f"Task #{task['id']}"
+                            col_main.markdown(f"👤 **{a_name}** ➔ **{t_name}**: {task['description'][:70]}...")
+                        else:
+                            col_main.markdown(f"❌ Unknown Task ID: {task_id}")
+                    else:
+                        inner_ids = step.get("task_ids", [])
+                        b_size = step.get("batch_size")
+                        col_main.markdown(f"🔄 **Batch Loop** (Size: {b_size}, Source: `{step.get('source_variable')}`)")
+                        for inner_id in inner_ids:
+                            itask = task_id_map.get(int(inner_id))
+                            if itask:
+                                iagent = agent_id_map.get(itask['agent_id'])
+                                i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                            else:
+                                col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
+                    
                     col_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,), help="Move up")
                     col_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,), help="Move down")
-                    col_rem.button("✖️", key=f"wf_rem_{i}", on_click=remove_wf_task, args=(t_id,), help="Remove")
-        
+                    col_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,), help="Remove")
         st.markdown("---")
         if editing_workflow:
             col_save, col_cancel = st.columns([1, 1])
@@ -2145,39 +2143,74 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                 # The db_manager processes task_ids_json into task_ids list automatically
                 task_ids = workflow.get('task_ids', [])
                 st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
-                for i, task_id in enumerate(task_ids):
-                    task = task_id_map.get(int(task_id))
-                    if task:
-                        agent = agent_id_map.get(task['agent_id'])
-                        
-                        col_avatar, col_text = st.columns([1, 25])
-                        with col_avatar:
-                            if agent:
-                                avatar_url = get_agent_avatar_url(agent)
-                                st.image(avatar_url, use_container_width=True)
-                            else:
-                                st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
-                        with col_text:
-                            t_name_display = task.get('name') if task.get('name') else f"Task #{task['id']}"
-                            st.markdown(f"**Step {i+1} ({t_name_display}):** {task['description']}")
+                for i, step in enumerate(task_ids):
+                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                    if not is_batch:
+                        task_id = step if isinstance(step, int) else step.get("task_id")
+                        task = task_id_map.get(int(task_id))
+                        if task:
+                            agent = agent_id_map.get(task['agent_id'])
+                            col_avatar, col_text = st.columns([1, 25])
+                            with col_avatar:
+                                if agent:
+                                    st.image(get_agent_avatar_url(agent), use_container_width=True)
+                                else:
+                                    st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                            with col_text:
+                                t_name_display = task.get('name') or f"Task #{task['id']}"
+                                st.markdown(f"**Step {i+1} ({t_name_display}):** {task['description']}")
+                        else:
+                            st.error(f"Step {i+1}: Task ID {task_id} not found")
                     else:
-                        st.error(f"Step {i+1}: Task ID {task_id} not found")
+                        inner_ids = step.get("task_ids", [])
+                        b_size = step.get("batch_size")
+                        st.markdown(f"**Step {i+1} (🔄 Batch Loop)**: Chunk Size: {b_size}, Source: `{step.get('source_variable')}`")
+                        for inner_id in inner_ids:
+                            itask = task_id_map.get(int(inner_id))
+                            if itask:
+                                iagent = agent_id_map.get(itask['agent_id'])
+                                i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                            else:
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
                 
                 # --- ARCHITECTURAL MANDATE M1_T3-A2 & M1_T3-A3: Secure Export Logic ---
                 # 1. Construct the data structure for YAML in-memory
                 export_data = {'workflow': {'name': workflow['name'], 'tasks': []}}
-                for task_id in task_ids:
-                    task = task_id_map.get(task_id)
-                    if task:
-                        agent = agent_id_map.get(task['agent_id'])
-                        task_data = {
-                            'name': task.get('name') or f"Task #{task['id']}",
-                            'description': task['description'],
-                            'expected_output': task['expected_output'],
-                            'agent': agent['name'] if agent else 'Unknown Agent'
+                for step in task_ids:
+                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                    if not is_batch:
+                        task_id = step if isinstance(step, int) else step.get("task_id")
+                        task = task_id_map.get(int(task_id))
+                        if task:
+                            agent = agent_id_map.get(task['agent_id'])
+                            task_data = {
+                                'name': task.get('name') or f"Task #{task['id']}",
+                                'description': task['description'],
+                                'expected_output': task['expected_output'],
+                                'agent': agent['name'] if agent else 'Unknown Agent'
+                            }
+                            export_data['workflow']['tasks'].append(task_data)
+                    else:
+                        batch_info = {
+                            'type': 'batch_loop',
+                            'batch_size': step.get('batch_size'),
+                            'source_variable': step.get('source_variable'),
+                            'tasks': []
                         }
-                        export_data['workflow']['tasks'].append(task_data)
-                
+                        for inner_id in step.get("task_ids", []):
+                            itask = task_id_map.get(int(inner_id))
+                            if itask:
+                                iagent = agent_id_map.get(itask['agent_id'])
+                                task_data = {
+                                    'name': itask.get('name') or f"Task #{itask['id']}",
+                                    'description': itask['description'],
+                                    'expected_output': itask['expected_output'],
+                                    'agent': iagent['name'] if iagent else 'Unknown Agent'
+                                }
+                                batch_info['tasks'].append(task_data)
+                        export_data['workflow']['tasks'].append(batch_info)
                 # 2. Generate YAML string in-memory. NOTE: yaml.dump is safe for exporting.
                 yaml_string = yaml.dump(export_data, sort_keys=False, indent=2)
                 

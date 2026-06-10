@@ -561,7 +561,7 @@ class DBManager:
         self.conn.commit()
 
     # --- Workflows CRUD ---
-    def create_workflow(self, name: str, task_ids: List[int], requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
+    def create_workflow(self, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
         task_ids_json = json.dumps(task_ids)
         expected_exports_json = json.dumps(expected_exports or [])
         export_instructions_str = export_instructions or ""
@@ -589,7 +589,7 @@ class DBManager:
             processed_rows.append(self._process_json_fields(workflow_dict))
         return processed_rows
 
-    def update_workflow(self, workflow_id: int, name: str, task_ids: List[int], requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
+    def update_workflow(self, workflow_id: int, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
         task_ids_json = json.dumps(task_ids)
         expected_exports_json = json.dumps(expected_exports or [])
         export_instructions_str = export_instructions or ""
