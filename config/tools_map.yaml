@@ -51,4 +51,15 @@ tools_registry:
     description: "Executes Python code in a subprocess to test syntax, compile, and verify imports."
     required_secrets: []
 
+  app_database_query:
+    display_name: "App: Query Database"
+    description: "Queries the database of a connected external app (SQLite or PostgreSQL). Available only in app workflows."
+    required_secrets: []
+    category: "app_integration"
+
+  app_api_caller:
+    display_name: "App: Call REST API"
+    description: "Calls REST API endpoints of a connected external app. Available only in app workflows."
+    required_secrets: []
+    category: "app_integration"
 

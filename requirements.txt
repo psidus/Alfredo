@@ -19,3 +19,8 @@ openpyxl
 mss
 Pillow
 pypdf
+# API Server for external app integration
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+# PostgreSQL support for external app databases (optional)
+psycopg2-binary>=2.9.0

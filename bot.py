@@ -1239,6 +1239,21 @@ async def resume_execution_callback(update: Update, context: ContextTypes.DEFAUL
 
 def main() -> None:
     """Start the bot."""
+    # --- Launch API Server in background thread ---
+    import threading
+    api_port = int(os.getenv("ALFREDO_API_PORT", "8000"))
+    try:
+        from core.api_server import start_api_server
+        api_thread = threading.Thread(
+            target=start_api_server,
+            kwargs={"host": "0.0.0.0", "port": api_port},
+            daemon=True
+        )
+        api_thread.start()
+        logger.info(f"🌐 API Server started on http://localhost:{api_port}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to start API server: {e}. Continuing with Telegram bot only.")
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # ConversationHandler for workflow selection and execution

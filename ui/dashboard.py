@@ -2383,6 +2383,276 @@ def render_history_monitoring():
                     st.rerun()
 
 
+def render_my_apps():
+    """Renders the 'Le mie App' tab for managing external app integrations."""
+    db = get_db_manager()
+    DataManager.load_env()
+
+    st.subheader("🔗 Le mie App — Integrazione App Esterne")
+    st.markdown("""
+    Collega applicazioni esterne ad Alfredo. Crea workflow specifici per un'app
+    e triggera li dall'app stessa tramite il **Widget SDK** o le **API REST**.
+    """)
+
+    # --- Session state for app detail view ---
+    if 'viewing_app_id' not in st.session_state:
+        st.session_state.viewing_app_id = None
+
+    apps = db.get_all_apps()
+
+    # ========= APP LIST VIEW =========
+    if st.session_state.viewing_app_id is None:
+        st.divider()
+
+        # --- Create New App Form ---
+        with st.expander("➕ Collega Nuova App", expanded=len(apps) == 0):
+            with st.form("create_app_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    app_name = st.text_input("Nome App (slug, senza spazi)", placeholder="mio_gestionale",
+                                             help="Usato nelle URL delle API. Solo lettere, numeri e underscore.")
+                    app_display = st.text_input("Nome Visualizzato", placeholder="Il Mio Gestionale")
+                    app_desc = st.text_area("Descrizione", placeholder="Descrivi brevemente l'app...", max_chars=500)
+                with col2:
+                    app_db_type = st.selectbox("Tipo Database", ["sqlite", "postgresql"],
+                                               help="Il tipo di database dell'app esterna")
+                    app_db_env_key = st.text_input("Nome Variabile .env per DB",
+                                                   placeholder="GESTIONALE_DB_URL",
+                                                   help="Es: GESTIONALE_DB_URL → Alfredo leggerà os.getenv('GESTIONALE_DB_URL')")
+                    app_api_env_key = st.text_input("Nome Variabile .env per API Key",
+                                                    placeholder="GESTIONALE_API_KEY",
+                                                    help="Es: GESTIONALE_API_KEY → usata per autenticarsi verso l'app")
+                    app_api_url = st.text_input("Base URL API dell'app",
+                                                placeholder="http://localhost:3000/api")
+                    app_root = st.text_input("Path Root Progetto App (opzionale)",
+                                             placeholder="C:/Users/.../MioProgetto")
+
+                submitted = st.form_submit_button("🚀 Collega App", use_container_width=True)
+                if submitted:
+                    if not app_name:
+                        st.error("Il nome app è obbligatorio.")
+                    elif not re.match(r'^[a-zA-Z0-9_]+$', app_name):
+                        st.error("Il nome app può contenere solo lettere, numeri e underscore.")
+                    else:
+                        try:
+                            app_id = db.create_app(
+                                name=app_name.lower(),
+                                display_name=app_display or app_name,
+                                description=app_desc,
+                                db_env_key=app_db_env_key or None,
+                                api_env_key=app_api_env_key or None,
+                                api_base_url=app_api_url or None,
+                                db_type=app_db_type,
+                                app_root_path=app_root or None
+                            )
+                            st.success(f"✅ App '{app_display or app_name}' collegata con successo! (ID: {app_id})")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Errore nella creazione dell'app: {e}")
+
+        # --- Apps Cards ---
+        if not apps:
+            st.info("Nessuna app collegata. Usa il form sopra per collegare la tua prima app.")
+        else:
+            for app_record in apps:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    with col1:
+                        status_emoji = "🟢" if app_record.get('status') == 'active' else "🔴"
+                        st.markdown(f"### {status_emoji} {app_record.get('display_name', app_record['name'])}")
+                        st.caption(f"Slug: `{app_record['name']}` | DB: `{app_record.get('db_type', 'N/A')}` | Creata: {app_record.get('created_at', 'N/A')}")
+                        if app_record.get('description'):
+                            st.markdown(f"*{app_record['description'][:100]}*")
+
+                        # Count workflows
+                        app_workflows = db.get_app_workflows(app_record['id'])
+                        st.caption(f"📋 {len(app_workflows)} workflow collegati")
+
+                    with col2:
+                        if st.button("📂 Apri", key=f"open_app_{app_record['id']}", use_container_width=True):
+                            st.session_state.viewing_app_id = app_record['id']
+                            st.rerun()
+
+                    with col3:
+                        if st.button("🗑️ Elimina", key=f"del_app_{app_record['id']}", use_container_width=True, type="secondary"):
+                            db.delete_app(app_record['id'])
+                            st.success(f"App '{app_record['name']}' eliminata.")
+                            st.rerun()
+
+    # ========= APP DETAIL VIEW =========
+    else:
+        app_id = st.session_state.viewing_app_id
+        app_record = db.get_app(app_id)
+
+        if not app_record:
+            st.error("App non trovata.")
+            st.session_state.viewing_app_id = None
+            st.rerun()
+            return
+
+        # Back button
+        if st.button("⬅️ Torna alla lista app"):
+            st.session_state.viewing_app_id = None
+            st.rerun()
+
+        st.markdown(f"## 🔗 {app_record.get('display_name', app_record['name'])}")
+
+        # --- Tabs inside app detail ---
+        app_tab1, app_tab2, app_tab3, app_tab4 = st.tabs([
+            "🔑 Connessione", "📋 Workflow", "📦 Integrazione", "📊 Log"
+        ])
+
+        # --- TAB: Connection & API Key ---
+        with app_tab1:
+            st.markdown("### Chiave API")
+            st.code(app_record['api_key'], language=None)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 Rigenera API Key", use_container_width=True):
+                    new_key = db.regenerate_app_api_key(app_id)
+                    st.warning(f"⚠️ Nuova API Key generata. Aggiorna l'SDK nell'app esterna!")
+                    st.code(new_key, language=None)
+                    st.rerun()
+            with col2:
+                new_status = "disabled" if app_record.get('status') == 'active' else "active"
+                btn_label = "🔴 Disabilita" if app_record.get('status') == 'active' else "🟢 Abilita"
+                if st.button(btn_label, use_container_width=True):
+                    db.update_app(app_id, status=new_status)
+                    st.rerun()
+
+            st.divider()
+            st.markdown("### Configurazione Connessione")
+
+            # Check .env variables
+            env_vars_status = []
+            if app_record.get('db_env_key'):
+                val = os.getenv(app_record['db_env_key'])
+                status = "✅" if val else "❌ Non trovata nel .env"
+                env_vars_status.append(f"**DB** (`{app_record['db_env_key']}`): {status}")
+            if app_record.get('api_env_key'):
+                val = os.getenv(app_record['api_env_key'])
+                status = "✅" if val else "❌ Non trovata nel .env"
+                env_vars_status.append(f"**API Key** (`{app_record['api_env_key']}`): {status}")
+
+            if env_vars_status:
+                for s in env_vars_status:
+                    st.markdown(s)
+            else:
+                st.info("Nessuna variabile .env configurata per questa app.")
+
+            st.markdown(f"**Base URL API**: `{app_record.get('api_base_url', 'Non configurato')}`")
+            st.markdown(f"**Tipo DB**: `{app_record.get('db_type', 'sqlite')}`")
+            st.markdown(f"**Root Path**: `{app_record.get('app_root_path', 'Non configurato')}`")
+
+        # --- TAB: Workflows ---
+        with app_tab2:
+            st.markdown("### Workflow collegati a questa App")
+            app_workflows = db.get_app_workflows(app_id)
+
+            if not app_workflows:
+                st.info("Nessun workflow collegato. Crea un workflow nel **Workflow Assembler** (Tab 5) e collegalo a questa app.")
+            else:
+                for wf in app_workflows:
+                    with st.container(border=True):
+                        task_ids = wf.get('task_ids', [])
+                        st.markdown(f"**{wf['name']}** — {len(task_ids)} task")
+
+                        # Show required inputs
+                        all_inputs = []
+                        for tid in task_ids:
+                            if isinstance(tid, int):
+                                task_rec = db.read_task(tid)
+                                if task_rec:
+                                    for inp in task_rec.get('required_inputs', []):
+                                        key = inp.get('key', '') if isinstance(inp, dict) else str(inp)
+                                        if key and key not in [x['key'] for x in all_inputs if isinstance(x, dict)]:
+                                            all_inputs.append(inp)
+
+                        if all_inputs:
+                            input_keys = [inp.get('key', str(inp)) if isinstance(inp, dict) else str(inp) for inp in all_inputs]
+                            st.caption(f"Input richiesti: `{'`, `'.join(input_keys)}`")
+
+            st.divider()
+            st.markdown("### Collega workflow esistente")
+            all_workflows = db.read_all_workflows()
+            unlinked = [wf for wf in all_workflows if wf.get('app_id') is None]
+
+            if unlinked:
+                wf_options = {f"{wf['name']} (ID: {wf['id']})": wf['id'] for wf in unlinked}
+                selected_wf = st.selectbox("Seleziona workflow da collegare", list(wf_options.keys()),
+                                           key=f"link_wf_{app_id}")
+                if st.button("🔗 Collega a questa App", key=f"link_btn_{app_id}"):
+                    wf_id = wf_options[selected_wf]
+                    # Update workflow to set app_id
+                    wf_record = db.read_workflow(wf_id)
+                    if wf_record:
+                        db.cursor.execute("UPDATE workflows SET app_id = ? WHERE id = ?", (app_id, wf_id))
+                        db.conn.commit()
+                        st.success(f"Workflow '{wf_record['name']}' collegato a questa app!")
+                        st.rerun()
+            else:
+                st.caption("Tutti i workflow sono già collegati ad un'app o non ne esistono ancora.")
+
+        # --- TAB: Integration Snippet ---
+        with app_tab3:
+            st.markdown("### Snippet di Integrazione")
+            st.markdown("Copia questo codice nella tua app per integrare il widget Alfredo:")
+
+            api_port = os.getenv('ALFREDO_API_PORT', '8000')
+            snippet = f"""<!-- Alfredo SDK Widget -->
+<script src="http://localhost:{api_port}/sdk/alfredo-sdk.js"></script>
+<script>
+  AlfredoClient.init({{
+    serverUrl: 'http://localhost:{api_port}',
+    apiKey: '{app_record["api_key"]}'
+  }});
+</script>"""
+            st.code(snippet, language="html")
+
+            st.divider()
+            st.markdown("### API Diretta (per sviluppatori)")
+            st.markdown("Se preferisci usare le API REST direttamente senza il widget:")
+
+            api_example = f"""# Lista workflow disponibili
+curl http://localhost:{api_port}/api/apps/{app_record['name']}/workflows \\
+  -H "X-API-Key: {app_record['api_key']}"
+
+# Trigger workflow
+curl -X POST http://localhost:{api_port}/api/apps/{app_record['name']}/trigger \\
+  -H "X-API-Key: {app_record['api_key']}" \\
+  -H "Content-Type: application/json" \\
+  -d '{{
+    "workflow_id": 1,
+    "inputs": {{"nome_cliente": "Mario Rossi"}}
+  }}'
+
+# Poll risultato
+curl http://localhost:{api_port}/api/jobs/{{job_id}}"""
+            st.code(api_example, language="bash")
+
+        # --- TAB: Run Logs ---
+        with app_tab4:
+            st.markdown("### Log Esecuzioni API")
+            app_runs = db.get_app_runs(app_id, limit=20)
+
+            if not app_runs:
+                st.info("Nessuna esecuzione API registrata per questa app.")
+            else:
+                for run in app_runs:
+                    status_emoji = {"running": "🔄", "completed": "✅", "failed": "❌"}.get(run.get('status', ''), "❓")
+                    with st.expander(f"{status_emoji} Run #{run['id']} — {run.get('status', 'N/A')} — {run.get('started_at', '')}"):
+                        st.markdown(f"**Workflow ID**: {run.get('workflow_id', 'N/A')}")
+                        st.markdown(f"**Status**: {run.get('status', 'N/A')}")
+                        st.markdown(f"**Avviato**: {run.get('started_at', 'N/A')}")
+                        st.markdown(f"**Completato**: {run.get('finished_at', 'N/A')}")
+                        if run.get('result'):
+                            st.text_area("Risultato", run['result'], height=150,
+                                         key=f"run_result_{run['id']}")
+
+
+
+
+
 def main():
     """Main function to run the Streamlit dashboard."""
     import os
@@ -2562,6 +2832,7 @@ def main():
                     st.success("Telegram configuration saved to .env!")
                     st.rerun()
 
+
     # --- Sidebar Guide ---
     with st.sidebar:
         st.header("🚀 Guide & Placeholders")
@@ -2607,13 +2878,14 @@ def main():
     if 'editing_workflow_id' not in st.session_state:
         st.session_state.editing_workflow_id = None
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Tab 1: Add Database",
         "Tab 2: API Vault & Model Registry",
         "Tab 3: Agent Caserma",
         "Tab 4: Task Builder",
         "Tab 5: Workflow Assembler",
-        "Tab 6: History & Monitoring"
+        "Tab 6: History & Monitoring",
+        "Tab 7: 🔗 Le mie App"
     ])
 
     with tab1:
@@ -2656,6 +2928,13 @@ def main():
             render_history_monitoring()
         except Exception as e:
             st.error(f"Errore nel caricamento di History & Monitoring: {e}")
+            st.exception(e)
+
+    with tab7:
+        try:
+            render_my_apps()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di Le mie App: {e}")
             st.exception(e)
 
 

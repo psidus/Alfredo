@@ -84,6 +84,9 @@ ALLOWED_TOOLS = {
     # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
     "read_atomic_memory": None,   # Sentinel
     "write_atomic_memory": None,  # Sentinel
+    # App-specific tools — sentinels, instantiated at runtime with app credentials
+    "app_database_query": None,  # Sentinel
+    "app_api_caller": None,      # Sentinel
 }
 
 def _instantiate_llm(model_id):
@@ -180,7 +183,7 @@ def _map_tools(tool_names):
 
     return instantiated_tools
 
-def _get_task_tools(tool_names, vector_dbs, is_local_model=False):
+def _get_task_tools(tool_names, vector_dbs, is_local_model=False, app_record=None):
     """
     Combines _map_tools with dynamic instantiation of VectorSearchTool and TabularQueryTool
     based on the provided vector_dbs list.
@@ -231,7 +234,43 @@ def _get_task_tools(tool_names, vector_dbs, is_local_model=False):
                             )
             except (ValueError, TypeError):
                 pass
-                
+
+    # --- App-specific tool instantiation ---
+    if 'app_database_query' in tool_names and app_record:
+        from tools.app_database_tool import AppDatabaseQueryTool
+        db_env_key = app_record.get('db_env_key', '')
+        db_conn = os.getenv(db_env_key, '') if db_env_key else ''
+        if db_conn:
+            tool_instance = AppDatabaseQueryTool(
+                name=f"query_db_{app_record.get('name', 'app')}",
+                description=f"Query the database of app '{app_record.get('display_name', app_record.get('name', 'External App'))}'. Use action='list_tables' first to discover available tables.",
+                connection_string=db_conn,
+                db_type=app_record.get('db_type', 'sqlite'),
+                app_name=app_record.get('name', '')
+            )
+            task_tools.append(tool_instance)
+            logging.info(f"Injected AppDatabaseQueryTool for app '{app_record.get('name')}'")
+        else:
+            logging.warning(f"App '{app_record.get('name')}' has no database connection configured (env key: '{db_env_key}')")
+
+    if 'app_api_caller' in tool_names and app_record:
+        from tools.app_api_tool import AppApiCallerTool
+        api_env_key = app_record.get('api_env_key', '')
+        api_key = os.getenv(api_env_key, '') if api_env_key else ''
+        api_base_url = app_record.get('api_base_url', '')
+        if api_base_url:
+            tool_instance = AppApiCallerTool(
+                name=f"call_api_{app_record.get('name', 'app')}",
+                description=f"Call the REST API of app '{app_record.get('display_name', app_record.get('name', 'External App'))}'. Base URL: {api_base_url}",
+                base_url=api_base_url,
+                api_key=api_key,
+                app_name=app_record.get('name', '')
+            )
+            task_tools.append(tool_instance)
+            logging.info(f"Injected AppApiCallerTool for app '{app_record.get('name')}'")
+        else:
+            logging.warning(f"App '{app_record.get('name')}' has no API base URL configured")
+
     return task_tools if task_tools else None
 
 def _build_agent(agent_id, specialization=None, model_id_override=None):

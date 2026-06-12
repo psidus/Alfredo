@@ -1,0 +1,810 @@
+/* ============================================================
+   Alfredo SDK Widget – Shadow DOM Stylesheet
+   Premium dark-theme with smooth animations.
+   Injected inside a Shadow DOM so it cannot leak into
+   or be affected by the host application's styles.
+   ============================================================ */
+
+/* ---------- Design tokens (used as raw values, no CSS vars
+   because Shadow DOM already isolates us) ---------- */
+
+/* Palette
+   bg-primary   : #1a1a2e
+   bg-secondary : #16213e
+   bg-tertiary  : #0f3460
+   accent       : #6c63ff
+   accent-hover : #564ff0
+   success      : #2ecc71
+   warning      : #f39c12
+   error        : #e74c3c
+   text-primary : #e0e0e0
+   text-muted   : #a0a0b0
+   border       : rgba(108,99,255,0.25)
+*/
+
+/* ==================== BASE ==================== */
+
+:host {
+    all: initial;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #e0e0e0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+/* ==================== WIDGET CONTAINER ==================== */
+
+.alfredo-widget {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    width: 380px;
+    min-width: 320px;
+    max-width: 380px;
+    max-height: 85vh;
+    background: #1a1a2e;
+    border-radius: 12px;
+    box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.45),
+        0 0 0 1px rgba(108, 99, 255, 0.15);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 2147483646;
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 1;
+    transform: translateY(0);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #e0e0e0;
+}
+
+/* -- Minimized state: small floating circular button -- */
+.alfredo-widget.minimized {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    max-width: 48px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #6c63ff 0%, #564ff0 100%);
+    box-shadow:
+        0 4px 16px rgba(108, 99, 255, 0.45),
+        0 0 0 2px rgba(108, 99, 255, 0.2);
+    overflow: hidden;
+    padding: 0;
+}
+
+.alfredo-widget.minimized:hover {
+    transform: scale(1.1);
+    box-shadow:
+        0 6px 24px rgba(108, 99, 255, 0.55),
+        0 0 0 3px rgba(108, 99, 255, 0.3);
+}
+
+.alfredo-widget.minimized .alfredo-header,
+.alfredo-widget.minimized .alfredo-body,
+.alfredo-widget.minimized .alfredo-status {
+    display: none;
+}
+
+.alfredo-widget.minimized .alfredo-mini-logo {
+    display: flex;
+}
+
+/* Mini logo ("A" icon) */
+.alfredo-mini-logo {
+    display: none;
+    width: 48px;
+    height: 48px;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: -0.5px;
+    user-select: none;
+    pointer-events: none;
+}
+
+/* ==================== HEADER (draggable) ==================== */
+
+.alfredo-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, #16213e 0%, #1a1a2e 100%);
+    border-bottom: 1px solid rgba(108, 99, 255, 0.2);
+    cursor: grab;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.alfredo-header:active {
+    cursor: grabbing;
+}
+
+.alfredo-header-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: 0.3px;
+}
+
+.alfredo-header-title .alfredo-logo-char {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    background: linear-gradient(135deg, #6c63ff 0%, #564ff0 100%);
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 800;
+    color: #ffffff;
+}
+
+.alfredo-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.alfredo-header-controls button {
+    background: none;
+    border: none;
+    color: #a0a0b0;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    font-size: 16px;
+    line-height: 1;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+}
+
+.alfredo-header-controls button:hover {
+    background: rgba(108, 99, 255, 0.15);
+    color: #ffffff;
+}
+
+/* ==================== BODY (scrollable content) ==================== */
+
+.alfredo-body {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(108, 99, 255, 0.3) transparent;
+}
+
+.alfredo-body::-webkit-scrollbar {
+    width: 5px;
+}
+
+.alfredo-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.alfredo-body::-webkit-scrollbar-thumb {
+    background: rgba(108, 99, 255, 0.3);
+    border-radius: 3px;
+}
+
+.alfredo-body::-webkit-scrollbar-thumb:hover {
+    background: rgba(108, 99, 255, 0.5);
+}
+
+/* Section labels */
+.alfredo-section-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #a0a0b0;
+    margin-bottom: 6px;
+}
+
+/* ==================== WORKFLOW SELECT ==================== */
+
+.alfredo-workflow-select {
+    width: 100%;
+    padding: 10px 14px;
+    background: #16213e;
+    border: 1px solid rgba(108, 99, 255, 0.25);
+    border-radius: 8px;
+    color: #e0e0e0;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' fill='none' stroke='%23a0a0b0' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 32px;
+}
+
+.alfredo-workflow-select:hover {
+    border-color: rgba(108, 99, 255, 0.5);
+}
+
+.alfredo-workflow-select:focus {
+    border-color: #6c63ff;
+    box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.15);
+}
+
+.alfredo-workflow-select option {
+    background: #16213e;
+    color: #e0e0e0;
+}
+
+/* ==================== INPUT LIST ==================== */
+
+.alfredo-input-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    list-style: none;
+}
+
+.alfredo-input-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: #16213e;
+    border: 1px solid rgba(108, 99, 255, 0.15);
+    border-radius: 8px;
+    transition: all 0.3s ease;
+}
+
+.alfredo-input-item:hover {
+    border-color: rgba(108, 99, 255, 0.35);
+}
+
+/* Status indicator dot */
+.alfredo-input-item::before {
+    content: '';
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #e74c3c;
+    box-shadow: 0 0 6px rgba(231, 76, 60, 0.5);
+    transition: all 0.3s ease;
+}
+
+.alfredo-input-item.mapped::before {
+    background: #2ecc71;
+    box-shadow: 0 0 6px rgba(46, 204, 113, 0.5);
+}
+
+.alfredo-input-item.unmapped::before {
+    background: #e74c3c;
+    box-shadow: 0 0 6px rgba(231, 76, 60, 0.5);
+}
+
+.alfredo-input-item-label {
+    flex: 1 1 auto;
+    font-size: 13px;
+    color: #e0e0e0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.alfredo-input-item-selector {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: #a0a0b0;
+    max-width: 110px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+/* ==================== PICKER BUTTON ==================== */
+
+.alfredo-picker-btn {
+    flex-shrink: 0;
+    padding: 5px 10px;
+    background: linear-gradient(135deg, #6c63ff 0%, #564ff0 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    white-space: nowrap;
+}
+
+.alfredo-picker-btn:hover {
+    transform: scale(1.05);
+    box-shadow: 0 2px 10px rgba(108, 99, 255, 0.4);
+}
+
+.alfredo-picker-btn:active {
+    transform: scale(0.97);
+}
+
+.alfredo-picker-btn.picking {
+    background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+    animation: alfredo-pulse 1.5s ease-in-out infinite;
+}
+
+/* ==================== OUTPUT & TRIGGER SECTIONS ==================== */
+
+.alfredo-output-section,
+.alfredo-trigger-section {
+    padding: 12px;
+    background: #16213e;
+    border: 1px solid rgba(108, 99, 255, 0.15);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.alfredo-output-section .alfredo-section-title,
+.alfredo-trigger-section .alfredo-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #a0a0b0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.alfredo-mapped-element {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #e0e0e0;
+}
+
+.alfredo-mapped-element .alfredo-selector-tag {
+    background: rgba(108, 99, 255, 0.15);
+    color: #6c63ff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 11px;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ==================== VALIDATION BOX ==================== */
+
+.alfredo-validation {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    transition: all 0.3s ease;
+    border: 1px solid transparent;
+}
+
+.alfredo-validation.valid {
+    background: rgba(46, 204, 113, 0.1);
+    border-color: rgba(46, 204, 113, 0.3);
+    color: #2ecc71;
+}
+
+.alfredo-validation.invalid {
+    background: rgba(231, 76, 60, 0.1);
+    border-color: rgba(231, 76, 60, 0.3);
+    color: #e74c3c;
+}
+
+.alfredo-validation ul {
+    list-style: none;
+    padding-left: 4px;
+    margin-top: 4px;
+}
+
+.alfredo-validation ul li::before {
+    content: '• ';
+    color: inherit;
+}
+
+.alfredo-validation .alfredo-warning-item {
+    color: #f39c12;
+}
+
+/* ==================== ACTION BUTTONS ==================== */
+
+.alfredo-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.alfredo-actions button {
+    flex: 1;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.alfredo-actions button:active {
+    transform: scale(0.97);
+}
+
+.alfredo-btn-save {
+    background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+    color: #ffffff;
+}
+
+.alfredo-btn-save:hover {
+    box-shadow: 0 4px 16px rgba(46, 204, 113, 0.35);
+    transform: translateY(-1px);
+}
+
+.alfredo-btn-save:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+.alfredo-btn-test {
+    background: linear-gradient(135deg, #6c63ff 0%, #564ff0 100%);
+    color: #ffffff;
+}
+
+.alfredo-btn-test:hover {
+    box-shadow: 0 4px 16px rgba(108, 99, 255, 0.35);
+    transform: translateY(-1px);
+}
+
+.alfredo-btn-test:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+.alfredo-btn-clear {
+    background: rgba(231, 76, 60, 0.15);
+    color: #e74c3c;
+    flex: 0 0 auto;
+    width: 40px;
+    padding: 10px;
+}
+
+.alfredo-btn-clear:hover {
+    background: rgba(231, 76, 60, 0.25);
+}
+
+/* ==================== STATUS BAR ==================== */
+
+.alfredo-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: #0f1a2e;
+    border-top: 1px solid rgba(108, 99, 255, 0.1);
+    font-size: 11px;
+    color: #a0a0b0;
+    flex-shrink: 0;
+}
+
+.alfredo-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+
+.alfredo-status-dot.connected {
+    background: #2ecc71;
+    box-shadow: 0 0 6px rgba(46, 204, 113, 0.6);
+}
+
+.alfredo-status-dot.loading {
+    background: #f39c12;
+    box-shadow: 0 0 6px rgba(243, 156, 18, 0.6);
+    animation: alfredo-pulse 1.2s ease-in-out infinite;
+}
+
+.alfredo-status-dot.error {
+    background: #e74c3c;
+    box-shadow: 0 0 6px rgba(231, 76, 60, 0.6);
+}
+
+.alfredo-status-text {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ==================== FULL-SCREEN PICKER OVERLAY ==================== */
+
+.alfredo-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 2147483645;
+    cursor: crosshair;
+    transition: opacity 0.25s ease;
+}
+
+.alfredo-overlay-banner {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1a2e;
+    color: #e0e0e0;
+    padding: 10px 24px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+    z-index: 2147483647;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+.alfredo-overlay-banner kbd {
+    background: rgba(108, 99, 255, 0.2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #6c63ff;
+    font-family: inherit;
+}
+
+/* ==================== ELEMENT HIGHLIGHT (during picking) ==================== */
+
+.alfredo-highlight {
+    position: absolute;
+    pointer-events: none;
+    border: 2px dashed #6c63ff;
+    border-radius: 4px;
+    background: rgba(108, 99, 255, 0.08);
+    box-shadow: 0 0 12px rgba(108, 99, 255, 0.35);
+    z-index: 2147483647;
+    transition: all 0.1s ease;
+    animation: alfredo-highlight-pulse 1.5s ease-in-out infinite;
+}
+
+.alfredo-highlight.input-pick {
+    border-color: #6c63ff;
+    box-shadow: 0 0 12px rgba(108, 99, 255, 0.35);
+    background: rgba(108, 99, 255, 0.08);
+}
+
+.alfredo-highlight.output-pick {
+    border-color: #2ecc71;
+    box-shadow: 0 0 12px rgba(46, 204, 113, 0.35);
+    background: rgba(46, 204, 113, 0.08);
+}
+
+.alfredo-highlight.trigger-pick {
+    border-color: #f39c12;
+    box-shadow: 0 0 12px rgba(243, 156, 18, 0.35);
+    background: rgba(243, 156, 18, 0.08);
+}
+
+/* ==================== SPINNER ==================== */
+
+.alfredo-spinner {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid rgba(108, 99, 255, 0.2);
+    border-top-color: #6c63ff;
+    border-radius: 50%;
+    animation: alfredo-spin 0.7s linear infinite;
+}
+
+.alfredo-spinner.small {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+}
+
+.alfredo-spinner.large {
+    width: 28px;
+    height: 28px;
+    border-width: 3px;
+}
+
+/* ==================== TOAST NOTIFICATIONS ==================== */
+
+.alfredo-toast {
+    position: fixed;
+    bottom: 90px;
+    right: 24px;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #ffffff;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    z-index: 2147483647;
+    opacity: 0;
+    transform: translateY(12px) scale(0.95);
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+    max-width: 340px;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+.alfredo-toast.show {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+.alfredo-toast.success {
+    background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+}
+
+.alfredo-toast.error {
+    background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+}
+
+.alfredo-toast.warning {
+    background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+}
+
+.alfredo-toast.info {
+    background: linear-gradient(135deg, #6c63ff 0%, #564ff0 100%);
+}
+
+/* ==================== TEST PREVIEW ==================== */
+
+.alfredo-test-preview {
+    padding: 10px 12px;
+    background: #0f1a2e;
+    border: 1px solid rgba(108, 99, 255, 0.2);
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    color: #a0a0b0;
+    max-height: 160px;
+    overflow-y: auto;
+}
+
+.alfredo-test-preview .preview-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(108, 99, 255, 0.07);
+}
+
+.alfredo-test-preview .preview-key {
+    color: #6c63ff;
+}
+
+.alfredo-test-preview .preview-value {
+    color: #e0e0e0;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.alfredo-test-preview .preview-missing {
+    color: #e74c3c;
+    font-style: italic;
+}
+
+.alfredo-test-preview .preview-ok {
+    color: #2ecc71;
+}
+
+/* ==================== EMPTY STATE ==================== */
+
+.alfredo-empty {
+    text-align: center;
+    padding: 24px 16px;
+    color: #a0a0b0;
+    font-size: 13px;
+}
+
+.alfredo-empty-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+    opacity: 0.5;
+}
+
+/* ==================== KEYFRAMES ==================== */
+
+@keyframes alfredo-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes alfredo-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.55; }
+}
+
+@keyframes alfredo-highlight-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(108, 99, 255, 0.25); }
+    50%      { box-shadow: 0 0 20px rgba(108, 99, 255, 0.55); }
+}
+
+@keyframes alfredo-toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes alfredo-slide-up {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ==================== UTILITY ==================== */
+
+.alfredo-hidden {
+    display: none !important;
+}
+
+.alfredo-fade-in {
+    animation: alfredo-slide-up 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}

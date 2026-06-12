@@ -176,6 +176,23 @@ class DBManager:
                 status TEXT DEFAULT 'pending', -- 'pending', 'replied'
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS apps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                display_name TEXT,
+                description TEXT,
+                api_key TEXT NOT NULL UNIQUE,
+                db_env_key TEXT,
+                api_env_key TEXT,
+                api_base_url TEXT,
+                db_type TEXT DEFAULT 'sqlite',
+                app_root_path TEXT,
+                config JSON DEFAULT '{}',
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             """
         ]
         try:
@@ -273,6 +290,20 @@ class DBManager:
             # Migration to add export_instructions to workflows (for Master AI guidance)
             try:
                 self.cursor.execute("ALTER TABLE workflows ADD COLUMN export_instructions TEXT DEFAULT '';")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add app_id to workflows (for external app integration)
+            try:
+                self.cursor.execute("ALTER TABLE workflows ADD COLUMN app_id INTEGER DEFAULT NULL REFERENCES apps(id) ON DELETE SET NULL;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add source to workflow_runs (to track API vs Telegram origin)
+            try:
+                self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN source TEXT DEFAULT 'telegram';")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -561,12 +592,12 @@ class DBManager:
         self.conn.commit()
 
     # --- Workflows CRUD ---
-    def create_workflow(self, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
+    def create_workflow(self, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None, app_id: Optional[int] = None) -> int:
         task_ids_json = json.dumps(task_ids)
         expected_exports_json = json.dumps(expected_exports or [])
         export_instructions_str = export_instructions or ""
-        sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions) VALUES (?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str))
+        sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions, app_id) VALUES (?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str, app_id))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -673,10 +704,10 @@ class DBManager:
         return [self._to_dict(row) for row in rows]
 
     # --- Workflow Runs CRUD ---
-    def create_run(self, workflow_id: int, status: str = 'running', inputs: dict = None) -> int:
+    def create_run(self, workflow_id: int, status: str = 'running', inputs: dict = None, source: str = 'telegram') -> int:
         inputs_json = json.dumps(inputs) if inputs else None
-        sql = "INSERT INTO workflow_runs (workflow_id, status, current_task_idx, task_outputs, inputs) VALUES (?, ?, 0, '{}', ?)"
-        self.cursor.execute(sql, (workflow_id, status, inputs_json))
+        sql = "INSERT INTO workflow_runs (workflow_id, status, current_task_idx, task_outputs, inputs, source) VALUES (?, ?, 0, '{}', ?, ?)"
+        self.cursor.execute(sql, (workflow_id, status, inputs_json, source))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -756,3 +787,136 @@ class DBManager:
         sql = "DELETE FROM hitl_requests WHERE chat_id = ?"
         self.cursor.execute(sql, (chat_id,))
         self.conn.commit()
+
+    # --- External Apps CRUD ---
+    def create_app(self, name: str, display_name: str = None, description: str = None,
+                   db_env_key: str = None, api_env_key: str = None, api_base_url: str = None,
+                   db_type: str = 'sqlite', app_root_path: str = None, config: dict = None) -> int:
+        """Creates a new external app registration and generates a UUID API key."""
+        import uuid
+        api_key = str(uuid.uuid4())
+        config_json = json.dumps(config or {})
+        sql = """INSERT INTO apps (name, display_name, description, api_key, db_env_key, 
+                 api_env_key, api_base_url, db_type, app_root_path, config) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        self.cursor.execute(sql, (name, display_name or name, description or '',
+                                  api_key, db_env_key, api_env_key, api_base_url,
+                                  db_type, app_root_path, config_json))
+        self.conn.commit()
+        return self.cursor.lastrowid
+
+    def get_app(self, app_id: int) -> Optional[Dict[str, Any]]:
+        """Reads a single app by ID."""
+        sql = "SELECT * FROM apps WHERE id = ?"
+        self.cursor.execute(sql, (app_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        app_dict = self._to_dict(row)
+        # Parse config JSON
+        if app_dict.get('config'):
+            try:
+                app_dict['config'] = json.loads(app_dict['config'])
+            except json.JSONDecodeError:
+                app_dict['config'] = {}
+        return app_dict
+
+    def get_app_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Reads a single app by its unique slug name."""
+        sql = "SELECT * FROM apps WHERE name = ?"
+        self.cursor.execute(sql, (name,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        app_dict = self._to_dict(row)
+        if app_dict.get('config'):
+            try:
+                app_dict['config'] = json.loads(app_dict['config'])
+            except json.JSONDecodeError:
+                app_dict['config'] = {}
+        return app_dict
+
+    def get_app_by_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+        """Reads a single app by its API key (used for SDK authentication)."""
+        sql = "SELECT * FROM apps WHERE api_key = ?"
+        self.cursor.execute(sql, (api_key,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        app_dict = self._to_dict(row)
+        if app_dict.get('config'):
+            try:
+                app_dict['config'] = json.loads(app_dict['config'])
+            except json.JSONDecodeError:
+                app_dict['config'] = {}
+        return app_dict
+
+    def get_all_apps(self) -> List[Dict[str, Any]]:
+        """Returns all registered external apps."""
+        sql = "SELECT * FROM apps ORDER BY created_at DESC"
+        self.cursor.execute(sql)
+        rows = self.cursor.fetchall()
+        result = []
+        for row in rows:
+            app_dict = self._to_dict(row)
+            if app_dict.get('config'):
+                try:
+                    app_dict['config'] = json.loads(app_dict['config'])
+                except json.JSONDecodeError:
+                    app_dict['config'] = {}
+            result.append(app_dict)
+        return result
+
+    def update_app(self, app_id: int, **kwargs) -> int:
+        """Updates an app record. Accepts any column as keyword argument."""
+        if not kwargs:
+            return 0
+        # Handle config serialization
+        if 'config' in kwargs and isinstance(kwargs['config'], dict):
+            kwargs['config'] = json.dumps(kwargs['config'])
+        set_clauses = [f"{key} = ?" for key in kwargs.keys()]
+        values = list(kwargs.values()) + [app_id]
+        sql = f"UPDATE apps SET {', '.join(set_clauses)} WHERE id = ?"
+        self.cursor.execute(sql, values)
+        self.conn.commit()
+        return self.cursor.rowcount
+
+    def delete_app(self, app_id: int) -> int:
+        """Deletes an app and unlinks any workflows associated with it."""
+        # Unlink workflows first (set app_id to NULL)
+        self.cursor.execute("UPDATE workflows SET app_id = NULL WHERE app_id = ?", (app_id,))
+        sql = "DELETE FROM apps WHERE id = ?"
+        self.cursor.execute(sql, (app_id,))
+        self.conn.commit()
+        return self.cursor.rowcount
+
+    def regenerate_app_api_key(self, app_id: int) -> str:
+        """Generates a new API key for an app and returns it."""
+        import uuid
+        new_key = str(uuid.uuid4())
+        self.cursor.execute("UPDATE apps SET api_key = ? WHERE id = ?", (new_key, app_id))
+        self.conn.commit()
+        return new_key
+
+    def get_app_workflows(self, app_id: int) -> List[Dict[str, Any]]:
+        """Returns all workflows linked to a specific app."""
+        sql = "SELECT * FROM workflows WHERE app_id = ? ORDER BY name"
+        self.cursor.execute(sql, (app_id,))
+        rows = self.cursor.fetchall()
+        processed = []
+        for row in rows:
+            wf_dict = self._to_dict(row)
+            processed.append(self._process_json_fields(wf_dict))
+        return processed
+
+    def get_app_runs(self, app_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """Returns recent runs triggered via API for workflows belonging to an app."""
+        sql = """
+        SELECT wr.* FROM workflow_runs wr
+        JOIN workflows w ON wr.workflow_id = w.id
+        WHERE w.app_id = ? AND wr.source = 'api'
+        ORDER BY wr.started_at DESC LIMIT ?
+        """
+        self.cursor.execute(sql, (app_id, limit))
+        rows = self.cursor.fetchall()
+        return [self._to_dict(row) for row in rows]
