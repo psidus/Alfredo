@@ -49,7 +49,18 @@ class VectorManager:
                 raise ValueError("OPENAI_API_KEY is not set. Cannot use OpenAI embeddings.")
             return OpenAIEmbeddings(model=model_name, api_key=api_key)
         elif provider == 'ollama':
-            return OllamaEmbeddings(model=model_name)
+            kwargs = {"model": model_name}
+            base_url = os.getenv("OLLAMA_API_BASE")
+            if base_url:
+                kwargs["base_url"] = base_url
+                
+            api_key = os.getenv("OLLAMA_API_KEY")
+            if api_key:
+                # Some versions of langchain_community OllamaEmbeddings don't strictly support headers 
+                # directly in kwargs without passing through client config, but we can try client_kwargs
+                kwargs["client_kwargs"] = {"headers": {"Authorization": f"Bearer {api_key}"}}
+                
+            return OllamaEmbeddings(**kwargs)
         elif provider == 'gemini' or provider == 'google':
             # Needs langchain_google_genai
             try:

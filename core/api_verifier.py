@@ -15,6 +15,8 @@ def verify_and_fetch_models(env_key: str, api_key: str) -> dict:
         return _fetch_gemini(api_key)
     elif "ANTHROPIC" in env_key:
         return _fetch_anthropic(api_key)
+    elif "OLLAMA" in env_key:
+        return _fetch_ollama(api_key)
     
     return {"success": False, "error": "Unsupported provider key format."}
 
@@ -131,3 +133,31 @@ def _fetch_anthropic(api_key: str):
         return {"success": True, "chat_models": chat_models, "embed_models": []}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+def _fetch_ollama(api_key: str):
+    import os
+    base_url = os.getenv("OLLAMA_API_BASE", "https://api.ollama.com")
+    url = f"{base_url.rstrip('/')}/api/tags"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code in [401, 403]:
+            return {"success": False, "error": "Invalid API Key"}
+        response.raise_for_status()
+        
+        data = response.json().get("models", [])
+        chat_models = []
+        embed_models = []
+        
+        for m in data:
+            model_id = m.get("name", "")
+            if "embed" in model_id.lower() or "nomic" in model_id.lower() or "mxbai" in model_id.lower():
+                embed_models.append(model_id)
+            else:
+                chat_models.append(model_id)
+                
+        chat_models.sort()
+        embed_models.sort()
+        return {"success": True, "chat_models": chat_models, "embed_models": embed_models}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to fetch Ollama models from {url}: {e}"}

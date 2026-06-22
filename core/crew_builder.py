@@ -123,7 +123,7 @@ def _instantiate_llm(model_id):
         "anthropic": "ANTHROPIC_API_KEY",
         "groq": "GROQ_API_KEY",
         "mistral": "MISTRAL_API_KEY",
-        "ollama": None,  # Ollama is local, no key needed
+        "ollama": "OLLAMA_API_KEY",  # Supports Ollama Cloud (optional for local)
     }
     env_var_name = provider_key_env_map.get(provider, f"{provider.upper()}_API_KEY")
     

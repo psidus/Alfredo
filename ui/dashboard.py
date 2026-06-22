@@ -662,7 +662,8 @@ def render_api_vault():
         "OPENAI_API_KEY", 
         "GROQ_API_KEY", 
         "ANTHROPIC_API_KEY", 
-        "GEMINI_API_KEY"
+        "GEMINI_API_KEY",
+        "OLLAMA_API_KEY"
     ]
     
     # Combine suggested keys and any other keys already in .env, excluding Telegram configs
@@ -717,6 +718,7 @@ def render_api_vault():
                             elif "GROQ" in final_key_name: prov_name = "Groq"
                             elif "ANTHROPIC" in final_key_name: prov_name = "Anthropic"
                             elif "GEMINI" in final_key_name or "GOOGLE" in final_key_name: prov_name = "Google"
+                            elif "OLLAMA" in final_key_name: prov_name = "Ollama"
                             
                             provider_map[final_key_name] = {"provider": prov_name, "models": [], "embed_models": []}
                             
@@ -778,9 +780,15 @@ def render_api_vault():
 
     submitted = st.button("Add Local Model", type="primary")
     if submitted and provider and model_name:
-        db.create_model(provider, model_name, "", True)
-        st.success(f"Added local model '{model_name}'.")
-        st.rerun()
+        import sqlite3
+        try:
+            db.create_model(provider, model_name, "", True)
+            st.success(f"Added local model '{model_name}'.")
+            st.rerun()
+        except sqlite3.IntegrityError:
+            st.error(f"Il modello '{model_name}' è già presente nel database.")
+        except Exception as e:
+            st.error(f"Errore durante l'aggiunta del modello: {e}")
 
     models = db.read_all_models()
     if models:
