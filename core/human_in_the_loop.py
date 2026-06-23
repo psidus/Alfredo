@@ -4,7 +4,7 @@ from core.db_manager import DBManager
 
 logger = logging.getLogger(__name__)
 
-def request_human_input(chat_id: str, question: str) -> str:
+def request_human_input(chat_id: str, question: str, options: list = None) -> str:
     """
     Called by an agent tool. 
     1. Records the request in the shared database.
@@ -20,7 +20,7 @@ def request_human_input(chat_id: str, question: str) -> str:
     # 2. Send notification
     notifier = NotificationManager()
     message = f"⚠️ <b>Agent Question:</b>\n{question}\n\n<i>Reply to this message to resume execution.</i>"
-    notifier.send_telegram_notification(message, chat_id=chat_id)
+    notifier.send_telegram_notification(message, chat_id=chat_id, options=options)
     
     logger.info(f"Agent blocking for human input (DB-backed) from {chat_id}...")
     

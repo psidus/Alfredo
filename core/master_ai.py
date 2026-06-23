@@ -68,6 +68,7 @@ RULES FOR REQUIRED INPUTS:
 - Example: description="Analyze {dataset_name}" → required_inputs=[{"key": "dataset_name", "prompt": "What is the name of the dataset to analyze?"}]
 - If a task needs no variable inputs from the user, set "required_inputs": [].
 - NEVER ask for these values in your "response" — only define them in the task JSON. The bot will collect them.
+- HUMAN VALIDATION (HITL): If a task in the base workflow has "human_validation": true, you MUST preserve it exactly as true in the output JSON. You CANNOT remove it. You may ADD "human_validation": true to tasks if the user explicitly asks for human validation, feedback, or review steps.
 
 OUTPUT FORMAT (JSON ONLY):
 {
@@ -91,6 +92,7 @@ OUTPUT FORMAT (JSON ONLY):
         "agent_role": "MUST match exactly one role from the agents list",
         "agent_specialization": "Optional domain specialization for the agent in this task",
         "vector_dbs": ["list of vector database IDs (integers) to search, if needed"],
+        "human_validation": false,
         "required_inputs": [
           {"key": "variable_name", "prompt": "User-facing question to ask before execution"}
         ]
@@ -263,6 +265,7 @@ For each generated subtask, you must:
 7. CRITICAL ARCHITECTURE RULE: Agents NEVER write or execute final code files. Agents ONLY produce data, logic, and mathematical blueprints, saving them to the vector database. The final code is generated EXCLUSIVELY by the Master AI at the end of the workflow. If the original task asks an agent to "Audit source code", "Write a python file", or "Run code", you MUST decompose it into subtasks that focus on generating "logical blueprints" or "validation rules" for the vector DB instead.
 8. CRITICAL: The original task has a list of 'required_inputs'. You MUST distribute these required inputs into the 'required_inputs' array of the relevant subtasks where they are needed.
 9. AI OPTIMIZER TOOL VERIFICATION: You must verify and assign tools. Single agents DO NOT have write or production tools. They only research and populate the ephemeral database. If a task implies web search, add 'search_web'. If it implies vector DB search, add 'vector_search'. Distribute the original tools and vector_dbs, or add new ones as strictly necessary.
+10. HUMAN VALIDATION (HITL): The original task has a 'human_validation' flag. If it is true, at least ONE of your decomposed subtasks MUST have 'human_validation': true. Do NOT lose this flag.
 
 Available Agents:
 {available_agents}
@@ -275,6 +278,7 @@ Task to analyze:
 - Required Inputs: {required_inputs}
 - Original Tools: {original_tools}
 - Original Vector DBs: {original_vector_dbs}
+- Human Validation: {human_validation}
 
 Return ONLY a JSON object with this exact structure:
 {{
@@ -288,6 +292,7 @@ Return ONLY a JSON object with this exact structure:
       "agent_specialization": "Micro-specialization or null",
       "tools": ["list of required tools, e.g. 'search_web', 'vector_search'"],
       "vector_dbs": ["list of vector database IDs (strings or integers) if vector_search is assigned"],
+      "human_validation": false,
       "required_inputs": [
         {{ "key": "dataset_name", "prompt": "Please enter dataset name" }}
       ]
@@ -317,37 +322,65 @@ RULES:
    - If a task produces an output, ensure 'write_atomic_memory' is in the 'tools' array.
    - If a task requires searching the web, ensure 'search_web' is in the 'tools' array.
    - Do NOT give write tools to agents that only read.
-3. Do NOT change the logical order of tasks or delete tasks. Only modify keys, descriptions, expected outputs, and tools to ensure perfect alignment.
-4. Keep all existing placeholders in curly braces like {dataset_name}.
-5. Write all task outputs in the SAME language as the input.
+3. HUMAN VALIDATION (HITL): If any task has 'human_validation': true, you MUST preserve it exactly as true. Do NOT remove it.
+4. Do NOT change the logical order of tasks or delete tasks. Only modify keys, descriptions, expected outputs, and tools to ensure perfect alignment.
+5. Keep all existing placeholders in curly braces like {dataset_name}.
+6. Write all task outputs in the SAME language as the input.
 
 Input Workflow Plan (JSON):
 {expanded_plan}
 
 Return the optimized workflow plan in the EXACT same JSON structure:
-{{
+{
   "agents": [...],
-  "tasks": [...]
-}}
+  "tasks": [
+    {
+      "description": "...",
+      "expected_output": "...",
+      "agent_role": "...",
+      "agent_specialization": "...",
+      "tools": [...],
+      "vector_dbs": [...],
+      "human_validation": true/false,
+      "required_inputs": [...]
+    }
+  ]
+}
 """
 
 VALIDATION_FORMATTER_PROMPT = """
 You are Alfredo, the Master AI.
 An AI agent just completed a task that requires HUMAN VALIDATION.
 Your job is to read the agent's raw output and translate it into a clear, concise summary for the user.
-Explain what intermediate results were found, and ask the user what they want to keep, ignore, or change.
+
+TASK DESCRIPTION:
+{task_description}
+
+EXPECTED OUTPUT:
+{expected_output}
 
 RAW OUTPUT:
 {raw_output}
 
-Generate ONLY the user-facing message. Keep it short, use Markdown, and ask for clear instructions.
+CRITICAL INSTRUCTIONS:
+1. You MUST output a valid JSON object strictly matching this schema:
+{{
+  "message": "A clear, natural language summary of what was achieved and what the user needs to decide. Do NOT include technical artifacts or terms like '\\n', 'user_messages'.",
+  "options": ["Option 1", "Option 2"] 
+}}
+2. If the RAW OUTPUT contains a list of choices (e.g., languages, paths, options), extract them as a list of strings in the `options` array. If there are no options, leave the array empty `[]`.
+3. Do NOT wrap the JSON in Markdown code blocks like ```json. Output ONLY the raw JSON object.
 """
 
 VALIDATION_PROCESSOR_PROMPT = """
 You are Alfredo, the Master AI Editor.
 An agent produced an output, and the user provided feedback on it.
 Your job is to rewrite the agent's output to strictly incorporate the user's feedback (e.g., keeping only the selected items, removing ignored ones, or fixing values).
-CRITICAL: You MUST maintain the original Vector DB format (e.g., `# Topic:`, `[KEYWORDS: ]`, bullet points) if it was present.
+
+CRITICAL RULES:
+1. You MUST maintain the original Vector DB format (e.g., `# Topic:`, `[KEYWORDS: ]`, bullet points) if it was present.
+2. If the user explicitly selects an option (like a language or a specific path), update the output to clearly state that selection (e.g., "User selected: English").
+3. DO NOT execute the downstream task! If the user selects a language, do NOT translate the text yourself. Your ONLY job is to record the user's choice so the next agent knows what to do.
 
 RAW OUTPUT:
 {raw_output}
@@ -772,6 +805,8 @@ class MasterAI:
                         "agent_specialization": t_rec.get("agent_specialization"),
                         "vector_dbs": t_rec.get("vector_dbs") or [],
                         "tools": t_rec.get("tools") or [],
+                        "required_inputs": t_rec.get("required_inputs") or [],
+                        "human_validation": bool(t_rec.get("human_validation")),
                         "agent": agent_info
                     })
             
@@ -894,12 +929,16 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 "backstory": backstory
             }
 
-    def format_validation_request(self, raw_output: str) -> str:
-        """Translates raw agent output into a clear question for the user to validate."""
+    def format_validation_request(self, raw_output: str, task_description: str = "", expected_output: str = "") -> tuple[str, list]:
+        """Translates raw agent output into a clear question for the user to validate, using context."""
         if not raw_output:
-            return "⚠️ The agent produced no output. What should I do next?"
+            return "⚠️ The agent produced no output. What should I do next?", []
             
-        system_prompt = VALIDATION_FORMATTER_PROMPT.format(raw_output=raw_output)
+        system_prompt = VALIDATION_FORMATTER_PROMPT.format(
+            raw_output=raw_output,
+            task_description=task_description,
+            expected_output=expected_output
+        )
         model_string = f"{self.model_provider}/{self.model_name}"
         if self.model_provider == "openai":
             model_string = self.model_name
@@ -912,10 +951,28 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 messages=[{"role": "user", "content": system_prompt}],
                 temperature=0.3
             )
-            return raw_content.strip()
+            raw_str = raw_content.strip()
+            # Try to strip markdown code blocks if the model ignored instructions
+            if raw_str.startswith("```json"):
+                raw_str = raw_str[7:]
+            if raw_str.startswith("```"):
+                raw_str = raw_str[3:]
+            if raw_str.endswith("```"):
+                raw_str = raw_str[:-3]
+            raw_str = raw_str.strip()
+            
+            parsed = json.loads(raw_str)
+            msg = parsed.get("message", "⚠️ Could not parse message.")
+            opts = parsed.get("options", [])
+            if not isinstance(opts, list):
+                opts = []
+            return msg, opts
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON validation request: {e}. Raw content: {raw_content}")
+            return raw_content.strip(), []
         except Exception as e:
             logger.error(f"Failed to format validation request: {e}")
-            return f"⚠️ **Human Validation Required**\n\nRaw Output:\n```\n{raw_output[:1000]}...\n```\n\nPlease provide your feedback:"
+            return f"⚠️ **Human Validation Required**\n\nRaw Output:\n```\n{raw_output[:1000]}...\n```\n\nPlease provide your feedback:", []
 
     def process_validation_feedback(self, raw_output: str, user_feedback: str) -> str:
         """Rewrites the raw agent output incorporating the user's feedback."""
@@ -1105,7 +1162,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             agent_role=agent_role,
             required_inputs=json.dumps(task.get('required_inputs') or [], indent=2),
             original_tools=json.dumps(task.get('tools') or [], indent=2),
-            original_vector_dbs=json.dumps(task.get('vector_dbs') or [], indent=2)
+            original_vector_dbs=json.dumps(task.get('vector_dbs') or [], indent=2),
+            human_validation=task.get('human_validation', False)
         )
 
         model_string = f"{self.model_provider}/{self.model_name}"

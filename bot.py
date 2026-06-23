@@ -384,7 +384,7 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             # Re-route to input collection handler logic directly
             return await handle_input_collection(update, context)
         # Otherwise just proceed to execution
-        await execute_crew(update, context)
+        context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
         return ConversationHandler.END
 
     # If we have a decomposed plan waiting for confirmation:
@@ -495,6 +495,7 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                     await asyncio.sleep(4)
 
             typing_task = asyncio.create_task(typing_indicator())
+            context.user_data["typing_task"] = typing_task
             
             try:
                 # Run decomposer in a separate thread to keep Telegram responsive
@@ -651,8 +652,8 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
 
     if not all_inputs:
         # No inputs needed — proceed directly to execution
-        logger.info("collect_required_inputs: No inputs needed, proceeding to execution.")
-        await execute_crew(update, context)
+        logger.info("collect_required_inputs: No inputs required. Launching execute_crew.")
+        context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
         return ConversationHandler.END
 
     # Ask the first question
@@ -685,7 +686,7 @@ async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_
         exec_ctx = context.user_data.get("execution_context", {})
         exec_ctx.update(collected)
         context.user_data["execution_context"] = exec_ctx
-        await execute_crew(update, context)
+        context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
         return ConversationHandler.END
 
     # Record the answer for the current (first) pending question
@@ -719,7 +720,7 @@ async def handle_input_collection(update: Update, context: ContextTypes.DEFAULT_
             text="✅ <b>All inputs collected!</b> Starting execution...",
             parse_mode=ParseMode.HTML
         )
-        await execute_crew(update, context)
+        context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
         return ConversationHandler.END
 
 
@@ -793,12 +794,14 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await asyncio.sleep(4)
 
         typing_task = asyncio.create_task(typing_indicator())
+        context.user_data["typing_task"] = typing_task
 
         # Progress callback: sends a status update to Telegram for each task
         loop = asyncio.get_event_loop()
 
         def on_task_progress(task_idx: int, total_tasks: int, agent_role: str, status: str = "completed"):
             """Called from the worker thread before/after tasks."""
+            nonlocal status_msg
             try:
                 if status == "decomposing":
                     msg = (
@@ -818,10 +821,26 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         f"<i>✅ Step {task_idx + 1}/{total_tasks} completed</i>\n"
                         f"🤖 Agent: <code>{agent_role[:50]}</code>"
                     )
-                asyncio.run_coroutine_threadsafe(
-                    status_msg.edit_text(text=msg, parse_mode=ParseMode.HTML),
-                    loop
-                ).result(timeout=10)
+                
+                async def update_status():
+                    nonlocal status_msg
+                    try:
+                        # When a task starts, delete the old status and send a new one 
+                        # so it pops to the bottom of the chat (especially after HITL)
+                        if status == "running":
+                            try:
+                                await status_msg.delete()
+                            except Exception:
+                                pass
+                            status_msg = await context.bot.send_message(
+                                chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML
+                            )
+                        else:
+                            await status_msg.edit_text(text=msg, parse_mode=ParseMode.HTML)
+                    except Exception:
+                        pass
+                
+                asyncio.run_coroutine_threadsafe(update_status(), loop).result(timeout=10)
             except Exception:
                 pass  # Best-effort — don't crash the worker thread
 
@@ -836,7 +855,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
             else:
                 logger.info(f"User {user_id}: Starting execution of Workflow ID {workflow_id} (resume from {start_idx}).")
-                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, None, accumulated_context, str(chat_id))
+                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, on_task_progress, accumulated_context, str(chat_id))
 
             # Unpack the (last_output, global_context) tuple
             if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
@@ -1086,6 +1105,19 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
         provide_human_input(str(chat_id), "SYSTEM_ABORT")
         logger.info(f"Aborted pending human-in-the-loop request for chat {chat_id}.")
 
+    # Stop the running CrewAI thread if any
+    try:
+        from core.crew_builder import abort_crew_execution
+        abort_crew_execution(str(chat_id))
+        logger.info(f"Aborted running CrewAI execution for chat {chat_id}.")
+    except Exception as e:
+        logger.error(f"Failed to abort CrewAI execution: {e}")
+
+    # Immediately stop typing indicator if running
+    if "typing_task" in context.user_data:
+        context.user_data["typing_task"].cancel()
+        logger.info(f"Cancelled typing indicator for chat {chat_id}.")
+
     keyboard = [[InlineKeyboardButton("🔄 Restart", callback_data="restart_bot")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1232,8 +1264,28 @@ async def resume_execution_callback(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_reply_markup(reply_markup=None)
     
     # We just call execute_crew again; it will read 'dynamic_run_state'
-    await execute_crew(update, context)
+    context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
 
+
+@whitelist_check
+async def hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles inline keyboard button clicks for Human-in-the-Loop validation."""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = update.effective_chat.id
+    # callback_data is formatted as 'hitl_OptionText'
+    chosen_option = query.data[5:] 
+    
+    if has_pending_request(str(chat_id)):
+        provide_human_input(str(chat_id), chosen_option)
+        # Remove buttons and show what was selected
+        await query.edit_message_text(
+            text=f"{query.message.text}\n\n✅ <b>You chose:</b> {chosen_option}",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await query.edit_message_reply_markup(reply_markup=None)
 
 # --- Main Function ---
 
@@ -1294,6 +1346,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
     application.add_handler(CallbackQueryHandler(handle_restart_button, pattern=r"^restart_bot$"))
     application.add_handler(CallbackQueryHandler(resume_execution_callback, pattern=r"^resume_execution$"))
+    application.add_handler(CallbackQueryHandler(hitl_callback, pattern=r"^hitl_"))
 
     # Feedback text handler — catches free text ONLY when awaiting_feedback flag is set.
     # group=1 ensures it runs alongside (but independently from) the ConversationHandler.

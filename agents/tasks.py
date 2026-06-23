@@ -59,6 +59,5 @@ def create_dynamic_tasks(task_data, overall_plan="", full_prd=""):
         ),
         expected_output=f"Complete Python source code for the file {task_data['target_file']}.",
         agent=executor_agent
-    )
-
     return [planning_task, validation_task, coding_task]
+

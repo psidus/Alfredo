@@ -12,6 +12,20 @@ class RateLimitError(Exception):
 
 from crewai import Agent, Task, Crew
 
+ABORT_FLAGS = {}
+
+class ExecutionCancelledError(Exception):
+    pass
+
+def abort_crew_execution(chat_id: str):
+    if chat_id:
+        ABORT_FLAGS[str(chat_id)] = True
+
+def check_abort(*args, **kwargs):
+    chat_id = os.getenv("CURRENT_CHAT_ID")
+    if chat_id and ABORT_FLAGS.get(str(chat_id)):
+        raise ExecutionCancelledError("Execution aborted by user.")
+
 from core.db_manager import DBManager
 from core.data_manager import DataManager
 from core.ephemeral_memory import EphemeralMemoryManager
@@ -381,7 +395,8 @@ def _build_agent(agent_id, specialization=None, model_id_override=None):
         tools=agent_tools,
         verbose=True,
         allow_delegation=False,
-        max_iter=15  # Prevent infinite reasoning loops
+        max_iter=5,
+        step_callback=check_abort
     )
     logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model}, specialization={specialization!r})")
     return agent
@@ -582,6 +597,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     The database is destroyed when this function returns.
     """
     # 1. Read run record
+    if chat_id:
+        ABORT_FLAGS[str(chat_id)] = False
+
     run = db.read_run(run_id)
     if not run:
         raise ValueError(f"Run ID {run_id} not found.")
@@ -657,7 +675,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             prev_task_id = prev_step if isinstance(prev_step, int) else prev_step.get("task_id")
             last_output = task_outputs.get(str(prev_task_id), "")
 
-    def _execute_task_instance(task_id, current_inputs, log_msg):
+    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None):
         nonlocal last_output, task_outputs, memory_manager
 
         if status_callback:
@@ -746,6 +764,13 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         task_obj.description = original_desc
         task_obj.expected_output = original_expected
 
+        if status_callback and task_idx is not None:
+            try:
+                agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
+                status_callback(task_idx, len(task_ids), agent_role, "running")
+            except Exception:
+                pass
+
         single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
 
         try:
@@ -769,8 +794,12 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             from core.master_ai import MasterAI
             from core.human_in_the_loop import request_human_input
             master_ai = MasterAI()
-            question = master_ai.format_validation_request(last_output)
-            user_feedback = request_human_input(chat_id, question)
+            question, options = master_ai.format_validation_request(
+                last_output, 
+                task_description=t_rec.get('description', ''), 
+                expected_output=t_rec.get('expected_output', '')
+            )
+            user_feedback = request_human_input(chat_id, question, options=options)
             if user_feedback and user_feedback != "SYSTEM_ABORT":
                 last_output = master_ai.process_validation_feedback(last_output, user_feedback)
                 _auto_save_to_memory(memory_manager, task_id, last_output, f"{agent_role} (Human Edited)")
@@ -785,7 +814,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         if not is_batch:
             task_id = step_def if isinstance(step_def, int) else step_def.get('task_id')
             log_msg = f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})..."
-            _execute_task_instance(task_id, inputs, log_msg)
+            _execute_task_instance(task_id, inputs, log_msg, task_idx=i)
             db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
         else:
             batch_tasks = step_def.get('task_ids', [])
@@ -815,7 +844,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 
                 for b_idx, inner_task_id in enumerate(batch_tasks):
                     log_msg = f"Executing Batch Loop {i+1}/{len(task_ids)} - Chunk {batch_start//batch_size + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
-                    _execute_task_instance(inner_task_id, batch_inputs, log_msg)
+                    _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=i)
             
             db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
 
@@ -1001,6 +1030,9 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     if not plan or 'agents' not in plan or 'tasks' not in plan:
         raise ValueError("Invalid plan format. Must contain 'agents' and 'tasks'.")
 
+    if chat_id:
+        ABORT_FLAGS[str(chat_id)] = False
+
     execution_context = execution_context or {}
 
     # Resolve model
@@ -1114,7 +1146,8 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 tools=agent_tools,
                 verbose=True,
                 allow_delegation=False,
-                max_iter=5
+                max_iter=5,
+                step_callback=check_abort
             )
             if not specialization:
                 agents_cache[agent_role] = agent_instance
@@ -1275,8 +1308,12 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             master_ai = MasterAI()
             
             logging.info(f"Dynamic task {task_idx + 1} requires human validation. Pausing execution.")
-            question = master_ai.format_validation_request(last_output)
-            user_feedback = request_human_input(chat_id, question)
+            question, options = master_ai.format_validation_request(
+                last_output,
+                task_description=task_data.get('description', ''),
+                expected_output=task_data.get('expected_output', '')
+            )
+            user_feedback = request_human_input(chat_id, question, options=options)
             
             if user_feedback and user_feedback != "SYSTEM_ABORT":
                 logging.info(f"Processing human feedback for dynamic task {task_idx + 1}...")

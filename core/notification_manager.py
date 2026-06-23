@@ -20,7 +20,7 @@ class NotificationManager:
             self.allowed_ids = []
             self.default_chat_id = None
 
-    def send_telegram_notification(self, message, chat_id=None):
+    def send_telegram_notification(self, message, chat_id=None, options=None):
         """Sends a notification message via Telegram Bot API using built-in urllib."""
         if not self.bot_token:
             logger.error("TELEGRAM_BOT_TOKEN not found in environment.")
@@ -37,6 +37,14 @@ class NotificationManager:
             "text": message,
             "parse_mode": "HTML"
         }
+        
+        if options:
+            inline_keyboard = []
+            for opt in options:
+                # Telegram callback_data limit is 64 bytes. "hitl_" is 5 bytes. 59 bytes remaining.
+                callback_data = f"hitl_{opt}"[:64]
+                inline_keyboard.append([{"text": opt, "callback_data": callback_data}])
+            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
