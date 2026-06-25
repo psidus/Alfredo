@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -920,10 +921,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
         # --- AUTOMATIC POST-PROCESSING: Master AI Refinement ---
-        await status_msg.edit_text(
-            text="🧠 <b>Refining output...</b>\n<i>Master AI is polishing the final report.</i>",
-            parse_mode=ParseMode.HTML
-        )
+        try:
+            await status_msg.edit_text(
+                text="🧠 <b>Refining output...</b>\n<i>Master AI is polishing the final report.</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass  # status_msg may have been deleted/replaced by on_task_progress
 
         try:
             # Pass global context (all agents' outputs) to the refiner so the
@@ -940,10 +944,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             db.update_run(run_id, status='completed', result=refined_result)
 
         # Save refined output and summarize global context for conversational continuation
-        await status_msg.edit_text(
-            text="🧠 <b>Compressing context...</b>\n<i>Master AI is summarizing memory for follow-up chats.</i>",
-            parse_mode=ParseMode.HTML
-        )
+        try:
+            await status_msg.edit_text(
+                text="🧠 <b>Compressing context...</b>\n<i>Master AI is summarizing memory for follow-up chats.</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass  # status_msg may have been deleted/replaced by on_task_progress
         try:
             accumulated_context_str = await asyncio.to_thread(master_ai.summarize_global_context, global_context)
             logger.info(f"User {user_id}: Context summarization complete.")
@@ -970,8 +977,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Safeguard: ensure expected_exports is always a list, never a bare string
         if isinstance(expected_exports, str):
             try:
-                import json as _json
-                expected_exports = _json.loads(expected_exports)
+                expected_exports = json.loads(expected_exports)
                 if isinstance(expected_exports, str):
                     expected_exports = [expected_exports]
             except (json.JSONDecodeError, ValueError):
@@ -990,10 +996,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             export_instructions = final_plan.get("export_instructions", "")
 
         if expected_exports:
-            await status_msg.edit_text(
-                text="📁 <b>Generating requested files...</b>\n<i>Master AI is building your documents from the global context.</i>",
-                parse_mode=ParseMode.HTML
-            )
+            try:
+                await status_msg.edit_text(
+                    text="📁 <b>Generating requested files...</b>\n<i>Master AI is building your documents from the global context.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass  # status_msg may have been deleted/replaced by on_task_progress
             try:
                 export_dir = os.path.join("exports", str(run_id) if run_id else f"chat_{chat_id}")
                 generated_files = await asyncio.to_thread(
@@ -1274,8 +1283,24 @@ async def hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     
     chat_id = update.effective_chat.id
-    # callback_data is formatted as 'hitl_OptionText'
-    chosen_option = query.data[5:] 
+    
+    # Resolve the full text of the chosen option from the button label
+    # because callback_data might have been truncated to 64 bytes.
+    chosen_option = "Unknown option"
+    if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+        for row in query.message.reply_markup.inline_keyboard:
+            for btn in row:
+                if btn.callback_data == query.data:
+                    chosen_option = btn.text
+                    break
+    
+    if chosen_option == "Unknown option":
+        # Fallback if button not found for some reason
+        parts = query.data.split('_', 2)
+        if len(parts) >= 3:
+            chosen_option = parts[2]
+        else:
+            chosen_option = query.data[5:]
     
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), chosen_option)

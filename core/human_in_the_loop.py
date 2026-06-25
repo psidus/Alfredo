@@ -24,9 +24,19 @@ def request_human_input(chat_id: str, question: str, options: list = None) -> st
     
     logger.info(f"Agent blocking for human input (DB-backed) from {chat_id}...")
     
-    # 3. Poll the database for the answer
+    # 3. Poll the database for the answer (with timeout to prevent infinite blocking)
+    HITL_TIMEOUT_SECONDS = 3600  # 1 hour max wait
+    start_time = time.time()
     try:
         while True:
+            elapsed = time.time() - start_time
+            if elapsed >= HITL_TIMEOUT_SECONDS:
+                logger.warning(f"HITL timeout reached ({HITL_TIMEOUT_SECONDS}s) for {chat_id}. Resuming with no feedback.")
+                # Clean up the pending request
+                with DBManager() as db:
+                    db.delete_hitl_request(chat_id)
+                return "SYSTEM_ABORT"
+            
             # Re-open connection each poll to ensure we see the latest data on disk (SQLite)
             with DBManager() as db:
                 req = db.get_hitl_request(chat_id)

@@ -2300,7 +2300,10 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                         
                         try:
                             from core.crew_builder import execute_run_with_resume
-                            result = execute_run_with_resume(run_id, status_callback=st.write)
+                            result = execute_run_with_resume(
+                                run_id, 
+                                status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
+                            )
                             
                             # Update run record
                             db.update_run(run_id, status='completed', result=str(result))

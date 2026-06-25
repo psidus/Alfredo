@@ -378,9 +378,12 @@ An agent produced an output, and the user provided feedback on it.
 Your job is to rewrite the agent's output to strictly incorporate the user's feedback (e.g., keeping only the selected items, removing ignored ones, or fixing values).
 
 CRITICAL RULES:
-1. You MUST maintain the original Vector DB format (e.g., `# Topic:`, `[KEYWORDS: ]`, bullet points) if it was present.
-2. If the user explicitly selects an option (like a language or a specific path), update the output to clearly state that selection (e.g., "User selected: English").
-3. DO NOT execute the downstream task! If the user selects a language, do NOT translate the text yourself. Your ONLY job is to record the user's choice so the next agent knows what to do.
+1. If the original output uses a structured Vector DB format (e.g., `# Topic:`, `[KEYWORDS: ]`, bullet points), you MUST maintain that format. If it does not, use plain text.
+2. If the user explicitly selects an option (like a language, a specific path, or an item), update the output to clearly state that selection (e.g., "User selected: English"). Preserve the context around it so the next agent understands the decision.
+3. DO NOT execute the downstream task! Your ONLY job is to RECORD the user's choice so the next agent in the pipeline knows what to do.
+   - BAD example: If the user selects "Italian", do NOT translate the text into Italian yourself.
+   - GOOD example: Rewrite the output as "User selected target language: Italian. The following content should be translated: [original content]"
+4. If the user simply approves without changes (e.g., "ok", "approve", "va bene", "good"), return the original RAW OUTPUT unchanged. Do NOT rephrase or rewrite it.
 
 RAW OUTPUT:
 {raw_output}
@@ -388,7 +391,7 @@ RAW OUTPUT:
 USER FEEDBACK:
 {user_feedback}
 
-Rewrite and output ONLY the updated vector DB compliant text. Do not include markdown code block wrappers (like ```md).
+Rewrite and output ONLY the updated text incorporating the user's feedback. Do not include markdown code block wrappers (like ```md).
 """
 
 class MasterAI:

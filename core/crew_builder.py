@@ -678,11 +678,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None):
         nonlocal last_output, task_outputs, memory_manager
 
-        if status_callback:
-            try:
-                status_callback(log_msg)
-            except Exception:
-                pass
+
 
         task_obj = _build_task(task_id, agents_cache)
         _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
@@ -1293,14 +1289,6 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         )
         logging.info(f"[Memory-Centric] Dynamic task {task_idx + 1} completed by '{effective_role}'.")
 
-        # Notify the bot of task progress (best-effort)
-        if progress_callback:
-            try:
-                total_tasks = len(plan['tasks'])
-                progress_callback(task_idx, total_tasks, effective_role)
-            except Exception:
-                pass  # Don't crash the workflow for a notification failure
-        
         # Handle Human Validation for Dynamic Plan
         if chat_id and task_data.get('human_validation'):
             from core.master_ai import MasterAI
@@ -1325,6 +1313,14 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                     structured_data={"raw_output": last_output},
                     agent_role=f"{effective_role} (Human Edited)",
                 )
+        
+        # Notify the bot of task completion (best-effort, AFTER HITL so status is accurate)
+        if progress_callback:
+            try:
+                total_tasks = len(plan['tasks'])
+                progress_callback(task_idx, total_tasks, effective_role, "completed")
+            except Exception:
+                pass  # Don't crash the workflow for a notification failure
         
         task_outputs[str(task_idx)] = last_output
         if run_id:

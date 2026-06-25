@@ -40,9 +40,10 @@ class NotificationManager:
         
         if options:
             inline_keyboard = []
-            for opt in options:
-                # Telegram callback_data limit is 64 bytes. "hitl_" is 5 bytes. 59 bytes remaining.
-                callback_data = f"hitl_{opt}"[:64]
+            for idx, opt in enumerate(options):
+                # Use index-based callback_data to avoid collisions from truncated long option strings.
+                # The bot handler resolves the full option text from the button label or the index.
+                callback_data = f"hitl_{idx}_{opt}"[:64]
                 inline_keyboard.append([{"text": opt, "callback_data": callback_data}])
             payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
         
