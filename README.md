@@ -2,29 +2,37 @@
 
 Alfredo is an intelligent, multi-agent orchestrator that connects a conversational **Master AI** and specialized task agents with a user interface (**Streamlit Dashboard**) and a background worker (**Telegram Bot**). It allows you to run, build, and optimize dynamic workflows using Crews (CrewAI) directly from Telegram or the Web UI.
 
+## 🌟 Key Features
+- **Multi-Agent Orchestration**: Manage complex tasks by delegating them to specialized AI agents.
+- **Dual Interface**: Interact with Alfredo via a rich Streamlit Web Dashboard or on-the-go via Telegram.
+- **Docker Ready**: Fully containerized environment ensuring all dependencies (requirements) are automatically downloaded and set up. No manual installation needed.
+- **Desktop Shortcut**: Automatically generate a convenient desktop icon to start the entire system with one click.
+- **Privacy First**: API keys and personal data are kept locally in a `.env` file and are **never** pushed to the repository.
+
 ---
 
 ## 🚀 Quick Start (Docker + Desktop Icon)
 
-The easiest way to get Alfredo up and running on Windows is using **Docker** and the automated **Desktop Shortcut**.
+The easiest way to get Alfredo up and running on Windows is using **Docker** and the automated **Desktop Shortcut**. All required dependencies, libraries, and tools will be downloaded automatically during the first run.
 
 ### 1. Prerequisites
 - Install and launch [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 - Ensure you have Python installed locally (only needed once to create the shortcut).
 
 ### 2. Setup Configuration
-1. Clone this repository:
+1. Clone this repository to your machine:
    ```bash
    git clone <your-repo-url>
    cd Alfredo
    ```
-2. Copy `.env.example` to `.env` and fill in your API keys (e.g., `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`):
+2. Copy `.env.example` to `.env`. **This is crucial for privacy**: `.env` is ignored by git, meaning your API keys will stay on your computer and will not be shared.
    ```bash
    cp .env.example .env
    ```
+3. Open the `.env` file and fill in your API keys (e.g., `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`).
 
 ### 3. Create the Desktop Shortcut
-Run the shortcut creator script:
+Run the shortcut creator script to generate a desktop icon:
 ```bash
 python create_docker_shortcut.py
 ```
@@ -32,7 +40,7 @@ This will automatically generate an **`Alfredo (Docker)`** shortcut icon on your
 
 ### 4. Run Alfredo
 - Double-click the **`Alfredo (Docker)`** icon on your Desktop.
-- The terminal will launch, build the Docker images (on the first run), start the services in the background, and open your web browser automatically at `http://localhost:8501`.
+- The terminal will launch, download all required dependencies automatically, build the Docker images (on the first run), start the services in the background, and open your web browser automatically at `http://localhost:8501`.
 - To stop the application, return to the opened terminal window and **press any key**. It will cleanly shut down the Docker containers.
 
 ---

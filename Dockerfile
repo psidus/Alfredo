@@ -1,8 +1,10 @@
 FROM python:3.10-slim
 WORKDIR /app
 
-# Install system dependencies including Xvfb for headless screenshots
+# Install system dependencies including Xvfb for headless screenshots and build tools for C++ extensions
 RUN apt-get update && apt-get install -y \
+    build-essential \
+    python3-dev \
     xvfb \
     libx11-6 \
     libxext6 \

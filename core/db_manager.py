@@ -98,7 +98,8 @@ class DBManager:
                 provider TEXT NOT NULL,
                 model_name TEXT NOT NULL UNIQUE,
                 env_var_name TEXT,
-                is_local BOOLEAN DEFAULT 0
+                is_local BOOLEAN DEFAULT 0,
+                vram_gb REAL DEFAULT 0.0
             );
             """,
             """
@@ -213,6 +214,13 @@ class DBManager:
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass 
+                
+            # Migration to add vram_gb if upgrading
+            try:
+                self.cursor.execute("ALTER TABLE models ADD COLUMN vram_gb REAL DEFAULT 0.0;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
                 
             # Migration to add tools_json to tasks if upgrading
             try:
@@ -383,9 +391,9 @@ class DBManager:
     # which is the standard and effective way to prevent SQL injection attacks.
     # The logic is sound and maps directly to the defined schema.
     
-    def create_model(self, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False) -> int:
-        sql = "INSERT INTO models (provider, model_name, env_var_name, is_local) VALUES (?, ?, ?, ?)"
-        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0))
+    def create_model(self, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0) -> int:
+        sql = "INSERT INTO models (provider, model_name, env_var_name, is_local, vram_gb) VALUES (?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -401,9 +409,9 @@ class DBManager:
         rows = self.cursor.fetchall()
         return [self._to_dict(row) for row in rows]
 
-    def update_model(self, model_id: int, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False) -> int:
-        sql = "UPDATE models SET provider = ?, model_name = ?, env_var_name = ?, is_local = ? WHERE id = ?"
-        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, model_id))
+    def update_model(self, model_id: int, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0) -> int:
+        sql = "UPDATE models SET provider = ?, model_name = ?, env_var_name = ?, is_local = ?, vram_gb = ? WHERE id = ?"
+        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb, model_id))
         self.conn.commit()
         return self.cursor.rowcount
 

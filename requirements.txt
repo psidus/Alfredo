@@ -1,5 +1,7 @@
 streamlit
 crewai>=0.120.0
+# Context compression — reduces token usage 60-95% via LiteLLM callback
+headroom-ai[all]
 # CrewAI extras used here are managed via separate packages in newer releases.
 crewai-tools>=0.40.0
 # Python 3.14 on Windows needs a modern regex wheel (older versions fail to build).

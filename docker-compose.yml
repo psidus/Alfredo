@@ -18,4 +18,15 @@ services:
       - ./storage:/app/storage
     restart: unless-stopped
 
-
+  headroom_proxy:
+    build: .
+    container_name: alfredo_headroom_proxy
+    command: headroom proxy --port 8787 --host 0.0.0.0
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    volumes:
+      - ./db:/app/db
+      - ./workspace:/app/workspace
+    restart: unless-stopped

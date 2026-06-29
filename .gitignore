@@ -41,8 +41,6 @@ prd.json
 rapid_prompt.txt
 storage/vector_dbs_test/
 workspace/
-create_docker_shortcut.py
-run_docker_alfredo.bat
 test_*.txt
 test_*.py
 fix_*.py

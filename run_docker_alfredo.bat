@@ -1,0 +1,35 @@
+@echo off
+title Alfredo AI OS - Docker launcher
+cd /d "%~dp0"
+echo Starting Alfredo Docker containers...
+
+# Start containers in detached mode and rebuild if code changed
+docker compose up -d --build
+
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERROR] Failed to start Docker containers. 
+    echo Please make sure Docker Desktop is open and running!
+    echo.
+    pause
+    exit /b
+)
+
+echo Waiting for Alfredo to start...
+timeout /t 4 /nobreak > nul
+
+echo Opening Alfredo Dashboard in your browser...
+start http://localhost:8501
+
+echo.
+echo ==========================================
+echo Alfredo AI OS is running in Docker!
+echo ==========================================
+echo.
+echo [To STOP Alfredo, close this window or press any key to shutdown containers]
+echo.
+pause
+
+echo Stopping Alfredo Docker containers...
+docker compose down
+exit

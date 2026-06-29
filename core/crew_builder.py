@@ -38,6 +38,19 @@ from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryT
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- Headroom AI: Context Compression ---
+# If HEADROOM_ENABLED=true in .env, compress prompts before CrewAI/LiteLLM calls.
+# If HEADROOM_PROXY_URL is set, we route traffic to the proxy instead.
+if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
+    proxy_url = os.getenv("HEADROOM_PROXY_URL")
+    if proxy_url:
+        os.environ["LITELLM_API_BASE"] = proxy_url
+        os.environ["OPENAI_BASE_URL"] = proxy_url
+        logging.info(f"Headroom AI Proxy Mode enabled for CrewAI at {proxy_url}")
+    else:
+        logging.info("Headroom AI inline compression enabled for CrewAI (note: inline compress is not currently wired up to CrewAI's internal LangChain LLMs, use proxy mode for full coverage).")
+
+
 # Initialize DB
 db = DBManager()
 
@@ -586,17 +599,15 @@ def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
 def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None, chat_id: str = None) -> str:
     """
     Executes a workflow run task-by-task with MEMORY-CENTRIC communication.
-
-    Instead of stuffing all previous outputs into each task's prompt (which
-    wastes tokens and dilutes context), we use an ephemeral in-memory ChromaDB
-    instance.  Each agent's output is stored as a keyed vector record, and
-    downstream agents receive only a compact Memory Index Table telling them
-    which keys are available.  They retrieve details on demand via the
-    'read_atomic_memory' tool.
-
-    The database is destroyed when this function returns.
+    Now using a DAG Scheduler with VRAM-awareness.
     """
-    # 1. Read run record
+    import concurrent.futures
+    import threading
+    import os
+    import json
+    import re
+    from dotenv import dotenv_values, find_dotenv
+
     if chat_id:
         ABORT_FLAGS[str(chat_id)] = False
 
@@ -619,67 +630,108 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     if not task_ids:
         raise ValueError(f"Workflow ID {workflow_id} has no tasks defined.")
 
-    # Parse inputs and task_outputs
     inputs = {}
     if run.get('inputs'):
         try:
             inputs = json.loads(run['inputs'])
         except Exception:
-            inputs = {}
+            pass
 
     task_outputs = {}
     if run.get('task_outputs'):
         try:
             task_outputs = json.loads(run['task_outputs'])
         except Exception:
-            task_outputs = {}
+            pass
 
     start_idx = run.get('current_task_idx', 0)
-    if start_idx >= len(task_ids):
-        return run.get('result', '')
-
-    # Mark run as running
     db.update_run(run_id, status='running', current_task_idx=start_idx, task_outputs=task_outputs)
 
-    # --- MEMORY-CENTRIC: Initialise ephemeral vector store for this run ---
+    # --- DAG NORMALIZATION ---
+    dag_nodes = {}
+    for i, step_def in enumerate(task_ids):
+        node_id = f"node_{i}"
+        depends_on = []
+        is_batch = False
+        task_id = None
+        batch_tasks = []
+        batch_size = 5
+        source_variable = ""
+        
+        if isinstance(step_def, int):
+            task_id = step_def
+            if i > 0: depends_on = [f"node_{i-1}"]
+        elif isinstance(step_def, dict):
+            node_id = step_def.get("id", f"node_{i}")
+            depends_on = step_def.get("depends_on", [])
+            if "id" not in step_def: step_def["id"] = node_id
+            
+            if step_def.get("type") == "batch_loop":
+                is_batch = True
+                batch_tasks = step_def.get("task_ids", [])
+                batch_size = step_def.get("batch_size", 5)
+                source_variable = step_def.get("source_variable", "")
+            else:
+                task_id = step_def.get("task_id")
+                
+        dag_nodes[node_id] = {
+            "step_def": step_def,
+            "task_id": task_id,
+            "is_batch": is_batch,
+            "batch_tasks": batch_tasks,
+            "batch_size": batch_size,
+            "source_variable": source_variable,
+            "depends_on": depends_on,
+            "original_index": i
+        }
+
+    in_degree = {n: 0 for n in dag_nodes}
+    dependents = {n: [] for n in dag_nodes}
+    
+    for n_id, data in dag_nodes.items():
+        for d in data["depends_on"]:
+            if d in dag_nodes:
+                in_degree[n_id] += 1
+                dependents[d].append(n_id)
+
+    # Memory init
     memory_manager = EphemeralMemoryManager(run_id=run_id)
     if accumulated_context:
         memory_manager.load_from_dump(accumulated_context)
     read_memory_tool = ReadAtomicMemoryTool(memory_manager=memory_manager)
     write_memory_tool = WriteAtomicMemoryTool(memory_manager=memory_manager)
 
-    # If resuming, seed the ephemeral memory with outputs from already-completed tasks
-    if start_idx > 0:
-        for prev_i in range(start_idx):
-            prev_tid = task_ids[prev_i]
-            prev_output = task_outputs.get(str(prev_tid), "")
-            if prev_output:
-                prev_task_rec = db.read_task(prev_tid)
-                prev_agent_role = "Unknown"
-                if prev_task_rec and prev_task_rec.get('agent_id'):
-                    agent_rec = db.read_agent(prev_task_rec['agent_id'])
-                    if agent_rec:
-                        prev_agent_role = agent_rec.get('name', 'Unknown')
-                _auto_save_to_memory(
-                    memory_manager, prev_tid, prev_output, prev_agent_role
-                )
+    completed_nodes = set()
+    node_outputs = {}
+    for n_id, data in dag_nodes.items():
+        if data["is_batch"]:
+            last_inner = data["batch_tasks"][-1] if data["batch_tasks"] else None
+            if last_inner and str(last_inner) in task_outputs:
+                completed_nodes.add(n_id)
+                node_outputs[n_id] = task_outputs[str(last_inner)]
+        else:
+            if str(data["task_id"]) in task_outputs:
+                completed_nodes.add(n_id)
+                node_outputs[n_id] = task_outputs[str(data["task_id"])]
+
+    for n_id in completed_nodes:
+        data = dag_nodes[n_id]
+        if data["is_batch"]:
+            for b_tid in data["batch_tasks"]:
+                if str(b_tid) in task_outputs:
+                    _auto_save_to_memory(memory_manager, b_tid, task_outputs[str(b_tid)], "Unknown")
+        else:
+            tid = data["task_id"]
+            if str(tid) in task_outputs:
+                _auto_save_to_memory(memory_manager, tid, task_outputs[str(tid)], "Unknown")
+                
+        for dep in dependents[n_id]:
+            in_degree[dep] -= 1
 
     agents_cache = {}
-    last_output = ""
-    if start_idx > 0:
-        prev_step = task_ids[start_idx - 1]
-        if isinstance(prev_step, dict) and prev_step.get("type") == "batch_loop":
-            last_inner = prev_step.get("task_ids", [])[-1]
-            last_output = task_outputs.get(str(last_inner), "")
-        else:
-            prev_task_id = prev_step if isinstance(prev_step, int) else prev_step.get("task_id")
-            last_output = task_outputs.get(str(prev_task_id), "")
-
-    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None):
-        nonlocal last_output, task_outputs, memory_manager
-
-
-
+    task_outputs_lock = threading.Lock()
+    
+    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output=""):
         task_obj = _build_task(task_id, agents_cache)
         _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
 
@@ -700,23 +752,24 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
 
         lookup = {}
-        for t_rec in workflow_tasks:
-            tid = t_rec['id']
-            t_name = t_rec.get('name')
-            t_out = task_outputs.get(str(tid), "")
-            if t_out:
-                if t_name:
-                    norm = normalize_name(t_name)
-                    if norm: lookup[norm] = t_out
-                lookup[f"task {tid}"] = t_out
-                lookup[f"task_{tid}"] = t_out
-                lookup[str(tid)] = t_out
+        with task_outputs_lock:
+            for t_rec in workflow_tasks:
+                tid = t_rec['id']
+                t_name = t_rec.get('name')
+                t_out = task_outputs.get(str(tid), "")
+                if t_out:
+                    if t_name:
+                        norm = normalize_name(t_name)
+                        if norm: lookup[norm] = t_out
+                    lookup[f"task {tid}"] = t_out
+                    lookup[f"task_{tid}"] = t_out
+                    lookup[str(tid)] = t_out
 
-        lookup["previous task"] = last_output
-        lookup["previous_task"] = last_output
-        lookup["previous"] = last_output
-        lookup["task precedente"] = last_output
-        lookup["task_precedente"] = last_output
+        lookup["previous task"] = parent_output
+        lookup["previous_task"] = parent_output
+        lookup["previous"] = parent_output
+        lookup["task precedente"] = parent_output
+        lookup["task_precedente"] = parent_output
 
         pattern = re.compile(r'\{task:([^\}]+)\}|\{([^\}]+)\}')
         def repl(match):
@@ -735,11 +788,11 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             for k, v in current_inputs.items():
                 text = text.replace(f"{{{k}}}", str(v))
             text = text.replace("{user_input}", current_inputs.get('user_input', ''))
-            text = text.replace("{previous_result}", last_output)
-            text = text.replace("{context}", last_output)
-            text = text.replace("{flexible_input}", current_inputs.get('user_input', last_output))
+            text = text.replace("{previous_result}", parent_output)
+            text = text.replace("{context}", parent_output)
+            text = text.replace("{flexible_input}", current_inputs.get('user_input', parent_output))
             text = pattern.sub(repl, text)
-            text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', text)
+            text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<>', text)
             return text
 
         original_desc = apply_interpolation(task_obj.description)
@@ -781,9 +834,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             else:
                 raise e
         
-        last_output = str(result)
+        task_out = str(result)
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
-        _auto_save_to_memory(memory_manager, task_id, last_output, agent_role)
+        _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
         t_rec = db.read_task(task_id)
         if t_rec and chat_id and t_rec.get('human_validation'):
@@ -791,66 +844,162 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             from core.human_in_the_loop import request_human_input
             master_ai = MasterAI()
             question, options = master_ai.format_validation_request(
-                last_output, 
+                task_out, 
                 task_description=t_rec.get('description', ''), 
                 expected_output=t_rec.get('expected_output', '')
             )
             user_feedback = request_human_input(chat_id, question, options=options)
             if user_feedback and user_feedback != "SYSTEM_ABORT":
-                last_output = master_ai.process_validation_feedback(last_output, user_feedback)
-                _auto_save_to_memory(memory_manager, task_id, last_output, f"{agent_role} (Human Edited)")
+                task_out = master_ai.process_validation_feedback(task_out, user_feedback)
+                _auto_save_to_memory(memory_manager, task_id, task_out, f"{agent_role} (Human Edited)")
 
-        task_outputs[str(task_id)] = last_output
-        return last_output
+        with task_outputs_lock:
+            task_outputs[str(task_id)] = task_out
+            db.update_run(run_id, status='running', result=task_out, current_task_idx=task_idx + 1 if task_idx is not None else 0, task_outputs=task_outputs)
+            
+        return task_out
 
-    for i in range(start_idx, len(task_ids)):
-        step_def = task_ids[i]
-        is_batch = isinstance(step_def, dict) and step_def.get('type') == 'batch_loop'
+    # --- VRAM Management ---
+    env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+    env_vars = dotenv_values(env_path)
+    try:
+        MAX_VRAM_GB = float(env_vars.get("MAX_VRAM_GB", 24.0))
+    except Exception:
+        MAX_VRAM_GB = 24.0
 
-        if not is_batch:
-            task_id = step_def if isinstance(step_def, int) else step_def.get('task_id')
-            log_msg = f"Building and executing Task {i+1}/{len(task_ids)} (ID: {task_id})..."
-            _execute_task_instance(task_id, inputs, log_msg, task_idx=i)
-            db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
+    current_vram_usage = 0.0
+    vram_lock = threading.Lock()
+    vram_condition = threading.Condition(vram_lock)
+    
+    def get_task_vram_cost(t_id):
+        try:
+            t = db.read_task(t_id)
+            if not t: return 0.0
+            m_id = t.get('model_id')
+            if not m_id:
+                a = db.read_agent(t.get('agent_id'))
+                if a: m_id = a.get('model_id')
+            if m_id:
+                m = db.read_model(m_id)
+                if m:
+                    is_local = bool(m.get('is_local')) or m.get('provider', '').lower() == 'ollama'
+                    if is_local:
+                        return float(m.get('vram_gb') or 0.0)
+        except Exception:
+            pass
+        return 0.0
+
+    ready_queue = [n for n, deg in in_degree.items() if deg == 0 and n not in completed_nodes]
+    in_flight = set()
+    
+    def execute_node(n_id):
+        nonlocal current_vram_usage
+        data = dag_nodes[n_id]
+        
+        cost = 0.0
+        if data["is_batch"]:
+            cost = max([get_task_vram_cost(tid) for tid in data["batch_tasks"]], default=0.0)
         else:
-            batch_tasks = step_def.get('task_ids', [])
-            batch_size = int(step_def.get('batch_size', 5))
+            cost = get_task_vram_cost(data["task_id"])
             
-            data_str = last_output
-            try:
-                json_match = re.search(r'\[.*\]', data_str, re.DOTALL)
-                if json_match:
-                    items = json.loads(json_match.group(0))
-                else:
-                    items = json.loads(data_str)
-                if not isinstance(items, list):
-                    raise ValueError("Extracted data is not a JSON array")
-            except Exception as e:
-                logging.error(f"Failed to parse source data for batch loop: {e}")
-                items = [{"raw_data": data_str}]
-            
-            for batch_start in range(0, len(items), batch_size):
-                batch_chunk = items[batch_start:batch_start+batch_size]
-                chunk_str = json.dumps(batch_chunk)
-                
-                batch_inputs = inputs.copy()
-                batch_inputs['current_batch'] = chunk_str
-                
-                memory_manager.clear_memory()
-                
-                for b_idx, inner_task_id in enumerate(batch_tasks):
-                    log_msg = f"Executing Batch Loop {i+1}/{len(task_ids)} - Chunk {batch_start//batch_size + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
-                    _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=i)
-            
-            db.update_run(run_id, status='running', result=last_output, current_task_idx=i + 1, task_outputs=task_outputs)
+        with vram_condition:
+            while current_vram_usage + cost > MAX_VRAM_GB and (current_vram_usage > 0 or cost > MAX_VRAM_GB):
+                if current_vram_usage == 0 and cost > MAX_VRAM_GB:
+                    break
+                vram_condition.wait()
+            current_vram_usage += cost
 
-    # --- Build global context dump for Master AI ---
-    import json as _json
+        try:
+            parent_output = ""
+            if data["depends_on"]:
+                parent_id = data["depends_on"][-1]
+                parent_output = node_outputs.get(parent_id, "")
+                
+            if not data["is_batch"]:
+                log_msg = f"Executing Node {n_id} (Task {data['task_id']})..."
+                out = _execute_task_instance(data["task_id"], inputs, log_msg, task_idx=data["original_index"], parent_output=parent_output)
+                node_outputs[n_id] = out
+                return out
+            else:
+                batch_tasks = data["batch_tasks"]
+                batch_size = int(data.get('batch_size', 5))
+                
+                data_str = parent_output
+                if data["source_variable"]:
+                    # placeholder logic if source is a variable
+                    pass
+                
+                try:
+                    json_match = re.search(r'\[.*\]', data_str, re.DOTALL)
+                    if json_match:
+                        items = json.loads(json_match.group(0))
+                    else:
+                        items = json.loads(data_str)
+                    if not isinstance(items, list):
+                        raise ValueError("Extracted data is not a JSON array")
+                except Exception as e:
+                    logging.error(f"Failed to parse source data for batch loop: {e}")
+                    items = [{"raw_data": data_str}]
+                
+                batch_out = ""
+                for batch_start in range(0, len(items), batch_size):
+                    batch_chunk = items[batch_start:batch_start+batch_size]
+                    chunk_str = json.dumps(batch_chunk)
+                    
+                    batch_inputs = inputs.copy()
+                    batch_inputs['current_batch'] = chunk_str
+                    
+                    memory_manager.clear_memory()
+                    
+                    for b_idx, inner_task_id in enumerate(batch_tasks):
+                        log_msg = f"Executing Batch Loop (Node {n_id}) - Chunk {batch_start//batch_size + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
+                        batch_out = _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=data["original_index"], parent_output=batch_out)
+                
+                node_outputs[n_id] = batch_out
+                return batch_out
+        finally:
+            with vram_condition:
+                current_vram_usage -= cost
+                vram_condition.notify_all()
+
+    last_output_overall = ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        
+        while ready_queue or in_flight:
+            for n_id in ready_queue:
+                futures[executor.submit(execute_node, n_id)] = n_id
+                in_flight.add(n_id)
+            ready_queue.clear()
+            
+            if not in_flight:
+                break
+                
+            done, not_done = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+            
+            for f in done:
+                n_id = futures.pop(f)
+                in_flight.remove(n_id)
+                
+                try:
+                    res = f.result()
+                    if res:
+                        last_output_overall = res
+                except Exception as e:
+                    logging.error(f"Node {n_id} failed: {e}")
+                    raise
+                    
+                completed_nodes.add(n_id)
+                for dep in dependents[n_id]:
+                    in_degree[dep] -= 1
+                    if in_degree[dep] == 0:
+                        ready_queue.append(dep)
+
     all_records = memory_manager.dump_all_records()
-    global_context = _json.dumps(all_records, indent=2, ensure_ascii=False)
+    global_context = json.dumps(all_records, indent=2, ensure_ascii=False)
 
-    # Return both the last output (for the chat message) and the full context (for exports)
-    return last_output, global_context
+    return last_output_overall, global_context
 
 def build_dynamic_crew(plan: dict, default_model_id=None):
     """
@@ -1014,24 +1163,22 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
 
 
 def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None, progress_callback=None) -> str:
-    """
-    Builds AND executes a dynamic crew from a JSON plan using memory-centric
-    communication.  This is the counterpart of execute_run_with_resume for
-    plans generated by the Chat Planner (not stored in the DB).
-
-    Instead of running all tasks in a single Crew.kickoff() (which chains
-    outputs via raw text), we run each task individually and mediate
-    communication through the ephemeral ChromaDB store.
-    """
     if not plan or 'agents' not in plan or 'tasks' not in plan:
         raise ValueError("Invalid plan format. Must contain 'agents' and 'tasks'.")
+
+    import concurrent.futures
+    import threading
+    import os
+    import json
+    import re
+    import time
+    from dotenv import dotenv_values, find_dotenv
 
     if chat_id:
         ABORT_FLAGS[str(chat_id)] = False
 
     execution_context = execution_context or {}
 
-    # Resolve model
     if not default_model_id:
         DataManager.load_env()
         env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
@@ -1046,24 +1193,20 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         if models:
             default_model_id = models[0]['id']
         else:
-            raise ValueError("No models found in the database. Please configure a model first.")
+            raise ValueError("No models found in the database.")
 
     llm_instance = _instantiate_llm(default_model_id)
-
     model_record = db.read_model(default_model_id)
     is_local_model = False
     if model_record:
-        is_local_model = bool(model_record.get('is_local')) or \
-                         model_record.get('provider', '').lower() == 'ollama'
+        is_local_model = bool(model_record.get('is_local')) or model_record.get('provider', '').lower() == 'ollama'
 
     agents_data_by_role = {a['role']: a for a in plan.get('agents', [])}
     conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
                          "You never ramble. You output structured bullet points, not essays. "
                          "Every sentence must carry unique, actionable information.")
 
-    # --- MEMORY-CENTRIC: Initialise ephemeral memory (run_id=0 for dynamic runs) ---
-    import time
-    dynamic_run_id = int(time.time()) % 1_000_000  # Pseudo-unique ID
+    dynamic_run_id = int(time.time()) % 1_000_000
     memory_manager = EphemeralMemoryManager(run_id=dynamic_run_id)
     if accumulated_context:
         memory_manager.load_from_dump(accumulated_context)
@@ -1072,110 +1215,153 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
     agents_cache = {}
     task_outputs = initial_task_outputs or {}
-    last_output = ""
-    if start_idx > 0 and str(start_idx - 1) in task_outputs:
-        last_output = task_outputs[str(start_idx - 1)]
 
-    for task_idx in range(start_idx, len(plan['tasks'])):
-        task_data = plan['tasks'][task_idx]
-        if run_id:
-            db.update_run(run_id, status='running', current_task_idx=task_idx, task_outputs=task_outputs)
-
-        agent_role = task_data.get('agent_role')
-        specialization = task_data.get('agent_specialization')
-
-        if agent_role not in agents_data_by_role:
-            logging.warning(f"Task specifies unknown agent role '{agent_role}'. Skipping.")
-            continue
-
-        agent_info = agents_data_by_role[agent_role]
-
-        # Resolve persona
-        base_role = agent_info['role']
-        base_backstory = agent_info.get('backstory', '') or ""
-        base_goal = agent_info.get('goal', '') or ""
-
-        if specialization:
-            if "{specialization}" in base_role:
-                effective_role = base_role.replace("{specialization}", specialization)
-            else:
-                effective_role = f"{base_role} specialized in {specialization}"
+    # Normalize DAG for dynamic plan
+    dag_nodes = {}
+    tasks = plan['tasks']
+    for i, task_data in enumerate(tasks):
+        node_id = task_data.get("id", f"node_{i}")
+        depends_on = task_data.get("depends_on", [])
+        if "id" not in task_data:
+            if i > 0 and not depends_on:
+                depends_on = [f"node_{i-1}"]
             
-            if "{specialization}" in base_backstory:
-                effective_backstory = base_backstory.replace("{specialization}", specialization)
-            else:
-                effective_backstory = (
-                    base_backstory +
-                    f"\n\nCRITICAL CONTEXT: For this specific task your area of expertise is "
-                    f"focused on **{specialization}**."
-                )
+        dag_nodes[node_id] = {
+            "task_data": task_data,
+            "depends_on": depends_on,
+            "original_index": i
+        }
 
-            if "{specialization}" in base_goal:
-                effective_goal = base_goal.replace("{specialization}", specialization)
-            else:
-                effective_goal = f"{base_goal} (specialized in {specialization})"
-        else:
-            effective_role = base_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
-            effective_backstory = base_backstory.replace("{specialization}", "").strip()
-            effective_goal = base_goal.replace("{specialization}", "").strip()
+    in_degree = {n: 0 for n in dag_nodes}
+    dependents = {n: [] for n in dag_nodes}
+    for n_id, data in dag_nodes.items():
+        for d in data["depends_on"]:
+            if d in dag_nodes:
+                in_degree[n_id] += 1
+                dependents[d].append(n_id)
 
-        # Safeguard against any other unreplaced variables
-        effective_role = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_role)
-        effective_backstory = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_backstory)
-        effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_goal)
+    completed_nodes = set()
+    node_outputs = {}
+    for n_id, data in dag_nodes.items():
+        idx = data["original_index"]
+        if str(idx) in task_outputs:
+            completed_nodes.add(n_id)
+            node_outputs[n_id] = task_outputs[str(idx)]
+            
+    for n_id in completed_nodes:
+        for dep in dependents[n_id]:
+            in_degree[dep] -= 1
 
-        # Build or reuse agent
-        if not specialization and agent_role in agents_cache:
-            agent_instance = agents_cache[agent_role]
-        else:
-            if is_local_model:
-                agent_tools = []
-            else:
-                agent_tools = _map_tools(agent_info.get('tools', []))
+    env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+    env_vars = dotenv_values(env_path)
+    try:
+        MAX_VRAM_GB = float(env_vars.get("MAX_VRAM_GB", 24.0))
+    except Exception:
+        MAX_VRAM_GB = 24.0
 
-            enhanced_backstory = effective_backstory + conciseness_trait
-            agent_instance = Agent(
-                role=effective_role,
-                backstory=enhanced_backstory,
-                goal=effective_goal,
-                llm=llm_instance,
-                tools=agent_tools,
-                verbose=True,
-                allow_delegation=False,
-                max_iter=5,
-                step_callback=check_abort
-            )
-            if not specialization:
-                agents_cache[agent_role] = agent_instance
+    current_vram_usage = 0.0
+    vram_lock = threading.Lock()
+    vram_condition = threading.Condition(vram_lock)
+    task_outputs_lock = threading.Lock()
+    
+    def get_dynamic_task_vram_cost():
+        # Dynamic agents usually share the default model
+        if model_record and is_local_model:
+            return float(model_record.get('vram_gb') or 0.0)
+        return 0.0
 
-        # Build task
-        # Combine tools from agent definition and task definition (Optimizer adds tools directly to the task)
-        agent_t = agent_info.get('tools') or []
-        task_t = task_data.get('tools') or []
-        combined_tools = list(set(agent_t + task_t))
-        task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], is_local_model)
-        task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+    ready_queue = [n for n, deg in in_degree.items() if deg == 0 and n not in completed_nodes]
+    in_flight = set()
 
-        # --- LEARNING MEMORY INJECTION ---
+    def execute_dynamic_node(n_id):
+        nonlocal current_vram_usage
+        data = dag_nodes[n_id]
+        task_data = data["task_data"]
+        task_idx = data["original_index"]
+        
+        cost = get_dynamic_task_vram_cost()
+        
+        with vram_condition:
+            while current_vram_usage + cost > MAX_VRAM_GB and (current_vram_usage > 0 or cost > MAX_VRAM_GB):
+                if current_vram_usage == 0 and cost > MAX_VRAM_GB:
+                    break
+                vram_condition.wait()
+            current_vram_usage += cost
+
         try:
-            from core.learning_memory import get_learning_memory
-            lm = get_learning_memory()
-            learned_feedback = lm.get_relevant_feedback(task_data['description'])
-            if learned_feedback:
-                task_description += learned_feedback
-                logging.info(f"Injected learning feedback into memory-centric task for agent {agent_role}")
-        except Exception as lm_err:
-            logging.warning(f"Learning memory injection failed: {lm_err}")
+            parent_output = ""
+            if data["depends_on"]:
+                parent_id = data["depends_on"][-1]
+                parent_output = node_outputs.get(parent_id, "")
 
-        # Inject user inputs
-        for k, v in execution_context.items():
-            task_description = task_description.replace(f"{{{k}}}", str(v))
-        task_description = task_description.replace("{user_input}", execution_context.get('user_input', ''))
-        task_description = task_description.replace("{previous_result}", last_output)
-        task_description = task_description.replace("{context}", last_output)
+            if run_id:
+                db.update_run(run_id, status='running', current_task_idx=task_idx, task_outputs=task_outputs)
 
-        # Append memory index for steps after the first
-        if task_idx > 0:
+            agent_role = task_data.get('agent_role')
+            specialization = task_data.get('agent_specialization')
+
+            if agent_role not in agents_data_by_role:
+                logging.warning(f"Task specifies unknown agent role '{agent_role}'. Skipping.")
+                return ""
+
+            agent_info = agents_data_by_role[agent_role]
+            base_role = agent_info['role']
+            base_backstory = agent_info.get('backstory', '') or ""
+            base_goal = agent_info.get('goal', '') or ""
+
+            if specialization:
+                if "{specialization}" in base_role:
+                    effective_role = base_role.replace("{specialization}", specialization)
+                else:
+                    effective_role = f"{base_role} specialized in {specialization}"
+                
+                if "{specialization}" in base_backstory:
+                    effective_backstory = base_backstory.replace("{specialization}", specialization)
+                else:
+                    effective_backstory = base_backstory + f"\n\nCRITICAL CONTEXT: Your expertise is focused on **{specialization}**."
+
+                if "{specialization}" in base_goal:
+                    effective_goal = base_goal.replace("{specialization}", specialization)
+                else:
+                    effective_goal = f"{base_goal} (specialized in {specialization})"
+            else:
+                effective_role = base_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
+                effective_backstory = base_backstory.replace("{specialization}", "").strip()
+                effective_goal = base_goal.replace("{specialization}", "").strip()
+
+            effective_role = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_role)
+            effective_backstory = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_backstory)
+            effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_goal)
+
+            if not specialization and agent_role in agents_cache:
+                agent_instance = agents_cache[agent_role]
+            else:
+                agent_tools = [] if is_local_model else _map_tools(agent_info.get('tools', []))
+                enhanced_backstory = effective_backstory + conciseness_trait
+                agent_instance = Agent(
+                    role=effective_role,
+                    backstory=enhanced_backstory,
+                    goal=effective_goal,
+                    llm=llm_instance,
+                    tools=agent_tools,
+                    verbose=True,
+                    allow_delegation=False,
+                    max_iter=5,
+                    step_callback=check_abort
+                )
+                if not specialization:
+                    agents_cache[agent_role] = agent_instance
+
+            combined_tools = list(set((agent_info.get('tools') or []) + (task_data.get('tools') or [])))
+            task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], is_local_model)
+            task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+
+            for k, v in execution_context.items():
+                task_description = task_description.replace(f"{{{k}}}", str(v))
+            task_description = task_description.replace("{user_input}", execution_context.get('user_input', ''))
+            task_description = task_description.replace("{previous_result}", parent_output)
+            task_description = task_description.replace("{context}", parent_output)
+
             index_table = memory_manager.get_memory_index_table()
             task_description += (
                 "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
@@ -1186,152 +1372,142 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 "--- [END MEMORY INDEX] ---\n"
             )
 
-        # Enhance expected_output for Vector DB structured format
-        base_expected = task_data.get('expected_output', 'Task Output')
-        vector_format_directive = (
-            " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
-            "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
-        )
-        if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
-            base_expected += vector_format_directive
+            base_expected = task_data.get('expected_output', 'Task Output')
+            vector_format_directive = " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
+            if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+                base_expected += vector_format_directive
 
-        # Apply interpolations to expected_output
-        for k, v in execution_context.items():
-            base_expected = base_expected.replace(f"{{{k}}}", str(v))
-        base_expected = base_expected.replace("{user_input}", execution_context.get('user_input', ''))
-        base_expected = base_expected.replace("{previous_result}", last_output)
-        base_expected = base_expected.replace("{context}", last_output)
+            for k, v in execution_context.items():
+                base_expected = base_expected.replace(f"{{{k}}}", str(v))
+            base_expected = base_expected.replace("{user_input}", execution_context.get('user_input', ''))
+            base_expected = base_expected.replace("{previous_result}", parent_output)
+            base_expected = base_expected.replace("{context}", parent_output)
 
-        # Safeguard: Prevent CrewAI from crashing on unreplaced template variables
-        task_description = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', task_description)
-        base_expected = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', base_expected)
+            task_description = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', task_description)
+            base_expected = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', base_expected)
 
-        task_obj = Task(
-            description=task_description,
-            expected_output=base_expected,
-            agent=agent_instance,
-            tools=task_tools,
-            async_execution=False
-        )
-
-        # Inject memory tools
-        _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)
-
-        # Execute single-task crew
-        single_crew = Crew(
-            agents=[agent_instance],
-            tasks=[task_obj],
-            verbose=True,
-            process='sequential'
-        )
-
-        # Notify task starting
-        if progress_callback:
-            try:
-                total_tasks = len(plan['tasks'])
-                progress_callback(task_idx, total_tasks, effective_role, "running")
-            except Exception:
-                pass
-
-        # --- Retry logic for transient LLM errors (503, empty output, etc.) ---
-        max_retries = 2
-        last_exception = None
-        for attempt in range(max_retries + 1):
-            try:
-                # Rebuild crew for retry attempts (CrewAI objects are not reusable after failure)
-                if attempt > 0:
-                    import time
-                    wait_time = 10 * attempt  # 10s, 20s
-                    logging.warning(f"Retry attempt {attempt}/{max_retries} for dynamic task {task_idx} after {wait_time}s wait...")
-                    time.sleep(wait_time)
-                    single_crew = Crew(
-                        agents=[agent_instance],
-                        tasks=[task_obj],
-                        verbose=True,
-                        process='sequential'
-                    )
-                result = single_crew.kickoff(inputs=execution_context)
-                last_exception = None
-                break  # Success — exit retry loop
-            except Exception as e:
-                last_exception = e
-                err_str = str(e).lower()
-                is_transient = (
-                    "503" in err_str or "unavailable" in err_str or "rate" in err_str
-                    or "empty" in err_str or "none" in err_str
-                    or "model output" in err_str
-                    or "resource" in err_str or "overloaded" in err_str
-                )
-                if is_transient and attempt < max_retries:
-                    logging.warning(f"Transient LLM error at dynamic task {task_idx} (attempt {attempt+1}): {e}")
-                    continue  # Retry
-                elif is_transient:
-                    logging.warning(f"Transient LLM error persisted after {max_retries+1} attempts at task {task_idx}: {e}")
-                    if run_id:
-                        db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
-                    raise RateLimitError(f"Model transient error after retries: {e}", task_idx, task_outputs)
-                else:
-                    raise e
-
-        if last_exception is not None:
-            raise last_exception
-                
-        last_output = str(result)
-
-        # Auto-save to ephemeral memory
-        key_name = f"dynamic_task_{task_idx}"
-        summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {last_output[:500]}"
-        memory_manager.write_record(
-            key=key_name,
-            content_summary=summary_text,
-            structured_data={"raw_output": last_output},
-            agent_role=effective_role,
-        )
-        logging.info(f"[Memory-Centric] Dynamic task {task_idx + 1} completed by '{effective_role}'.")
-
-        # Handle Human Validation for Dynamic Plan
-        if chat_id and task_data.get('human_validation'):
-            from core.master_ai import MasterAI
-            from core.human_in_the_loop import request_human_input
-            master_ai = MasterAI()
-            
-            logging.info(f"Dynamic task {task_idx + 1} requires human validation. Pausing execution.")
-            question, options = master_ai.format_validation_request(
-                last_output,
-                task_description=task_data.get('description', ''),
-                expected_output=task_data.get('expected_output', '')
+            task_obj = Task(
+                description=task_description,
+                expected_output=base_expected,
+                agent=agent_instance,
+                tools=task_tools,
+                async_execution=False
             )
-            user_feedback = request_human_input(chat_id, question, options=options)
+
+            _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)
+
+            single_crew = Crew(
+                agents=[agent_instance],
+                tasks=[task_obj],
+                verbose=True,
+                process='sequential'
+            )
+
+            if progress_callback:
+                try:
+                    progress_callback(task_idx, len(plan['tasks']), effective_role, "running")
+                except Exception:
+                    pass
+
+            max_retries = 2
+            last_exception = None
+            for attempt in range(max_retries + 1):
+                try:
+                    if attempt > 0:
+                        time.sleep(10 * attempt)
+                        single_crew = Crew(agents=[agent_instance], tasks=[task_obj], verbose=True, process='sequential')
+                    result = single_crew.kickoff(inputs=execution_context)
+                    last_exception = None
+                    break
+                except Exception as e:
+                    last_exception = e
+                    err_str = str(e).lower()
+                    is_transient = "503" in err_str or "unavailable" in err_str or "rate" in err_str or "empty" in err_str or "none" in err_str or "model output" in err_str or "resource" in err_str or "overloaded" in err_str
+                    if is_transient and attempt < max_retries:
+                        continue
+                    elif is_transient:
+                        if run_id: db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
+                        raise RateLimitError(f"Model transient error after retries: {e}", task_idx, task_outputs)
+                    else:
+                        raise e
+
+            if last_exception is not None:
+                raise last_exception
+                    
+            task_out = str(result)
+            key_name = f"dynamic_task_{task_idx}"
+            summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {task_out[:500]}"
+            memory_manager.write_record(key=key_name, content_summary=summary_text, structured_data={"raw_output": task_out}, agent_role=effective_role)
+
+            if chat_id and task_data.get('human_validation'):
+                from core.master_ai import MasterAI
+                from core.human_in_the_loop import request_human_input
+                master_ai = MasterAI()
+                question, options = master_ai.format_validation_request(task_out, task_description=task_data.get('description', ''), expected_output=task_data.get('expected_output', ''))
+                user_feedback = request_human_input(chat_id, question, options=options)
+                
+                if user_feedback and user_feedback != "SYSTEM_ABORT":
+                    task_out = master_ai.process_validation_feedback(task_out, user_feedback)
+                    memory_manager.write_record(key=key_name, content_summary=f"Output of dynamic task {task_idx + 1} by agent '{effective_role} (Human Edited)': {task_out[:500]}", structured_data={"raw_output": task_out}, agent_role=f"{effective_role} (Human Edited)")
             
-            if user_feedback and user_feedback != "SYSTEM_ABORT":
-                logging.info(f"Processing human feedback for dynamic task {task_idx + 1}...")
-                last_output = master_ai.process_validation_feedback(last_output, user_feedback)
-                # Overwrite memory with the human-edited output
-                memory_manager.write_record(
-                    key=key_name,
-                    content_summary=f"Output of dynamic task {task_idx + 1} by agent '{effective_role} (Human Edited)': {last_output[:500]}",
-                    structured_data={"raw_output": last_output},
-                    agent_role=f"{effective_role} (Human Edited)",
-                )
-        
-        # Notify the bot of task completion (best-effort, AFTER HITL so status is accurate)
-        if progress_callback:
-            try:
-                total_tasks = len(plan['tasks'])
-                progress_callback(task_idx, total_tasks, effective_role, "completed")
-            except Exception:
-                pass  # Don't crash the workflow for a notification failure
-        
-        task_outputs[str(task_idx)] = last_output
-        if run_id:
-            db.update_run(run_id, status='running', result=last_output, current_task_idx=task_idx + 1, task_outputs=task_outputs)
+            if progress_callback:
+                try:
+                    progress_callback(task_idx, len(plan['tasks']), effective_role, "completed")
+                except Exception:
+                    pass
+            
+            with task_outputs_lock:
+                task_outputs[str(task_idx)] = task_out
+                if run_id:
+                    db.update_run(run_id, status='running', result=task_out, current_task_idx=task_idx + 1, task_outputs=task_outputs)
 
-    # --- Build global context dump for Master AI ---
-    import json as _json
+            node_outputs[n_id] = task_out
+            return task_out
+        finally:
+            with vram_condition:
+                current_vram_usage -= cost
+                vram_condition.notify_all()
+
+    last_output_overall = ""
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {}
+        
+        while ready_queue or in_flight:
+            for n_id in ready_queue:
+                futures[executor.submit(execute_dynamic_node, n_id)] = n_id
+                in_flight.add(n_id)
+            ready_queue.clear()
+            
+            if not in_flight:
+                break
+                
+            done, not_done = concurrent.futures.wait(futures.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+            
+            for f in done:
+                n_id = futures.pop(f)
+                in_flight.remove(n_id)
+                
+                try:
+                    res = f.result()
+                    if res:
+                        last_output_overall = res
+                except Exception as e:
+                    logging.error(f"Node {n_id} failed: {e}")
+                    raise
+                    
+                completed_nodes.add(n_id)
+                for dep in dependents[n_id]:
+                    in_degree[dep] -= 1
+                    if in_degree[dep] == 0:
+                        ready_queue.append(dep)
+
     all_records = memory_manager.dump_all_records()
-    global_context = _json.dumps(all_records, indent=2, ensure_ascii=False)
+    global_context = json.dumps(all_records, indent=2, ensure_ascii=False)
 
-    return last_output, global_context
+    return last_output_overall, global_context
+
+
 
 if __name__ == '__main__':
     # Example usage (for testing purposes)

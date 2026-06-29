@@ -680,6 +680,23 @@ def render_api_vault():
         with (col1 if i % 2 == 0 else col2):
             st.markdown(f"{status_icon} **{key}**")
             
+    st.divider()
+    st.subheader("Global Resource Settings")
+    st.markdown("Configure limits for parallel agent execution based on your hardware.")
+    with st.form("resource_limits_form"):
+        current_max_vram = current_env.get("MAX_VRAM_GB", "16.0")
+        try:
+            current_max_vram_float = float(current_max_vram)
+        except ValueError:
+            current_max_vram_float = 16.0
+            
+        new_max_vram = st.number_input("Maximum Local VRAM (GB)", min_value=1.0, max_value=256.0, value=current_max_vram_float, step=1.0, help="Used by the Task Scheduler to pause or downgrade agents when VRAM is full.")
+        submitted_resources = st.form_submit_button("Save Resource Settings")
+        if submitted_resources:
+            set_key(env_path, "MAX_VRAM_GB", str(new_max_vram))
+            st.success("Resource settings saved.")
+            st.rerun()
+            
     with st.form("api_key_form"):
         st.markdown("Add or Update an API Key")
         form_col1, form_col2 = st.columns(2)
@@ -772,18 +789,23 @@ def render_api_vault():
     provider = "Ollama"
     env_var_name = ""
     is_local = True
-    selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
-    if selected_local == "Other (Manual)...":
-        model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
-    else:
-        model_name = selected_local
+    
+    local_col1, local_col2 = st.columns(2)
+    with local_col1:
+        selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
+        if selected_local == "Other (Manual)...":
+            model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
+        else:
+            model_name = selected_local
+    with local_col2:
+        vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=4.0, step=0.5, help="Estimated memory used by this model.")
 
     submitted = st.button("Add Local Model", type="primary")
     if submitted and provider and model_name:
         import sqlite3
         try:
-            db.create_model(provider, model_name, "", True)
-            st.success(f"Added local model '{model_name}'.")
+            db.create_model(provider, model_name, "", True, vram_gb=vram_gb)
+            st.success(f"Added local model '{model_name}' requiring {vram_gb} GB VRAM.")
             st.rerun()
         except sqlite3.IntegrityError:
             st.error(f"Il modello '{model_name}' è già presente nel database.")
@@ -806,14 +828,17 @@ def render_api_vault():
             st.markdown(f"**{provider_name}**")
             with st.container(height=250, border=True):
                 for model in p_models:
-                    col1, col2, col3, col4, col5 = st.columns([0.5, 2, 2, 2, 1])
+                    col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 2, 2, 1.5, 1])
                     type_icon = "🏠" if model.get('is_local') else "☁️"
                     col1.markdown(type_icon)
                     col2.text(f"P: {model['provider']}")
                     col3.text(f"M: {model['model_name']}")
                     key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
                     col4.text(f"Key: {key_display}")
-                    if col5.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
+                    vram_val = model.get('vram_gb', 0.0)
+                    vram_display = f"{vram_val} GB" if model.get('is_local') else "---"
+                    col5.text(f"VRAM: {vram_display}")
+                    if col6.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
                         db.delete_model(model['id'])
                         st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
                         st.rerun()
@@ -1892,8 +1917,19 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
     
     default_wf_name = (editing_workflow['name'] or "") if editing_workflow else ""
     default_wf_human_check = editing_workflow['requires_human_check'] if editing_workflow else False
-    default_wf_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
     
+    import uuid
+    raw_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
+    default_wf_task_ids = []
+    for i, t in enumerate(raw_task_ids):
+        if isinstance(t, int):
+            default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else []})
+        elif isinstance(t, dict):
+            if "id" not in t:
+                t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
+            if "depends_on" not in t:
+                t["depends_on"] = [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else []
+            default_wf_task_ids.append(t)
     raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
     default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
 
@@ -1993,7 +2029,13 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                     task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
                     sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
                     if st.button("➕ Add Single Task"):
-                        st.session_state.wf_selected_task_ids.append(task_options[sel_task_str])
+                        import uuid
+                        new_node = {
+                            "id": f"node_{uuid.uuid4().hex[:8]}",
+                            "task_id": task_options[sel_task_str],
+                            "depends_on": [st.session_state.wf_selected_task_ids[-1]["id"]] if st.session_state.wf_selected_task_ids else []
+                        }
+                        st.session_state.wf_selected_task_ids.append(new_node)
                         st.rerun()
                 else:
                     st.info("No tasks assigned to this agent.")
@@ -2011,11 +2053,14 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                     if st.button("➕ Add Batch Loop"):
                         inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
                         if inner_ids:
+                            import uuid
                             new_block = {
+                                "id": f"node_{uuid.uuid4().hex[:8]}",
                                 "type": "batch_loop",
                                 "task_ids": inner_ids,
                                 "batch_size": b_size,
-                                "source_variable": b_source
+                                "source_variable": b_source,
+                                "depends_on": [st.session_state.wf_selected_task_ids[-1]["id"]] if st.session_state.wf_selected_task_ids else []
                             }
                             st.session_state.wf_selected_task_ids.append(new_block)
                             st.rerun()
@@ -2026,13 +2071,27 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
 
         # --- Ordered Task Preview ---
         st.markdown("---")
-        st.markdown("**⚙️ Workflow Steps (in order)**")
+        st.markdown("**⚙️ Workflow Nodes (DAG Order)**")
+        st.markdown("Nodes execute in parallel when dependencies allow. Reorder nodes to change dependency constraints.")
         
         if not st.session_state.wf_selected_task_ids:
             st.info("No tasks selected yet.")
         else:
             def rem_step(idx):
+                removed_id = st.session_state.wf_selected_task_ids[idx]["id"]
                 st.session_state.wf_selected_task_ids.pop(idx)
+                # Cleanup dependencies pointing to removed node
+                for step in st.session_state.wf_selected_task_ids:
+                    if removed_id in step.get("depends_on", []):
+                        step["depends_on"].remove(removed_id)
+
+            def get_node_label(step):
+                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                if is_batch:
+                    return f"🔄 Batch Loop ({step['id']})"
+                task = task_id_map.get(int(step.get("task_id", -1)))
+                t_name = task.get('name') or f"Task #{task['id']}" if task else "Unknown"
+                return f"{t_name} ({step['id']})"
 
             for i, step in enumerate(st.session_state.wf_selected_task_ids):
                 with st.container(border=True):
@@ -2047,13 +2106,13 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                             agent = agent_id_map.get(task['agent_id'])
                             a_name = agent['name'] if agent else "Unknown Agent"
                             t_name = task.get('name') or f"Task #{task['id']}"
-                            col_main.markdown(f"👤 **{a_name}** ➔ **{t_name}**: {task['description'][:70]}...")
+                            col_main.markdown(f"👤 **{a_name}** ➔ **{t_name}** `[{step['id']}]`: {task['description'][:70]}...")
                         else:
                             col_main.markdown(f"❌ Unknown Task ID: {task_id}")
                     else:
                         inner_ids = step.get("task_ids", [])
                         b_size = step.get("batch_size")
-                        col_main.markdown(f"🔄 **Batch Loop** (Size: {b_size}, Source: `{step.get('source_variable')}`)")
+                        col_main.markdown(f"🔄 **Batch Loop** `[{step['id']}]` (Size: {b_size}, Source: `{step.get('source_variable')}`)")
                         for inner_id in inner_ids:
                             itask = task_id_map.get(int(inner_id))
                             if itask:
@@ -2064,6 +2123,18 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                             else:
                                 col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
                     
+                    # Dependency Selection (only allow depending on previous nodes in the list)
+                    if i > 0:
+                        possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids[:i]}
+                        current_deps = step.get("depends_on", [])
+                        valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
+                        
+                        selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}")
+                        step["depends_on"] = [possible_deps[label] for label in selected_labels]
+                    else:
+                        step["depends_on"] = []
+                        col_main.caption("First node (No dependencies, starts immediately).")
+
                     col_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,), help="Move up")
                     col_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,), help="Move down")
                     col_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,), help="Remove")
@@ -2175,7 +2246,10 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                                     st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
                             with col_text:
                                 t_name_display = task.get('name') or f"Task #{task['id']}"
-                                st.markdown(f"**Step {i+1} ({t_name_display}):** {task['description']}")
+                                node_id = step.get('id', 'N/A') if isinstance(step, dict) else 'N/A'
+                                deps = step.get('depends_on', []) if isinstance(step, dict) else []
+                                deps_str = f" **(Depends on: {', '.join(deps)})**" if deps else ""
+                                st.markdown(f"**Step {i+1} ({t_name_display}) `[{node_id}]`:** {task['description']}{deps_str}")
                                 if task.get('human_validation'):
                                     st.markdown("✋ **Human Validation Checkpoint**")
                                     st.info("The workflow will pause after this task to allow the user to make a selection on Telegram before proceeding to the next task.")

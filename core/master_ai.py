@@ -14,6 +14,44 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# --- Headroom AI: Context Compression ---
+# If HEADROOM_ENABLED=true in .env, the _compress_messages helper will compress
+# prompts before every LiteLLM call, reducing token usage by 60-95%.
+# If HEADROOM_PROXY_URL is set, we route traffic to the proxy instead.
+_headroom_compress = None
+if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
+    proxy_url = os.getenv("HEADROOM_PROXY_URL")
+    if proxy_url:
+        if litellm:
+            litellm.api_base = proxy_url
+        logger.info(f"Headroom AI Proxy Mode enabled at {proxy_url}")
+    else:
+        try:
+            from headroom import compress as _headroom_compress_fn
+            _headroom_compress = _headroom_compress_fn
+            logger.info("Headroom AI context compression enabled (inline compress).")
+        except ImportError:
+            logger.warning(
+                "HEADROOM_ENABLED=true but headroom-ai is not installed. "
+                "Run: pip install headroom-ai[all]"
+            )
+
+
+def _compress_messages(messages: list, model: str) -> list:
+    """Compress messages with Headroom AI if enabled; otherwise pass through."""
+    if _headroom_compress is None:
+        return messages
+    try:
+        result = _headroom_compress(messages, model=model)
+        saved = getattr(result, 'tokens_saved', 0)
+        if saved:
+            logger.debug(f"Headroom: compressed {saved} tokens for model '{model}'.")
+        return result.messages
+    except Exception as e:
+        logger.warning(f"Headroom compression failed (passthrough): {e}")
+        return messages
+
+
 MASTER_PROMPT = """
 You are the Master AI Router. Your job is to analyze user requests and route them to the correct Workflow ID.
 Available Workflows:
@@ -70,6 +108,12 @@ RULES FOR REQUIRED INPUTS:
 - NEVER ask for these values in your "response" — only define them in the task JSON. The bot will collect them.
 - HUMAN VALIDATION (HITL): If a task in the base workflow has "human_validation": true, you MUST preserve it exactly as true in the output JSON. You CANNOT remove it. You may ADD "human_validation": true to tasks if the user explicitly asks for human validation, feedback, or review steps.
 
+RULES FOR PARALLEL EXECUTION (DAG):
+- Always structure the "tasks" array as a Directed Acyclic Graph (DAG) for parallel execution.
+- Assign a unique string "id" (e.g., "node_1", "data_fetch") to EVERY task.
+- Use the "depends_on" array to list the "id"s of tasks that must complete before this task starts.
+- If two or more tasks are independent (e.g., fetching data from two different sources), make them run IN PARALLEL by giving them the same "depends_on" (e.g., both depend on "node_1") or empty "depends_on": []. This is CRITICAL for performance.
+
 OUTPUT FORMAT (JSON ONLY):
 {
   "status": "planning" | "ready" | "export",
@@ -87,12 +131,14 @@ OUTPUT FORMAT (JSON ONLY):
     ],
     "tasks": [
       {
+        "id": "node_unique_id",
         "description": "Clear and detailed task description. Use {variable_name} for user-provided values.",
         "expected_output": "What the task should produce",
         "agent_role": "MUST match exactly one role from the agents list",
         "agent_specialization": "Optional domain specialization for the agent in this task",
         "vector_dbs": ["list of vector database IDs (integers) to search, if needed"],
         "human_validation": false,
+        "depends_on": ["node_1"],
         "required_inputs": [
           {"key": "variable_name", "prompt": "User-facing question to ask before execution"}
         ]
@@ -285,6 +331,7 @@ Return ONLY a JSON object with this exact structure:
   "is_complex": true,
   "subtasks": [
     {{
+      "id": "node_sub_1",
       "name": "Subtask Name (e.g. Design Database Schema)",
       "description": "Specific atomic subtask description with memory read/write instructions. MUST preserve all original curly brace variables (e.g. {{dataset_name}}) if they are relevant to this step.",
       "expected_output": "Measurable expected output",
@@ -293,6 +340,7 @@ Return ONLY a JSON object with this exact structure:
       "tools": ["list of required tools, e.g. 'search_web', 'vector_search'"],
       "vector_dbs": ["list of vector database IDs (strings or integers) if vector_search is assigned"],
       "human_validation": false,
+      "depends_on": ["list of previous subtask IDs this subtask depends on (e.g. ['node_sub_0'])"],
       "required_inputs": [
         {{ "key": "dataset_name", "prompt": "Please enter dataset name" }}
       ]
@@ -587,6 +635,8 @@ class MasterAI:
                     )
                     if use_json_mode:
                         call_kwargs["response_format"] = {"type": "json_object"}
+                    # Compress messages before sending to the LLM
+                    call_kwargs["messages"] = _compress_messages(call_kwargs["messages"], model=m)
                     response = litellm.completion(**call_kwargs)
                     return response.choices[0].message.content
                 except Exception as e:
