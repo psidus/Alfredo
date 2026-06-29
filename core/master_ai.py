@@ -710,8 +710,7 @@ class MasterAI:
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_prompt}"}
                 ]
             )
             
@@ -768,11 +767,11 @@ class MasterAI:
         
         try:
             # Use plain text completion (no JSON mode) for the refiner
+            # Merged system into user to prevent Gemini system_instruction errors
             response = litellm.completion(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Please refine the above raw output into a clear, polished report."}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease refine the above raw output into a clear, polished report."}
                 ],
                 temperature=0.1  # Low creativity — focus on restructuring, not inventing
             )
@@ -807,8 +806,7 @@ class MasterAI:
             response = litellm.completion(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Please produce the concise summary of the global context."}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease produce the concise summary of the global context."}
                 ],
                 temperature=0.1
             )
@@ -929,7 +927,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
 
         system_prompt = CHAT_PLANNER_PROMPT.replace("{base_workflow_context}", base_workflow_context).replace("{saved_context_section}", saved_context_section)
         
-        messages = [{"role": "system", "content": system_prompt}]
+        # Merge system prompt into first user message to avoid Gemini errors
+        messages = [{"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nPlease process the chat history."}]
         messages.extend(chat_history)
         messages.append({"role": "user", "content": user_message})
         
@@ -998,8 +997,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Optimize the agent's prompts."}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the agent's prompts."}
                 ],
                 temperature=0.3
             )
@@ -1078,7 +1076,9 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         try:
             new_output = self._call_llm_with_retry(
                 model=model_string,
-                messages=[{"role": "user", "content": system_prompt}],
+                messages=[
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOriginal Output: {raw_output}\nUser Feedback: {user_feedback}"}
+                ],
                 temperature=0.1
             )
             new_output = new_output.strip()
@@ -1108,8 +1108,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Optimize the task's prompts."}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the task's prompts."}
                 ],
                 temperature=0.3
             )
@@ -1266,8 +1265,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Analyze and decompose this task if it is complex."}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nAnalyze and decompose this task if it is complex."}
                 ],
                 temperature=0.2
             )
@@ -1348,8 +1346,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
-                    {"role": "system", "content": "You are the Workflow Coherence Optimizer."},
-                    {"role": "user", "content": system_prompt}
+                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\nYou are the Workflow Coherence Optimizer.\n\nUSER INPUT:\n{system_prompt}"}
                 ]
             )
             clean_json = self._sanitize_json(raw_output)
