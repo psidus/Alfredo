@@ -3,6 +3,7 @@
 import sqlite3
 import json
 import os
+import threading
 from typing import List, Dict, Any, Optional
 
 class DBManager:
@@ -38,6 +39,7 @@ class DBManager:
         self.db_path = db_path
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
+        self.lock = threading.Lock()
         self._connect()
         self._create_tables()
 
@@ -156,6 +158,11 @@ class DBManager:
                 result TEXT,
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 finished_at TIMESTAMP,
+                current_task_idx INTEGER DEFAULT 0,
+                task_outputs TEXT,
+                inputs TEXT,
+                source TEXT,
+                in_flight_tasks TEXT DEFAULT '[]',
                 FOREIGN KEY (workflow_id) REFERENCES workflows (id) ON DELETE SET NULL
             );
             """,
@@ -253,6 +260,13 @@ class DBManager:
             # Migration to add current_task_idx, task_outputs, and inputs to workflow_runs
             try:
                 self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN current_task_idx INTEGER DEFAULT 0;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add in_flight_tasks to workflow_runs
+            try:
+                self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN in_flight_tasks TEXT DEFAULT '[]';")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -714,28 +728,33 @@ class DBManager:
     # --- Workflow Runs CRUD ---
     def create_run(self, workflow_id: int, status: str = 'running', inputs: dict = None, source: str = 'telegram') -> int:
         inputs_json = json.dumps(inputs) if inputs else None
-        sql = "INSERT INTO workflow_runs (workflow_id, status, current_task_idx, task_outputs, inputs, source) VALUES (?, ?, 0, '{}', ?, ?)"
+        sql = "INSERT INTO workflow_runs (workflow_id, status, current_task_idx, task_outputs, inputs, source, in_flight_tasks) VALUES (?, ?, 0, '{}', ?, ?, '[]')"
         self.cursor.execute(sql, (workflow_id, status, inputs_json, source))
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def update_run(self, run_id: int, status: str, result: str = "", current_task_idx: int = None, task_outputs: dict = None) -> None:
-        if current_task_idx is not None and task_outputs is not None:
-            task_outputs_json = json.dumps(task_outputs)
-            sql = """
-            UPDATE workflow_runs 
-            SET status = ?, result = ?, current_task_idx = ?, task_outputs = ?, finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)
-            WHERE id = ?
-            """
-            self.cursor.execute(sql, (status, result, current_task_idx, task_outputs_json, status, run_id))
-        else:
-            sql = """
-            UPDATE workflow_runs 
-            SET status = ?, result = ?, finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END) 
-            WHERE id = ?
-            """
-            self.cursor.execute(sql, (status, result, status, run_id))
-        self.conn.commit()
+    def update_run(self, run_id: int, status: str, result: str = "", current_task_idx: int = None, task_outputs: dict = None, in_flight_tasks: list = None) -> None:
+        updates = ["status = ?", "result = ?", "finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)"]
+        params = [status, result, status]
+
+        if current_task_idx is not None:
+            updates.append("current_task_idx = ?")
+            params.append(current_task_idx)
+            
+        if task_outputs is not None:
+            updates.append("task_outputs = ?")
+            params.append(json.dumps(task_outputs))
+            
+        if in_flight_tasks is not None:
+            updates.append("in_flight_tasks = ?")
+            params.append(json.dumps(in_flight_tasks))
+            
+        sql = f"UPDATE workflow_runs SET {', '.join(updates)} WHERE id = ?"
+        params.append(run_id)
+        
+        with self.lock:
+            self.cursor.execute(sql, tuple(params))
+            self.conn.commit()
 
     def read_run(self, run_id: int) -> Optional[Dict[str, Any]]:
         sql = "SELECT * FROM workflow_runs WHERE id = ?"

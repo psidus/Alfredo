@@ -1923,12 +1923,14 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
     default_wf_task_ids = []
     for i, t in enumerate(raw_task_ids):
         if isinstance(t, int):
-            default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else []})
+            default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1})
         elif isinstance(t, dict):
             if "id" not in t:
                 t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
             if "depends_on" not in t:
-                t["depends_on"] = [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else []
+                t["depends_on"] = []
+            if "execution_level" not in t:
+                t["execution_level"] = 1
             default_wf_task_ids.append(t)
     raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
     default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
@@ -2033,7 +2035,8 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                         new_node = {
                             "id": f"node_{uuid.uuid4().hex[:8]}",
                             "task_id": task_options[sel_task_str],
-                            "depends_on": [st.session_state.wf_selected_task_ids[-1]["id"]] if st.session_state.wf_selected_task_ids else []
+                            "depends_on": [],
+                            "execution_level": 1
                         }
                         st.session_state.wf_selected_task_ids.append(new_node)
                         st.rerun()
@@ -2060,7 +2063,8 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                                 "task_ids": inner_ids,
                                 "batch_size": b_size,
                                 "source_variable": b_source,
-                                "depends_on": [st.session_state.wf_selected_task_ids[-1]["id"]] if st.session_state.wf_selected_task_ids else []
+                                "depends_on": [],
+                                "execution_level": 1
                             }
                             st.session_state.wf_selected_task_ids.append(new_block)
                             st.rerun()
@@ -2093,51 +2097,80 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                 t_name = task.get('name') or f"Task #{task['id']}" if task else "Unknown"
                 return f"{t_name} ({step['id']})"
 
-            for i, step in enumerate(st.session_state.wf_selected_task_ids):
-                with st.container(border=True):
-                    col_num, col_main, col_up, col_down, col_rem = st.columns([0.5, 8, 0.7, 0.7, 0.7])
-                    col_num.markdown(f"**{i+1}**")
+            levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
+            if not levels:
+                levels = [1]
+                
+            st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
+            st.markdown("""
+            <style>
+            div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+                overflow-x: auto !important;
+                padding-bottom: 10px !important;
+            }
+            div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: 350px !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            level_columns = st.columns(len(levels))
+            
+            for lvl_idx, lvl in enumerate(levels):
+                with level_columns[lvl_idx]:
+                    st.markdown(f"### 📍 Livello {lvl}")
                     
-                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                    if not is_batch:
-                        task_id = step if isinstance(step, int) else step.get("task_id")
-                        task = task_id_map.get(int(task_id))
-                        if task:
-                            agent = agent_id_map.get(task['agent_id'])
-                            a_name = agent['name'] if agent else "Unknown Agent"
-                            t_name = task.get('name') or f"Task #{task['id']}"
-                            col_main.markdown(f"👤 **{a_name}** ➔ **{t_name}** `[{step['id']}]`: {task['description'][:70]}...")
-                        else:
-                            col_main.markdown(f"❌ Unknown Task ID: {task_id}")
-                    else:
-                        inner_ids = step.get("task_ids", [])
-                        b_size = step.get("batch_size")
-                        col_main.markdown(f"🔄 **Batch Loop** `[{step['id']}]` (Size: {b_size}, Source: `{step.get('source_variable')}`)")
-                        for inner_id in inner_ids:
-                            itask = task_id_map.get(int(inner_id))
-                            if itask:
-                                iagent = agent_id_map.get(itask['agent_id'])
-                                i_aname = iagent['name'] if iagent else "Unknown Agent"
-                                i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                    for i, step in enumerate(st.session_state.wf_selected_task_ids):
+                        if step.get("execution_level", 1) != lvl:
+                            continue
+                            
+                        with st.container(border=True):
+                            col_main = st.container()
+                            
+                            is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                            if not is_batch:
+                                task_id = step if isinstance(step, int) else step.get("task_id")
+                                task = task_id_map.get(int(task_id))
+                                if task:
+                                    agent = agent_id_map.get(task['agent_id'])
+                                    a_name = agent['name'] if agent else "Unknown Agent"
+                                    t_name = task.get('name') or f"Task #{task['id']}"
+                                    tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
+                                    col_main.markdown(f"🚀 **{t_name}** {tooltip_html} (👤 {a_name})<br><sub>{task['description'][:100]}...</sub>", unsafe_allow_html=True)
+                                else:
+                                    col_main.markdown(f"❌ Unknown Task ID: {task_id}")
                             else:
-                                col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
-                    
-                    # Dependency Selection (only allow depending on previous nodes in the list)
-                    if i > 0:
-                        possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids[:i]}
-                        current_deps = step.get("depends_on", [])
-                        valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
-                        
-                        selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}")
-                        step["depends_on"] = [possible_deps[label] for label in selected_labels]
-                    else:
-                        step["depends_on"] = []
-                        col_main.caption("First node (No dependencies, starts immediately).")
+                                inner_ids = step.get("task_ids", [])
+                                b_size = step.get("batch_size")
+                                tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
+                                col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
+                                for inner_id in inner_ids:
+                                    itask = task_id_map.get(int(inner_id))
+                                    if itask:
+                                        iagent = agent_id_map.get(itask['agent_id'])
+                                        i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                        i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                        col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                    else:
+                                        col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
+                            
+                            # Execution Level Selection
+                            step["execution_level"] = col_main.number_input("Level (Parallelism)", min_value=1, value=lvl, key=f"lvl_{step['id']}")
+                            
+                            # Dependency Selection
+                            possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids if prev_step["id"] != step["id"]}
+                            current_deps = step.get("depends_on", [])
+                            valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
+                            
+                            selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}", placeholder="No dependencies (Default)")
+                            step["depends_on"] = [possible_deps[label] for label in selected_labels]
 
-                    col_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,), help="Move up")
-                    col_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,), help="Move down")
-                    col_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,), help="Remove")
+                            # Actions
+                            c_up, c_down, c_rem = col_main.columns(3)
+                            c_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,))
+                            c_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,))
+                            c_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,))
         st.markdown("---")
         if editing_workflow:
             col_save, col_cancel = st.columns([1, 1])
@@ -2231,43 +2264,75 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                 # The db_manager processes task_ids_json into task_ids list automatically
                 task_ids = workflow.get('task_ids', [])
                 st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
-                for i, step in enumerate(task_ids):
-                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                    if not is_batch:
-                        task_id = step if isinstance(step, int) else step.get("task_id")
-                        task = task_id_map.get(int(task_id))
-                        if task:
-                            agent = agent_id_map.get(task['agent_id'])
-                            col_avatar, col_text = st.columns([1, 25])
-                            with col_avatar:
-                                if agent:
-                                    st.image(get_agent_avatar_url(agent), use_container_width=True)
+                # Grouping by execution level
+                levels = sorted(list(set(step.get("execution_level", 1) if isinstance(step, dict) else 1 for step in task_ids)))
+                if not levels:
+                    levels = [1]
+                    
+                st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
+                st.markdown("""
+                <style>
+                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
+                    flex-wrap: nowrap !important;
+                    overflow-x: auto !important;
+                    padding-bottom: 10px !important;
+                }
+                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                    min-width: 350px !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+                
+                level_columns = st.columns(len(levels))
+                
+                for lvl_idx, lvl in enumerate(levels):
+                    with level_columns[lvl_idx]:
+                        st.markdown(f"### 📍 Livello {lvl}")
+                        
+                        for i, step in enumerate(task_ids):
+                            exec_lvl = step.get("execution_level", 1) if isinstance(step, dict) else 1
+                            if exec_lvl != lvl:
+                                continue
+                                
+                            with st.container(border=True):
+                                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                                if not is_batch:
+                                    task_id = step if isinstance(step, int) else step.get("task_id")
+                                    task = task_id_map.get(int(task_id))
+                                    if task:
+                                        agent = agent_id_map.get(task['agent_id'])
+                                        col_avatar, col_text = st.columns([1, 6])
+                                        with col_avatar:
+                                            if agent:
+                                                st.image(get_agent_avatar_url(agent), use_container_width=True)
+                                            else:
+                                                st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                                        with col_text:
+                                            t_name_display = task.get('name') or f"Task #{task['id']}"
+                                            node_id = step.get('id', 'N/A') if isinstance(step, dict) else 'N/A'
+                                            deps = step.get('depends_on', []) if isinstance(step, dict) else []
+                                            deps_str = f" **(Depends on: {', '.join(deps)})**" if deps else ""
+                                            tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
+                                            st.markdown(f"🚀 **{t_name_display}** {tooltip_html}{deps_str}<br><sub>{task['description']}</sub>", unsafe_allow_html=True)
+                                            if task.get('human_validation'):
+                                                st.markdown("✋ **Human Validation Checkpoint**")
+                                    else:
+                                        st.error(f"Step {i+1}: Task ID {task_id} not found")
                                 else:
-                                    st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
-                            with col_text:
-                                t_name_display = task.get('name') or f"Task #{task['id']}"
-                                node_id = step.get('id', 'N/A') if isinstance(step, dict) else 'N/A'
-                                deps = step.get('depends_on', []) if isinstance(step, dict) else []
-                                deps_str = f" **(Depends on: {', '.join(deps)})**" if deps else ""
-                                st.markdown(f"**Step {i+1} ({t_name_display}) `[{node_id}]`:** {task['description']}{deps_str}")
-                                if task.get('human_validation'):
-                                    st.markdown("✋ **Human Validation Checkpoint**")
-                                    st.info("The workflow will pause after this task to allow the user to make a selection on Telegram before proceeding to the next task.")
-                        else:
-                            st.error(f"Step {i+1}: Task ID {task_id} not found")
-                    else:
-                        inner_ids = step.get("task_ids", [])
-                        b_size = step.get("batch_size")
-                        st.markdown(f"**Step {i+1} (🔄 Batch Loop)**: Chunk Size: {b_size}, Source: `{step.get('source_variable')}`")
-                        for inner_id in inner_ids:
-                            itask = task_id_map.get(int(inner_id))
-                            if itask:
-                                iagent = agent_id_map.get(itask['agent_id'])
-                                i_aname = iagent['name'] if iagent else "Unknown Agent"
-                                i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
-                            else:
-                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
+                                    inner_ids = step.get("task_ids", [])
+                                    b_size = step.get("batch_size")
+                                    node_id = step.get('id', 'N/A')
+                                    tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
+                                    st.markdown(f"**Step {i+1}** | 🔄 **Batch Loop** {tooltip_html} | Chunk Size: {b_size}, Source: `{step.get('source_variable')}`", unsafe_allow_html=True)
+                                    for inner_id in inner_ids:
+                                        itask = task_id_map.get(int(inner_id))
+                                        if itask:
+                                            iagent = agent_id_map.get(itask['agent_id'])
+                                            i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                            i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                        else:
+                                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
                 
                 # --- ARCHITECTURAL MANDATE M1_T3-A2 & M1_T3-A3: Secure Export Logic ---
                 # 1. Construct the data structure for YAML in-memory
@@ -2450,8 +2515,23 @@ def render_history_monitoring():
                     st.markdown(f"**Finished At:** {run['finished_at']}")
                 
                 if status == 'running':
-                    current_idx = run.get('current_task_idx', 0)
-                    st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
+                    in_flight_json = run.get('in_flight_tasks')
+                    if in_flight_json and in_flight_json != '[]':
+                        import json
+                        try:
+                            in_flight_list = json.loads(in_flight_json)
+                            if len(in_flight_list) > 1:
+                                tasks_str = ", ".join(in_flight_list)
+                                st.info(f"⏳ **In Progress:** {len(in_flight_list)} Agents running in parallel ({tasks_str})")
+                            elif len(in_flight_list) == 1:
+                                st.info(f"⏳ **In Progress:** Executing {in_flight_list[0]}")
+                        except Exception:
+                            current_idx = run.get('current_task_idx', 0)
+                            st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
+                    else:
+                        current_idx = run.get('current_task_idx', 0)
+                        st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
+
 
                 st.markdown("**Result / Error:**")
                 if run['result']:

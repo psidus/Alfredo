@@ -596,7 +596,7 @@ def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
     )
 
 
-def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None, chat_id: str = None) -> str:
+def execute_run_with_resume(run_id: int, status_callback=None, accumulated_context: str = None, chat_id: str = None, on_flight_change=None) -> str:
     """
     Executes a workflow run task-by-task with MEMORY-CENTRIC communication.
     Now using a DAG Scheduler with VRAM-awareness.
@@ -649,6 +649,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
     # --- DAG NORMALIZATION ---
     dag_nodes = {}
+    level_nodes = {}
     for i, step_def in enumerate(task_ids):
         node_id = f"node_{i}"
         depends_on = []
@@ -657,6 +658,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         batch_tasks = []
         batch_size = 5
         source_variable = ""
+        execution_level = 1
         
         if isinstance(step_def, int):
             task_id = step_def
@@ -664,6 +666,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         elif isinstance(step_def, dict):
             node_id = step_def.get("id", f"node_{i}")
             depends_on = step_def.get("depends_on", [])
+            execution_level = step_def.get("execution_level", 1)
             if "id" not in step_def: step_def["id"] = node_id
             
             if step_def.get("type") == "batch_loop":
@@ -674,6 +677,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             else:
                 task_id = step_def.get("task_id")
                 
+        if execution_level not in level_nodes:
+            level_nodes[execution_level] = []
+        level_nodes[execution_level].append(node_id)
+                
         dag_nodes[node_id] = {
             "step_def": step_def,
             "task_id": task_id,
@@ -682,8 +689,17 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             "batch_size": batch_size,
             "source_variable": source_variable,
             "depends_on": depends_on,
+            "execution_level": execution_level,
             "original_index": i
         }
+
+    for node_id, data in dag_nodes.items():
+        lvl = data["execution_level"]
+        if lvl > 1 and not data["depends_on"]:
+            prev_levels = [l for l in level_nodes.keys() if l < lvl]
+            if prev_levels:
+                max_prev_lvl = max(prev_levels)
+                data["depends_on"] = list(level_nodes[max_prev_lvl])
 
     in_degree = {n: 0 for n in dag_nodes}
     dependents = {n: [] for n in dag_nodes}
@@ -967,11 +983,26 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
         
+        def _update_in_flight_db():
+            if not run_id: return
+            names = []
+            for nid in in_flight:
+                tdata = dag_nodes[nid]["task_data"]
+                names.append(tdata.get("name") or tdata.get("description", "")[:30])
+            try:
+                db.update_run(run_id, status='running', in_flight_tasks=names)
+                if on_flight_change:
+                    on_flight_change(names)
+            except Exception as e:
+                logging.error(f"Failed to update in_flight_tasks: {e}")
+
         while ready_queue or in_flight:
-            for n_id in ready_queue:
-                futures[executor.submit(execute_node, n_id)] = n_id
-                in_flight.add(n_id)
-            ready_queue.clear()
+            if ready_queue:
+                for n_id in ready_queue:
+                    futures[executor.submit(execute_node, n_id)] = n_id
+                    in_flight.add(n_id)
+                ready_queue.clear()
+                _update_in_flight_db()
             
             if not in_flight:
                 break
@@ -981,6 +1012,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             for f in done:
                 n_id = futures.pop(f)
                 in_flight.remove(n_id)
+                _update_in_flight_db()
                 
                 try:
                     res = f.result()
@@ -1162,7 +1194,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     return crew
 
 
-def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None, progress_callback=None) -> str:
+def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None, default_model_id=None, run_id: int = None, start_idx: int = 0, initial_task_outputs: dict = None, accumulated_context: str = None, chat_id: str = None, progress_callback=None, on_flight_change=None) -> str:
     if not plan or 'agents' not in plan or 'tasks' not in plan:
         raise ValueError("Invalid plan format. Must contain 'agents' and 'tasks'.")
 
@@ -1218,19 +1250,35 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
     # Normalize DAG for dynamic plan
     dag_nodes = {}
+    level_nodes = {}
     tasks = plan['tasks']
     for i, task_data in enumerate(tasks):
         node_id = task_data.get("id", f"node_{i}")
         depends_on = task_data.get("depends_on", [])
+        execution_level = task_data.get("execution_level", 1)
         if "id" not in task_data:
+            # Legacy tasks without ID keep sequential dependency if empty
             if i > 0 and not depends_on:
                 depends_on = [f"node_{i-1}"]
+            
+        if execution_level not in level_nodes:
+            level_nodes[execution_level] = []
+        level_nodes[execution_level].append(node_id)
             
         dag_nodes[node_id] = {
             "task_data": task_data,
             "depends_on": depends_on,
+            "execution_level": execution_level,
             "original_index": i
         }
+
+    for node_id, data in dag_nodes.items():
+        lvl = data["execution_level"]
+        if lvl > 1 and not data["depends_on"]:
+            prev_levels = [l for l in level_nodes.keys() if l < lvl]
+            if prev_levels:
+                max_prev_lvl = max(prev_levels)
+                data["depends_on"] = list(level_nodes[max_prev_lvl])
 
     in_degree = {n: 0 for n in dag_nodes}
     dependents = {n: [] for n in dag_nodes}
@@ -1473,11 +1521,26 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
         
+        def _update_in_flight_db():
+            if not run_id: return
+            names = []
+            for nid in in_flight:
+                tdata = dag_nodes[nid]["task_data"]
+                names.append(tdata.get("name") or tdata.get("description", "")[:30])
+            try:
+                db.update_run(run_id, status='running', in_flight_tasks=names)
+                if on_flight_change:
+                    on_flight_change(names)
+            except Exception as e:
+                logging.error(f"Failed to update in_flight_tasks: {e}")
+
         while ready_queue or in_flight:
-            for n_id in ready_queue:
-                futures[executor.submit(execute_dynamic_node, n_id)] = n_id
-                in_flight.add(n_id)
-            ready_queue.clear()
+            if ready_queue:
+                for n_id in ready_queue:
+                    futures[executor.submit(execute_dynamic_node, n_id)] = n_id
+                    in_flight.add(n_id)
+                ready_queue.clear()
+                _update_in_flight_db()
             
             if not in_flight:
                 break
@@ -1487,6 +1550,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             for f in done:
                 n_id = futures.pop(f)
                 in_flight.remove(n_id)
+                _update_in_flight_db()
                 
                 try:
                     res = f.result()

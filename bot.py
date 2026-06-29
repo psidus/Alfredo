@@ -253,26 +253,30 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
     # This guarantees the initial presentation is faithful to the predefined workflow.
     task_ids = workflow.get('task_ids') or []
     task_lines = []
-    for i, tid in enumerate(task_ids):
-        t_rec = db.read_task(tid)
-        if t_rec:
-            a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+    
+    def _format_db_task(task_db_id, prefix=""):
+        t_rec = db.read_task(int(task_db_id))
+        if not t_rec: return ""
+        a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+        agent_role = a_rec.get('role', 'Unknown agent') if a_rec else 'Unknown agent'
+        agent_display = _resolve_db_placeholders(agent_role, t_rec)
+        t_label = t_rec.get('name') or t_rec.get('description', '')[:60]
+        t_label = _resolve_db_placeholders(t_label, t_rec)
+        req_inputs = t_rec.get('required_inputs') or []
+        ri_hint = f" — <i>needs: {', '.join(ri.get('key', '?') for ri in req_inputs)}</i>" if req_inputs else ""
+        return f"{prefix}<b>{t_label}</b> — {agent_display}{ri_hint}"
 
-            # Resolve DB placeholders (e.g. {specialization}) for display
-            agent_role = a_rec.get('role', 'Unknown agent') if a_rec else 'Unknown agent'
-            agent_display = _resolve_db_placeholders(agent_role, t_rec)
-
-            # Task label: name or truncated description (with placeholders resolved)
-            t_label = t_rec.get('name') or t_rec.get('description', '')[:60]
-            t_label = _resolve_db_placeholders(t_label, t_rec)
-
-            # Show required input keys as a hint so the user knows what to expect
-            req_inputs = t_rec.get('required_inputs') or []
-            ri_hint = ''
-            if req_inputs:
-                ri_hint = f" — <i>needs: {', '.join(ri.get('key', '?') for ri in req_inputs)}</i>"
-
-            task_lines.append(f"{i+1}. <b>{t_label}</b> — {agent_display}{ri_hint}")
+    for i, step in enumerate(task_ids):
+        is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+        if not is_batch:
+            tid = step if isinstance(step, int) else step.get("task_id")
+            line = _format_db_task(tid, f"{i+1}. ")
+            if line: task_lines.append(line)
+        else:
+            task_lines.append(f"{i+1}. 🔄 <b>Batch Loop</b> (Size: {step.get('batch_size', '?')})")
+            for inner_id in step.get("task_ids", []):
+                line = _format_db_task(inner_id, "    ↳ ")
+                if line: task_lines.append(line)
 
     tasks_block = "\n".join(task_lines) if task_lines else "<i>No tasks defined.</i>"
     intro = (
@@ -451,13 +455,41 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             wf_agents = []
             seen_agent_roles = set()
             
-            for tid in task_ids:
-                t_rec = db.read_task(tid)
-                if t_rec:
-                    a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
-                    agent_role = a_rec.get('role', 'Unknown Agent') if a_rec else 'Unknown Agent'
-                    
-                    if a_rec and agent_role not in seen_agent_roles:
+            def _build_task_rep(step):
+                if isinstance(step, int):
+                    t_id = step
+                    dag_props = {"id": f"node_{t_id}", "execution_level": 1, "depends_on": []}
+                elif isinstance(step, dict) and step.get("type") == "batch_loop":
+                    tasks_rep = []
+                    for inner_step in step.get("task_ids", []):
+                        rep = _build_task_rep(inner_step)
+                        if rep: tasks_rep.append(rep)
+                    return {
+                        "type": "batch_loop",
+                        "id": step.get("id"),
+                        "execution_level": step.get("execution_level", 1),
+                        "depends_on": step.get("depends_on", []),
+                        "batch_size": step.get("batch_size"),
+                        "source_variable": step.get("source_variable"),
+                        "tasks": tasks_rep
+                    }
+                else:
+                    t_id = step.get("task_id")
+                    dag_props = {
+                        "id": step.get("id"),
+                        "execution_level": step.get("execution_level", 1),
+                        "depends_on": step.get("depends_on", [])
+                    }
+                
+                t_rec = db.read_task(int(t_id))
+                if not t_rec: return None
+                
+                a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+                agent_info = None
+                agent_role = "Unknown Agent"
+                if a_rec:
+                    agent_role = a_rec.get("role")
+                    if agent_role not in seen_agent_roles:
                         wf_agents.append({
                             "role": a_rec.get("role"),
                             "goal": a_rec.get("goal"),
@@ -465,15 +497,20 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                             "tools": a_rec.get("tools") or []
                         })
                         seen_agent_roles.add(agent_role)
-                        
-                    wf_tasks.append({
-                        "name": t_rec.get("name") or t_rec.get("description")[:30],
-                        "description": t_rec.get("description"),
-                        "expected_output": t_rec.get("expected_output"),
-                        "agent_role": agent_role,
-                        "agent_specialization": t_rec.get("agent_specialization"),
-                        "required_inputs": t_rec.get("required_inputs") or []
-                    })
+                
+                return {
+                    **dag_props,
+                    "name": t_rec.get("name") or t_rec.get("description")[:30],
+                    "description": t_rec.get("description"),
+                    "expected_output": t_rec.get("expected_output"),
+                    "agent_role": agent_role,
+                    "agent_specialization": t_rec.get("agent_specialization"),
+                    "required_inputs": t_rec.get("required_inputs") or []
+                }
+
+            for step in task_ids:
+                rep = _build_task_rep(step)
+                if rep: wf_tasks.append(rep)
             plan = {
                 "agents": wf_agents,
                 "tasks": wf_tasks
@@ -562,8 +599,12 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                 context.user_data["current_workflow_id"] = base_workflow["id"]
                 context.user_data["final_plan"] = None
 
+        user_msgs = [
+            m['content'] for m in chat_history 
+            if m.get('role') == 'user' and m['content'].strip().lower() not in ["go", "confirm", "proceed", "yes", "ok"]
+        ]
         context.user_data["execution_context"] = {
-            "user_input": " ".join([m['content'] for m in chat_history])
+            "user_input": "\n".join(user_msgs)
         }
 
         logger.info("handle_planning_chat: Plan decomposed. Waiting for confirmation.")
@@ -613,9 +654,16 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
         # AUTHORITATIVE SOURCE: Predefined workflow — always read from DB task records.
         # This guarantees correct preset prompts are shown regardless of what the LLM generated.
         task_ids = base_workflow.get('task_ids') or []
-        logger.info(f"collect_required_inputs: Reading inputs from DB for {len(task_ids)} tasks in workflow '{base_workflow.get('name')}'")
-        for tid in task_ids:
-            t_rec = db.read_task(tid)
+        flat_tids = []
+        for step in task_ids:
+            if isinstance(step, dict) and step.get("type") == "batch_loop":
+                flat_tids.extend(step.get("task_ids", []))
+            else:
+                flat_tids.append(step if isinstance(step, int) else step.get("task_id"))
+                
+        logger.info(f"collect_required_inputs: Reading inputs from DB for {len(flat_tids)} tasks in workflow '{base_workflow.get('name')}'")
+        for tid in flat_tids:
+            t_rec = db.read_task(int(tid))
             if t_rec:
                 for ri in (t_rec.get('required_inputs') or []):
                     if isinstance(ri, dict):
@@ -845,6 +893,27 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception:
                 pass  # Best-effort — don't crash the worker thread
 
+        def on_flight_change(in_flight_list: list):
+            """Called from the worker thread when parallel active agents change."""
+            nonlocal status_msg
+            if not in_flight_list: return
+            try:
+                if len(in_flight_list) > 1:
+                    tasks_str = ", ".join(in_flight_list)
+                    msg = f"⏳ <b>In Progress:</b> {len(in_flight_list)} Agents running in parallel ({tasks_str})"
+                else:
+                    msg = f"⏳ <b>In Progress:</b> Executing {in_flight_list[0]}"
+                
+                async def update_flight_status():
+                    try:
+                        await status_msg.edit_text(text=msg, parse_mode=ParseMode.HTML)
+                    except Exception:
+                        pass
+                
+                asyncio.run_coroutine_threadsafe(update_flight_status(), loop).result(timeout=10)
+            except Exception:
+                pass
+
         try:
             # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
             # to prevent blocking the Telegram bot's event loop.
@@ -852,11 +921,11 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
                 logger.info(f"User {user_id}: Starting execution of Dynamic Workflow.")
                 result_tuple = await asyncio.to_thread(
-                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id), on_task_progress
+                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id), on_task_progress, on_flight_change
                 )
             else:
                 logger.info(f"User {user_id}: Starting execution of Workflow ID {workflow_id} (resume from {start_idx}).")
-                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, on_task_progress, accumulated_context, str(chat_id))
+                result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, on_task_progress, accumulated_context, str(chat_id), on_flight_change)
 
             # Unpack the (last_output, global_context) tuple
             if isinstance(result_tuple, tuple) and len(result_tuple) == 2:

@@ -12,10 +12,13 @@ services:
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       - PYTHONPATH=/app
+      - HEADROOM_PROXY_URL=http://headroom_proxy:8787/v1
     volumes:
       - ./db:/app/db
       - ./workspace:/app/workspace
       - ./storage:/app/storage
+      - ./ui:/app/ui
+      - ./core:/app/core
     restart: unless-stopped
 
   headroom_proxy:

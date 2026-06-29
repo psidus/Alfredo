@@ -22,6 +22,9 @@ _headroom_compress = None
 if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
     proxy_url = os.getenv("HEADROOM_PROXY_URL")
     if proxy_url:
+        # Gemini requires v1beta for system_instruction. If proxy specifies /v1, adjust it.
+        if proxy_url.endswith("/v1"):
+            proxy_url = proxy_url[:-3] + "/v1beta"
         if litellm:
             litellm.api_base = proxy_url
         logger.info(f"Headroom AI Proxy Mode enabled at {proxy_url}")
@@ -112,7 +115,8 @@ RULES FOR PARALLEL EXECUTION (DAG):
 - Always structure the "tasks" array as a Directed Acyclic Graph (DAG) for parallel execution.
 - Assign a unique string "id" (e.g., "node_1", "data_fetch") to EVERY task.
 - Use the "depends_on" array to list the "id"s of tasks that must complete before this task starts.
-- If two or more tasks are independent (e.g., fetching data from two different sources), make them run IN PARALLEL by giving them the same "depends_on" (e.g., both depend on "node_1") or empty "depends_on": []. This is CRITICAL for performance.
+- Use the "execution_level" (integer) to group tasks into phases (e.g. all tasks in level 1 run first, then level 2 starts). This helps structure parallel execution.
+- If two or more tasks are independent (e.g., fetching data from two different sources), make them run IN PARALLEL by giving them the same "execution_level" (e.g. 1) and empty "depends_on": []. This is CRITICAL for performance.
 
 OUTPUT FORMAT (JSON ONLY):
 {
@@ -139,6 +143,7 @@ OUTPUT FORMAT (JSON ONLY):
         "vector_dbs": ["list of vector database IDs (integers) to search, if needed"],
         "human_validation": false,
         "depends_on": ["node_1"],
+        "execution_level": 1,
         "required_inputs": [
           {"key": "variable_name", "prompt": "User-facing question to ask before execution"}
         ]
@@ -341,6 +346,7 @@ Return ONLY a JSON object with this exact structure:
       "vector_dbs": ["list of vector database IDs (strings or integers) if vector_search is assigned"],
       "human_validation": false,
       "depends_on": ["list of previous subtask IDs this subtask depends on (e.g. ['node_sub_0'])"],
+      "execution_level": 1,
       "required_inputs": [
         {{ "key": "dataset_name", "prompt": "Please enter dataset name" }}
       ]
@@ -837,31 +843,61 @@ class MasterAI:
                     task_ids = []
             
             wf_tasks = []
-            for tid in (task_ids or []):
-                t_rec = self.db_manager.read_task(tid)
-                if t_rec:
-                    # Fetch agent details
-                    a_rec = self.db_manager.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
-                    agent_info = None
-                    if a_rec:
-                        agent_info = {
-                            "role": a_rec.get("role"),
-                            "goal": a_rec.get("goal"),
-                            "backstory": a_rec.get("backstory"),
-                            "tools": a_rec.get("tools") or []
-                        }
-                    
-                    wf_tasks.append({
-                        "task_name": t_rec.get("name"),
-                        "description": t_rec.get("description"),
-                        "expected_output": t_rec.get("expected_output"),
-                        "agent_specialization": t_rec.get("agent_specialization"),
-                        "vector_dbs": t_rec.get("vector_dbs") or [],
-                        "tools": t_rec.get("tools") or [],
-                        "required_inputs": t_rec.get("required_inputs") or [],
-                        "human_validation": bool(t_rec.get("human_validation")),
-                        "agent": agent_info
-                    })
+            def _build_task_rep(step):
+                if isinstance(step, int):
+                    t_id = step
+                    dag_props = {"id": f"node_{t_id}", "execution_level": 1, "depends_on": []}
+                elif isinstance(step, dict) and step.get("type") == "batch_loop":
+                    tasks_rep = []
+                    for inner_step in step.get("task_ids", []):
+                        rep = _build_task_rep(inner_step)
+                        if rep: tasks_rep.append(rep)
+                    return {
+                        "type": "batch_loop",
+                        "id": step.get("id"),
+                        "execution_level": step.get("execution_level", 1),
+                        "depends_on": step.get("depends_on", []),
+                        "batch_size": step.get("batch_size"),
+                        "source_variable": step.get("source_variable"),
+                        "tasks": tasks_rep
+                    }
+                else:
+                    t_id = step.get("task_id")
+                    dag_props = {
+                        "id": step.get("id"),
+                        "execution_level": step.get("execution_level", 1),
+                        "depends_on": step.get("depends_on", [])
+                    }
+                
+                t_rec = self.db_manager.read_task(int(t_id))
+                if not t_rec: return None
+                
+                a_rec = self.db_manager.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
+                agent_info = None
+                if a_rec:
+                    agent_info = {
+                        "role": a_rec.get("role"),
+                        "goal": a_rec.get("goal"),
+                        "backstory": a_rec.get("backstory"),
+                        "tools": a_rec.get("tools") or []
+                    }
+                
+                return {
+                    **dag_props,
+                    "task_name": t_rec.get("name"),
+                    "description": t_rec.get("description"),
+                    "expected_output": t_rec.get("expected_output"),
+                    "agent_specialization": t_rec.get("agent_specialization"),
+                    "vector_dbs": t_rec.get("vector_dbs") or [],
+                    "tools": t_rec.get("tools") or [],
+                    "required_inputs": t_rec.get("required_inputs") or [],
+                    "human_validation": bool(t_rec.get("human_validation")),
+                    "agent": agent_info
+                }
+
+            for step in (task_ids or []):
+                rep = _build_task_rep(step)
+                if rep: wf_tasks.append(rep)
             
             base_workflow_context = f"""
 BASE WORKFLOW LOADED:
