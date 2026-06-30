@@ -1,89 +1,89 @@
-# Guida all'Integrazione dei Tools (AI OS)
+# Tool Integration Guide (AI OS)
 
-Questa guida spiega come il sistema gestisce gli strumenti (tools) che permettono agli agenti IA di interagire con il computer locale e con servizi esterni (es. Gmail, Google Drive, ecc.).
+This guide explains how the system manages the tools that allow AI agents to interact with the local computer and external services (e.g., Gmail, Google Drive, etc.).
 
-## 1. Architettura dei Tool
+## 1. Tool Architecture
 
-I tool in questo progetto sono basati sull'architettura di **CrewAI**.
-Un tool è semplicemente una funzione Python decorata con `@tool` (da `crewai_tools`).
-- **Il nome e la docstring (`"""..."""`)** della funzione sono cruciali: l'IA li legge per capire a cosa serve lo strumento e come usarlo.
-- **I parametri della funzione** definiscono cosa l'IA deve fornire (es. `file_path`, `command_str`).
+The tools in this project are based on the **CrewAI** architecture.
+A tool is simply a Python function decorated with `@tool` (from `crewai_tools`).
+- **The name and docstring (`"""..."""`)** of the function are crucial: the AI reads them to understand what the tool is for and how to use it.
+- **The function parameters** define what the AI needs to provide (e.g., `file_path`, `command_str`).
 
-I tool attualmente implementati sono:
-- `tools/local_tools.py`: Lettura/scrittura file (con sandboxing in `/workspace`) e ricerca web.
-- `tools/terminal_executor.py`: Esecuzione di comandi terminale (con rigidi controlli di sicurezza e blocco dei comandi distruttivi).
+Currently implemented tools include:
+- `tools/local_tools.py`: File reading/writing (with sandboxing in `/workspace`) and web search.
+- `tools/terminal_executor.py`: Terminal command execution (with strict security controls and destructive command blocking).
 
-## 2. Il Registro dei Tool (`config/tools_map.yaml`)
+## 2. The Tool Registry (`config/tools_map.yaml`)
 
-Per rendere un tool disponibile nell'interfaccia grafica (UI) e agli agenti, deve essere registrato nel file `config/tools_map.yaml`.
+To make a tool available in the graphical interface (UI) and to agents, it must be registered in the `config/tools_map.yaml` file.
 
-Questo file funge da "Anagrafe" e gestisce la sicurezza delle credenziali:
+This file acts as a registry and manages credential security:
 
 ```yaml
 tools_registry:
   search_web:
     display_name: "Web: DuckDuckGo Search"
-    description: "Ricerca gratuita su internet."
-    required_secrets: [] # Nessuna chiave API necessaria
+    description: "Free internet search."
+    required_secrets: [] # No API key required
     
   gmail_send:
     display_name: "Google: Gmail Sender"
-    description: "Invia email tramite Gmail API."
+    description: "Sends emails via Gmail API."
     required_secrets: ["GMAIL_API_KEY", "GMAIL_SENDER_EMAIL"]
 ```
 
-### Come funziona la gestione dei Segreti:
-1.  **Sicurezza**: Le chiavi API non vengono mai salvate nel database o mostrate nell'interfaccia utente.
-2.  **API Vault (Dashboard)**: L'interfaccia legge il file YAML e controlla nel tuo file `.env` se le chiavi richieste (es. `GMAIL_API_KEY`) sono presenti. 
-3.  Se mancano, il tool viene segnalato con un semaforo rosso 🔴 nella UI.
+### How Secret Management Works:
+1.  **Security**: API keys are never saved in the database or displayed in the user interface.
+2.  **API Vault (Dashboard)**: The interface reads the YAML file and checks your `.env` file to see if the required keys (e.g., `GMAIL_API_KEY`) are present. 
+3.  If they are missing, the tool is marked with a red traffic light 🔴 in the UI.
 
-## 3. Come aggiungere un NUOVO Tool (Tutorial)
+## 3. How to Add a NEW Tool (Tutorial)
 
-Supponiamo che tu voglia aggiungere un tool per leggere file PDF.
+Suppose you want to add a tool to read PDF files.
 
-**Passo 1: Crea il codice del Tool**
-Crea una nuova funzione in `tools/custom_tools.py` (o in `local_tools.py` se affine):
+**Step 1: Create the Tool Code**
+Create a new function in `tools/custom_tools.py` (or in `local_tools.py` if related):
 ```python
 from crewai_tools import tool
 import os
 
 @tool("PDF Reader")
 def read_pdf(file_path: str) -> str:
-    \"\"\"Legge il contenuto testuale di un file PDF dal workspace.\"\"\"
-    # ... logica python ...
+    """Reads the textual content of a PDF file from the workspace."""
+    # ... python logic ...
     return text
 ```
 
-**Passo 2: Registralo nel YAML**
-Aggiungi il tool al file `config/tools_map.yaml`:
+**Step 2: Register it in the YAML**
+Add the tool to the `config/tools_map.yaml` file:
 ```yaml
   read_pdf:
     display_name: "Local: PDF Reader"
-    description: "Legge file PDF."
+    description: "Reads PDF files."
     required_secrets: []
 ```
 
-**Passo 3: Mappalo nell'Executor**
-Affinché il sistema di esecuzione sappia quale funzione Python corrisponde alla stringa "read_pdf", aggiorna il file `agents/executor.py`:
+**Step 3: Map it in the Executor**
+For the execution system to know which Python function corresponds to the string "read_pdf", update the `agents/executor.py` file:
 ```python
 # agents/executor.py
 from tools.custom_tools import read_pdf
 
 TOOL_REGISTRY = {
-    # ... altri tool ...
+    # ... other tools ...
     "read_pdf": read_pdf 
 }
 ```
 
-## 4. Assegnazione e Sicurezza (Importante!)
+## 4. Assignment and Security (Important!)
 
-**Come funziona l'assegnazione:**
-- Tramite il **Task Builder (Dashboard)**, puoi assegnare specifici tool a specifiche task.
-- Se crei una task "Scrivi un report" e le assegni il tool `write_file`, l'agente che eseguirà quella task avrà il permesso di scrivere file *solo durante quell'operazione*.
+**How Assignment Works:**
+- Via the **Task Builder (Dashboard)**, you can assign specific tools to specific tasks.
+- If you create a task "Write a report" and assign it the `write_file` tool, the agent executing that task will have permission to write files *only during that operation*.
 
-**Accesso al Computer (Sicurezza):**
-Dare agli agenti IA accesso al terminale o ai file locali è estremamente pericoloso se non controllato.
-1.  **File System**: Tutti i file tools (`read_file`, `write_file`) sono bloccati tramite una funzione di validazione (`_is_path_safe`) che costringe l'agente a operare SOLO nella cartella `workspace/`. Qualsiasi tentativo di accedere a file di sistema (es. `/etc/passwd` o `C:\Windows`) verrà bloccato.
-2.  **Terminale**: Il `Terminal Executor` ha una blacklist di comandi (come `rm`, `sudo`, `format`) e operatori (`>`, `|`, `&&`) e impedisce l'accesso ai file del database o ai file `.env`.
+**Computer Access (Security):**
+Giving AI agents access to the terminal or local files is extremely dangerous if uncontrolled.
+1.  **File System**: All file tools (`read_file`, `write_file`) are locked via a validation function (`_is_path_safe`) that forces the agent to operate ONLY in the `workspace/` folder. Any attempt to access system files (e.g., `/etc/passwd` or `C:\Windows`) will be blocked.
+2.  **Terminal**: The `Terminal Executor` has a blacklist of commands (like `rm`, `sudo`, `format`) and operators (`>`, `|`, `&&`) and prevents access to database files or `.env` files.
 
-Questa architettura ti permette di avere un sistema modulare, sicuro e facile da espandere con qualsiasi API esterna (aggiungendo la chiave nel `.env` e registrandola nel YAML).
+This architecture allows you to have a modular, secure system that is easy to expand with any external API (by adding the key to `.env` and registering it in the YAML).
