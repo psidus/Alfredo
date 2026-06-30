@@ -333,11 +333,13 @@ class VectorManager:
         df.reset_index(drop=True, inplace=True)
         return df
 
-    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None) -> Dict[str, Any]:
+    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None, scientific_mode: bool = False, scientific_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Creates a new vector database from a list of files with customizable chunking.
         Excel/CSV files are NOT vectorized — they are cleaned and saved as CSVs in a
         `structured/` subfolder inside the database directory.
+        
+        If scientific_mode is True, uses ScientificParser to extract tables/graphs via VLMs.
         
         Uses batched embedding with automatic retry and exponential backoff to handle
         API rate limits (429 errors) gracefully without losing progress.
@@ -399,7 +401,32 @@ class VectorManager:
         if progress_callback:
             progress_callback(0, 0, "📄 Loading documents...")
 
-        documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
+        if scientific_mode:
+            from core.scientific_parser import ScientificParser
+            if not scientific_config:
+                scientific_config = {}
+            parser = ScientificParser(
+                models_config=scientific_config.get("models_config", {}),
+                graph_points=scientific_config.get("graph_points", 10),
+                db_path=db_path
+            )
+            documents = []
+            load_skipped = []
+            for f in vectorizable_files:
+                if f.lower().endswith(".pdf"):
+                    if progress_callback:
+                        progress_callback(0, 0, f"🧪 Scientifically parsing {os.path.basename(f)}...")
+                    docs = parser.parse_pdf(f)
+                    if not docs:
+                        load_skipped.append(f"Failed to parse PDF scientifically: {f}")
+                    documents.extend(docs)
+                else:
+                    docs, skip = self.load_documents([f], progress_callback=progress_callback)
+                    documents.extend(docs)
+                    load_skipped.extend(skip)
+        else:
+            documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
+
         all_skipped.extend(load_skipped)
 
         if not documents:

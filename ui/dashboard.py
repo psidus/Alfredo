@@ -491,7 +491,7 @@ def render_knowledge_base():
             
             st.divider()
 
-        with st.form("create_vdb_form"):
+        with st.container(border=True):
             st.subheader("Create New Database")
             db_name = st.text_input("Database Name", placeholder="e.g. project_docs_2026", key="create_vdb_name")
             
@@ -567,9 +567,86 @@ def render_knowledge_base():
                 with col_c2:
                     chunk_overlap = st.number_input("Chunk Overlap", min_value=0, max_value=2000, value=200, step=50,
                                                     help="The number of overlapping characters between chunks to maintain context continuity.")
+            # --- Scientific RAG Parameters ---
+            scientific_mode = st.checkbox("🧪 Enable Scientific RAG (Advanced Agentic Ingestion)", help="Use VLMs to extract and describe graphs, tables, and P&ID drawings intelligently.")
+            scientific_config = {}
+            if scientific_mode:
+                st.markdown("Configure specific Vision-capable models for scientific parsing:")
+                
+                # Pre-defined list of the BEST vision models available (Gemini, Local, etc.)
+                vision_models_pool = [
+                    "google/gemini-1.5-pro",
+                    "google/gemini-1.5-flash",
+                    "google/gemini-2.0-flash",
+                    "google/gemini-2.5-pro",
+                    "openai/gpt-4o",
+                    "openai/gpt-4o-mini",
+                    "anthropic/claude-3-5-sonnet-20240620",
+                    "ollama/llava",
+                    "ollama/bakllava",
+                    "ollama/moondream",
+                    "ollama/qwen2-vl",
+                    "ollama/llama3.2-vision"
+                ]
+                
+                available_vlms = []
+                
+                # Check .env to see which providers are active and filter the pool
+                if current_env.get("OPENAI_API_KEY"): 
+                    available_vlms.extend([m for m in vision_models_pool if m.startswith("openai/")])
+                if current_env.get("GEMINI_API_KEY") or current_env.get("GOOGLE_API_KEY"): 
+                    available_vlms.extend([m for m in vision_models_pool if m.startswith("google/")])
+                if current_env.get("ANTHROPIC_API_KEY"): 
+                    available_vlms.extend([m for m in vision_models_pool if m.startswith("anthropic/")])
+                
+                # We always add local vision models as an option
+                available_vlms.extend([m for m in vision_models_pool if m.startswith("ollama/")])
+                
+                # Make it unique and sort
+                available_vlms = sorted(list(set(available_vlms)))
+                available_vlms.append("Other (Manual Input)")
+                
+                def get_model_selection(label, key, default_hint, preferred_models):
+                    idx = 0
+                    for pref in preferred_models:
+                        if pref in available_vlms:
+                            idx = available_vlms.index(pref)
+                            break
+                    sel = st.selectbox(label, options=available_vlms, index=idx, key=f"sel_{key}", help=default_hint)
+                    if sel == "Other (Manual Input)":
+                        return st.text_input(f"Custom Model for {key} (e.g. provider/model)", key=f"cust_{key}")
+                    return sel
+
+                sc_col1, sc_col2 = st.columns(2)
+                with sc_col1:
+                    graph_model = get_model_selection(
+                        "Model for Graphs (Coordinate Extractor)", "graphs", 
+                        "Best: Gemini 1.5 Pro, GPT-4o, Qwen2-VL for coordinate estimation.",
+                        ["google/gemini-1.5-pro", "ollama/qwen2-vl", "openai/gpt-4o", "ollama/llava"]
+                    )
+                    table_model = get_model_selection(
+                        "Model for Tables (Markdown Converter)", "tables", 
+                        "Best: Gemini 1.5 Flash, Claude 3.5 Sonnet for OCR & structural Markdown.",
+                        ["google/gemini-1.5-flash", "google/gemini-1.5-pro", "ollama/llama3.2-vision", "ollama/llava"]
+                    )
+                with sc_col2:
+                    drawing_model = get_model_selection(
+                        "Model for Technical Drawings (P&ID)", "drawings", 
+                        "Best: Gemini 1.5 Pro, GPT-4o for complex schematics.",
+                        ["google/gemini-1.5-pro", "ollama/llava", "openai/gpt-4o"]
+                    )
+                    graph_points = st.number_input("Graph Extraction Points", min_value=3, max_value=100, value=10, help="How many (X,Y) points to digitize from curves.")
+                
+                scientific_config = {
+                    "models_config": {
+                        "graphs": graph_model,
+                        "tables": table_model,
+                        "drawings": drawing_model
+                    },
+                    "graph_points": graph_points
+                }
             
-            submitted = st.form_submit_button("Start Embedding", type="primary")
-            
+            submitted = st.button("Start Embedding", type="primary")
             if submitted:
                 if not db_name or not uploaded_files or not selected_model_name:
                     st.error("Please provide a name, select files, and choose a valid model.")
@@ -612,7 +689,9 @@ def render_knowledge_base():
                                 model_name=selected_model_name,
                                 chunk_size=chunk_size,
                                 chunk_overlap=chunk_overlap,
-                                progress_callback=ui_progress_callback
+                                progress_callback=ui_progress_callback,
+                                scientific_mode=scientific_mode,
+                                scientific_config=scientific_config
                             )
                             
                             if result["status"] in ("success", "partial"):
