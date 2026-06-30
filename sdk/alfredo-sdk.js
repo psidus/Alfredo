@@ -337,12 +337,14 @@ const AlfredoClient = (() => {
         // ============================================================
         //  PUBLIC: init
         // ============================================================
-        init({ serverUrl, apiKey }) {
+        init({ serverUrl, apiKey, appName }) {
             if (!serverUrl) throw new Error('[AlfredoSDK] serverUrl is required');
             if (!apiKey) throw new Error('[AlfredoSDK] apiKey is required');
+            if (!appName) throw new Error('[AlfredoSDK] appName is required');
 
             _config.serverUrl = serverUrl.replace(/\/+$/, '');
             _config.apiKey = apiKey;
+            _config.appName = appName;
 
             // Create the widget
             api._createWidget();
@@ -423,7 +425,7 @@ const AlfredoClient = (() => {
         async _fetchWorkflows() {
             api._setStatus('loading', 'Fetching workflows…');
             try {
-                const res = await fetch(`${_config.serverUrl}/api/workflows`, {
+                const res = await fetch(`${_config.serverUrl}/api/apps/${_config.appName}/workflows`, {
                     headers: {
                         'X-API-Key': _config.apiKey,
                         'Accept': 'application/json'
@@ -442,7 +444,7 @@ const AlfredoClient = (() => {
         },
 
         async _triggerWorkflow(workflowId, inputData) {
-            const res = await fetch(`${_config.serverUrl}/api/apps/trigger`, {
+            const res = await fetch(`${_config.serverUrl}/api/apps/${_config.appName}/trigger`, {
                 method: 'POST',
                 headers: {
                     'X-API-Key': _config.apiKey,
@@ -523,7 +525,9 @@ const AlfredoClient = (() => {
             widget.className = 'alfredo-widget';
             widget.innerHTML = `
                 <!-- Mini logo (visible only when minimized) -->
-                <div class="alfredo-mini-logo">A</div>
+                <div class="alfredo-mini-logo">
+                    <img src="${_config.serverUrl}/sdk/logo.png" alt="Alfredo" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover; pointer-events: none;" />
+                </div>
 
                 <!-- Header -->
                 <div class="alfredo-header">
@@ -533,7 +537,6 @@ const AlfredoClient = (() => {
                     </div>
                     <div class="alfredo-header-controls">
                         <button class="alfredo-btn-minimize" title="Minimize">−</button>
-                        <button class="alfredo-btn-close" title="Close">×</button>
                     </div>
                 </div>
 
@@ -609,12 +612,7 @@ const AlfredoClient = (() => {
                 api.closeWidget();
             });
 
-            // Close (remove)
-            const closeBtn = _widgetRoot.querySelector('.alfredo-btn-close');
-            closeBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                api.removeWidget();
-            });
+            // Close removed completely to prevent disappearing
 
             // Click on minimized bubble to expand
             widget.addEventListener('click', (e) => {

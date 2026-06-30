@@ -5,7 +5,6 @@ services:
     command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --server.maxUploadSize=2000
     ports:
       - "8501:8501"
-      - "8000:8000"
     env_file:
       - .env
     environment:
@@ -19,6 +18,26 @@ services:
       - ./storage:/app/storage
       - ./ui:/app/ui
       - ./core:/app/core
+    restart: unless-stopped
+
+  api:
+    build: .
+    container_name: alfredo_api
+    command: python -c "from core.api_server import start_api_server; start_api_server()"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - HEADROOM_PROXY_URL=http://headroom_proxy:8787/v1
+    volumes:
+      - ./db:/app/db
+      - ./workspace:/app/workspace
+      - ./storage:/app/storage
+      - ./ui:/app/ui
+      - ./core:/app/core
+      - ./sdk:/app/sdk
     restart: unless-stopped
 
   headroom_proxy:

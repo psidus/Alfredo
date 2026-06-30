@@ -746,18 +746,54 @@ def render_api_vault():
     ]
     
     # Combine suggested keys and any other keys already in .env, excluding Telegram configs
-    all_keys = sorted([k for k in set(suggested_keys + list(current_env.keys())) if "TELEGRAM" not in k.upper()])
+    all_env_keys = sorted([k for k in set(suggested_keys + list(current_env.keys())) if "TELEGRAM" not in k.upper()])
     
-    st.subheader("API Keys")
-    st.markdown("Monitor and manage API keys saved securely in your `.env` file.")
+    # Categorize keys dynamically
+    llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA"]
+    llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords)]
     
-    # Display current status in columns
+    connection_suffixes = ["_API_KEY", "_DB_URL", "_TOKEN", "_PASSWORD"]
+    conn_keys = [k for k in all_env_keys if k not in llm_keys and any(k.endswith(s) for s in connection_suffixes)]
+    
+    agent_keys = ["MASTER_AI_MODEL_ID", "DEFAULT_AGENT_MODEL_ID"]
+    system_keys = [k for k in all_env_keys if k not in llm_keys and k not in conn_keys and k not in agent_keys]
+    
+    # 1. LLM Provider API Keys
+    st.subheader("LLM Provider API Keys")
+    st.markdown("Monitor and manage API keys for AI models.")
+    
     col1, col2 = st.columns(2)
-    for i, key in enumerate(all_keys):
+    for i, key in enumerate(llm_keys):
         is_set = key in current_env and bool(current_env[key].strip())
         status_icon = "🟢" if is_set else "🔴"
         with (col1 if i % 2 == 0 else col2):
             st.markdown(f"{status_icon} **{key}**")
+            
+    st.divider()
+    
+    # Tooltip definitions for system/conn keys
+    key_tooltips = {
+        "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
+        "ERP_DB_URL": "Address to access the external app database (e.g. Biomass DB).",
+        "HEADROOM_ENABLED": "Turn the Headroom service on or off (true/false).",
+        "HEADROOM_PROXY_URL": "Web address for the Headroom service.",
+        "MASTER_AI_MODEL_ID": "The main AI brain Alfredo uses for everyday tasks."
+    }
+    
+    # 2. System & Integration Settings
+    st.subheader("System Settings")
+    st.markdown("Database, Headroom, and other global configuration variables.")
+    
+    with st.expander("View System Settings", expanded=False):
+        col3, col4 = st.columns(2)
+        for i, key in enumerate(system_keys):
+            is_set = key in current_env and bool(current_env[key].strip())
+            status_icon = "🟢" if is_set else "🔴"
+            tooltip = key_tooltips.get(key, "System configuration parameter.")
+            
+            with (col3 if i % 2 == 0 else col4):
+                # Using HTML title attribute to create a native tooltip
+                st.markdown(f'<span title="{tooltip}" style="cursor: help;">{status_icon} <b>{key}</b></span>', unsafe_allow_html=True)
             
     st.divider()
     st.subheader("Global Resource Settings")
@@ -939,12 +975,28 @@ def render_agent_caserma():
     model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
     
     # --- Main Agent (Master AI) Configuration Row ---
-    st.markdown("### 🧠 Main Agent (Master AI) Configuration")
+    st.markdown("### 🧠 Global Default Models")
     
     # Read current Master AI model selection from .env
     from dotenv import set_key
     env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
     current_env = dotenv_values(env_path)
+    
+    agent_tooltips = {
+        "MASTER_AI_MODEL_ID": "Routes incoming requests and acts as the main system orchestrator.",
+        "DEFAULT_AGENT_MODEL_ID": "Automatically used by any agent if you don't explicitly assign a model for a specific task."
+    }
+    
+    st.markdown("**Configured AI Default Variables**")
+    col_env1, col_env2 = st.columns(2)
+    for idx, env_var in enumerate(["MASTER_AI_MODEL_ID", "DEFAULT_AGENT_MODEL_ID"]):
+        is_set = env_var in current_env and bool(str(current_env.get(env_var, "")).strip())
+        icon = "🟢" if is_set else "🔴"
+        tooltip = agent_tooltips.get(env_var, "")
+        with [col_env1, col_env2][idx]:
+            st.markdown(f'<span title="{tooltip}" style="cursor: help;">{icon} <b>{env_var}</b></span>', unsafe_allow_html=True)
+    st.write("") # Spacer
+
     current_master_model_id = current_env.get("MASTER_AI_MODEL_ID", "")
     
     # Find matching model index
@@ -2779,22 +2831,25 @@ def render_my_apps():
             st.divider()
             st.markdown("### Connection Configuration")
 
-            # Check .env variables
+            # Check .env variables mapped to this app
             env_vars_status = []
             if app_record.get('db_env_key'):
-                val = os.getenv(app_record['db_env_key'])
-                status = "✅" if val else "❌ Not found in .env"
-                env_vars_status.append(f"**DB** (`{app_record['db_env_key']}`): {status}")
+                env_vars_status.append(app_record['db_env_key'])
             if app_record.get('api_env_key'):
-                val = os.getenv(app_record['api_env_key'])
-                status = "✅" if val else "❌ Not found in .env"
-                env_vars_status.append(f"**API Key** (`{app_record['api_env_key']}`): {status}")
+                env_vars_status.append(app_record['api_env_key'])
 
             if env_vars_status:
-                for s in env_vars_status:
-                    st.markdown(s)
+                env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
+                app_env = dotenv_values(env_path)
+                col_a1, col_a2 = st.columns(2)
+                for i, key in enumerate(env_vars_status):
+                    is_set = key in app_env and bool(app_env[key].strip())
+                    status_icon = "🟢" if is_set else "🔴"
+                    tooltip = f"Connection parameter for {app_record.get('name')}"
+                    with (col_a1 if i % 2 == 0 else col_a2):
+                        st.markdown(f'<span title="{tooltip}" style="cursor: help;">{status_icon} <b>{key}</b></span>', unsafe_allow_html=True)
             else:
-                st.info("No .env variables configured for this app.")
+                st.info("No .env variables configured for this app. Go to 'Edit' (if available) or create a new app to map env variables.")
 
             st.markdown(f"**Base API URL**: `{app_record.get('api_base_url', 'Not configured')}`")
             st.markdown(f"**DB Type**: `{app_record.get('db_type', 'sqlite')}`")
