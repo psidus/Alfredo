@@ -43,9 +43,9 @@ In this architecture, the **Task** is where the magic happens. A Task defines:
 
 ---
 
-## 2. Tutorial: Creating a Workflow (Startup Ideas Brainstorming)
+## 2. Tutorial: Creating a Workflow (Startapp evaluation)
 
-This section explains how to use the AI OS Dashboard to create your own workflows and assign agents to specific tasks, using the **Startup Ideas Brainstorming** workflow as a practical example.
+This section explains how to use the AI OS Dashboard to create your own workflows and assign agents to specific tasks, using the **Startapp evaluation** workflow as a practical example.
 
 ### How to Create Agents in the Dashboard
 Before creating a workflow, you must ensure the required agents exist in your database.
@@ -59,7 +59,7 @@ Before creating a workflow, you must ensure the required agents exist in your da
 Once your agents are ready, you can string them together into a logical sequence using the **Task & Workflow Builder**.
 
 1. Navigate to the **Workflow Builder** tab.
-2. Click **Create New Workflow** and name it `Startup Ideas Brainstorming`.
+2. Click **Create New Workflow** and name it `Startapp evaluation`.
 3. In this workflow, we will analyze the user's initial startup idea (passed dynamically as the `{user_input}` variable) from different strategic perspectives.
 
 #### Step 1: Create Task 1 (Analysis of Potential)
@@ -93,6 +93,6 @@ Once your agents are ready, you can string them together into a logical sequence
 ### Running the Workflow
 To execute this process:
 1. Go to the main execution console or trigger it via the bot interface.
-2. Select your new `Startup Ideas Brainstorming` workflow.
+2. Select your new `Startapp evaluation` workflow.
 3. Provide your startup idea as the `user_input` (e.g., *"A local-first AI operating system that uses small models to securely manage local files without sending data to the cloud"*).
 4. The Master AI will dynamically pass this variable to the Visionary, Devil's Advocate, and Realist, and then synthesize their findings into a comprehensive business evaluation.

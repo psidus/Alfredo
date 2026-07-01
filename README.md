@@ -53,7 +53,7 @@ This will automatically generate an **`Alfredo (Docker)`** shortcut icon on your
 ### 4. Run Alfredo
 - Double-click the **`Alfredo (Docker)`** icon on your Desktop.
 - The terminal will launch, download all required dependencies automatically, build the Docker images (on the first run).
-- It will automatically populate your local database with a **"Startup Ideas Brainstorming" example workflow**, start the services in the background, and open your web browser automatically at `http://localhost:8501`.
+- It will automatically populate your local database with a **"Startapp evaluation" example workflow**, start the services in the background, and open your web browser automatically at `http://localhost:8501`.
 - To stop the application, return to the opened terminal window and **press any key**. It will cleanly shut down the Docker containers.
 
 ---
@@ -73,7 +73,7 @@ If you prefer not to use Docker, you can run Alfredo directly on your machine:
    ```
 3. Populate the database with the example workflow (Optional but recommended):
    ```bash
-   python seed_startup_example.py
+   python seed_startapp_example.py
    ```
 4. Run the Streamlit Dashboard:
    ```bash
