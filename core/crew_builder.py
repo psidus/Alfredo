@@ -210,12 +210,12 @@ def _map_tools(tool_names):
 
     return instantiated_tools
 
-def _get_task_tools(tool_names, vector_dbs, is_local_model=False, app_record=None):
+def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
     """
     Combines _map_tools with dynamic instantiation of VectorSearchTool and TabularQueryTool
     based on the provided vector_dbs list.
     """
-    if is_local_model:
+    if strip_tools:
         return None
         
     task_tools = _map_tools(tool_names) or []
@@ -442,15 +442,12 @@ def _build_task(task_id, agents_cache):
     agent_record = db.read_agent(agent_id) if agent_id else None
     execution_model_id = task_model_id if task_model_id is not None else (agent_record.get('model_id') if agent_record else None)
     model_record = db.read_model(execution_model_id) if execution_model_id else None
-    is_local_model = False
-    if model_record:
-        is_local_model = bool(model_record.get('is_local')) or \
-                         model_record.get('provider', '').lower() == 'ollama'
+    supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
-    if is_local_model:
-        task_tools = None  # No tools for local models
+    if not supports_tools:
+        task_tools = None  # No tools for local models that don't support them
     else:
-        task_tools = _get_task_tools(task_record.get('tools', []), task_record.get('vector_dbs', []), is_local_model)
+        task_tools = _get_task_tools(task_record.get('tools', []), task_record.get('vector_dbs', []), strip_tools=not supports_tools)
 
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
@@ -473,7 +470,9 @@ def _build_task(task_id, agents_cache):
         " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
         "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
     )
-    if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+    
+    task_tools_list = task_record.get('tools', [])
+    if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
         base_expected += vector_format_directive
 
     task = Task(
@@ -1062,10 +1061,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
     
     # Check if the default model is local
     model_record = db.read_model(default_model_id)
-    is_local_model = False
-    if model_record:
-        is_local_model = bool(model_record.get('is_local')) or \
-                         model_record.get('provider', '').lower() == 'ollama'
+    supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
     agents_cache = {}
     actual_crew_agents = []
@@ -1117,10 +1113,10 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             if not specialization and agent_role in agents_cache:
                 agent_instance = agents_cache[agent_role]
             else:
-                # Strip tools if model is local
-                if is_local_model:
+                # Strip tools if model doesn't support them
+                if not supports_tools:
                     agent_tools = []
-                    logging.info(f"Dynamic Agent '{agent_role}' tools stripped (local model).")
+                    logging.info(f"Dynamic Agent '{agent_role}' tools stripped (model doesn't support tools).")
                 else:
                     agent_tools = _map_tools(agent_info.get('tools', []))
                     
@@ -1143,7 +1139,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             if agent_instance not in actual_crew_agents:
                 actual_crew_agents.append(agent_instance)
             
-        task_tools = _get_task_tools(agent_info.get('tools', []), task_data.get('vector_dbs', []), is_local_model)
+        task_tools = _get_task_tools(agent_info.get('tools', []), task_data.get('vector_dbs', []), strip_tools=not supports_tools)
 
         task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
@@ -1158,14 +1154,14 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         except Exception as lm_err:
             logging.warning(f"Learning memory injection failed: {lm_err}")
 
-        # Enhance expected_output for structured format
         # Enhance expected_output for Vector DB structured format
         base_expected = task_data.get('expected_output', 'Task Output')
         vector_format_directive = (
             " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, "
             "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
         )
-        if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+        task_tools_list = agent_info.get('tools', [])
+        if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
             base_expected += vector_format_directive
 
         task = Task(
@@ -1231,7 +1227,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     model_record = db.read_model(default_model_id)
     is_local_model = False
     if model_record:
-        is_local_model = bool(model_record.get('is_local')) or model_record.get('provider', '').lower() == 'ollama'
+    supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
     agents_data_by_role = {a['role']: a for a in plan.get('agents', [])}
     conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
@@ -1314,7 +1310,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     
     def get_dynamic_task_vram_cost():
         # Dynamic agents usually share the default model
-        if model_record and is_local_model:
+        if model_record and not supports_tools:
             return float(model_record.get('vram_gb') or 0.0)
         return 0.0
 
@@ -1384,7 +1380,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             if not specialization and agent_role in agents_cache:
                 agent_instance = agents_cache[agent_role]
             else:
-                agent_tools = [] if is_local_model else _map_tools(agent_info.get('tools', []))
+                agent_tools = [] if not supports_tools else _map_tools(agent_info.get('tools', []))
                 enhanced_backstory = effective_backstory + conciseness_trait
                 agent_instance = Agent(
                     role=effective_role,
@@ -1401,7 +1397,15 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                     agents_cache[agent_role] = agent_instance
 
             combined_tools = list(set((agent_info.get('tools') or []) + (task_data.get('tools') or [])))
-            task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], is_local_model)
+            # LEVEL-BASED MEMORY ARCHITECTURE:
+            # If execution_level > 1, auto-inject read_atomic_memory so the agent can read ANY previous level's data.
+            # Also auto-inject write_atomic_memory for all tasks so they can persist their output.
+            if data["execution_level"] > 1 and "read_atomic_memory" not in combined_tools:
+                combined_tools.append("read_atomic_memory")
+            if "write_atomic_memory" not in combined_tools:
+                combined_tools.append("write_atomic_memory")
+                
+            task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], strip_tools=not supports_tools)
             task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
             for k, v in execution_context.items():
@@ -1422,7 +1426,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
             base_expected = task_data.get('expected_output', 'Task Output')
             vector_format_directive = " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
-            if "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+            if "write_atomic_memory" in combined_tools and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
                 base_expected += vector_format_directive
 
             for k, v in execution_context.items():

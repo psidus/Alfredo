@@ -79,11 +79,11 @@ def seed_startapp_example():
 
     # Task 9
     task9_id = db.create_task(
-        description="1. Analyze previous tasks results:\n{previous_result}\n2. Generate a practical and feasible action plan.\n3. Identify required modifications to ensure viability.\n4. List the first 5 practical implementation steps.",
+        description="1. Analyze previous tasks results using the 'read_atomic_memory' tool to fetch data from the Ephemeral Workspace Memory Index.\n2. Generate a practical and feasible action plan.\n3. Identify required modifications to ensure viability.\n4. List the first 5 practical implementation steps.",
         expected_output="A JSON object with two keys:\n- action_plan: A string detailing the comprehensive, viable plan, including all required optimizations and modifications.\n- initial_steps: An array of 5 strings, each describing a concrete first step to begin implementation.",
         agent_id=patrick_id,
         agent_specialization="innovative business manager",
-        tools=["search_web"],
+        tools=["search_web", "read_atomic_memory"],
         required_inputs=[],
         model_id=model_6_id,
         name="Starting plan development"
