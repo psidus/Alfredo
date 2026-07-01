@@ -389,6 +389,7 @@ Return the optimized workflow plan in the EXACT same JSON structure:
   "agents": [...],
   "tasks": [
     {
+      "id": "...",
       "description": "...",
       "expected_output": "...",
       "agent_role": "...",
@@ -396,6 +397,8 @@ Return the optimized workflow plan in the EXACT same JSON structure:
       "tools": [...],
       "vector_dbs": [...],
       "human_validation": true/false,
+      "depends_on": [...],
+      "execution_level": 1,
       "required_inputs": [...]
     }
   ]
