@@ -603,7 +603,7 @@ class MasterAI:
             
         return text.strip()
 
-    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0) -> str:
+    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True) -> str:
         """
         Robust LLM call with exponential backoff retry and a multi-tier fallback cascade.
 
@@ -669,8 +669,8 @@ class MasterAI:
         for i, candidate in enumerate(all_models):
             try:
                 logger.info(f"MasterAI — calling model tier {i+1}/{len(all_models)}: {candidate}")
-                # Only use json_mode for the primary model call; some fallbacks may not support it
-                result = _try_model(candidate, use_json_mode=(i == 0))
+                # Only use json_mode for the primary model call if force_json_mode is True
+                result = _try_model(candidate, use_json_mode=(i == 0 and force_json_mode))
                 if i > 0:
                     logger.info(f"MasterAI — succeeded on fallback tier {i+1} ({candidate}).")
                 return result
@@ -771,14 +771,14 @@ class MasterAI:
         try:
             # Use plain text completion (no JSON mode) for the refiner
             # Merged system into user to prevent Gemini system_instruction errors
-            response = litellm.completion(
+            refined = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
                     {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease refine the above raw output into a clear, polished report."}
                 ],
-                temperature=0.1  # Low creativity — focus on restructuring, not inventing
+                temperature=0.1,  # Low creativity — focus on restructuring, not inventing
+                force_json_mode=False
             )
-            refined = response.choices[0].message.content.strip()
             logger.info(f"MasterAI Output refinement complete ({len(refined)} chars).")
             return refined
         except Exception as e:
@@ -806,14 +806,14 @@ class MasterAI:
         logger.info(f"MasterAI Summarizing context ({len(global_context)} chars) with: {model_string}")
         
         try:
-            response = litellm.completion(
+            summary = self._call_llm_with_retry(
                 model=model_string,
                 messages=[
                     {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease produce the concise summary of the global context."}
                 ],
-                temperature=0.1
+                temperature=0.1,
+                force_json_mode=False
             )
-            summary = response.choices[0].message.content.strip()
             logger.info(f"MasterAI Context summary complete ({len(summary)} chars).")
             return summary
         except Exception as e:
