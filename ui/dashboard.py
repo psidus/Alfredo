@@ -792,7 +792,8 @@ def render_api_vault():
     conn_keys = [k for k in all_env_keys if k not in llm_keys and any(k.endswith(s) for s in connection_suffixes)]
     
     agent_keys = ["MASTER_AI_MODEL_ID", "DEFAULT_AGENT_MODEL_ID"]
-    system_keys = [k for k in all_env_keys if k not in llm_keys and k not in conn_keys and k not in agent_keys]
+    headroom_keys = ["HEADROOM_ENABLED", "HEADROOM_PROXY_URL"]
+    system_keys = [k for k in all_env_keys if k not in llm_keys and k not in conn_keys and k not in agent_keys and k not in headroom_keys]
     
     # 1. LLM Provider API Keys
     st.subheader("LLM Provider API Keys")
@@ -807,12 +808,34 @@ def render_api_vault():
             
     st.divider()
     
+    # 1.5 Headroom AI — Context Compression
+    st.subheader("Headroom AI")
+    st.markdown("Context compression to reduce token usage by 60-95%.")
+    
+    hr_enabled = current_env.get("HEADROOM_ENABLED", "").lower() == "true"
+    hr_proxy = current_env.get("HEADROOM_PROXY_URL", "").strip()
+    
+    h_col1, h_col2 = st.columns(2)
+    with h_col1:
+        st.markdown(f"{'🟢' if hr_enabled else '🔴'} **HEADROOM_ENABLED**")
+        st.caption("Active" if hr_enabled else "Inactive")
+    with h_col2:
+        if hr_enabled and hr_proxy:
+            st.markdown("🟢 **HEADROOM_PROXY_URL**")
+            st.caption(f"Proxy Mode: {hr_proxy}")
+        elif hr_enabled:
+            st.markdown("🟡 **HEADROOM_PROXY_URL**")
+            st.caption("Inline Mode (Proxy not set)")
+        else:
+            st.markdown("🔴 **HEADROOM_PROXY_URL**")
+            st.caption("Inactive")
+
+    st.divider()
+    
     # Tooltip definitions for system/conn keys
     key_tooltips = {
         "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
         "ERP_DB_URL": "Address to access the external app database (e.g. Biomass DB).",
-        "HEADROOM_ENABLED": "Turn the Headroom service on or off (true/false).",
-        "HEADROOM_PROXY_URL": "Web address for the Headroom service.",
         "MASTER_AI_MODEL_ID": "The main AI brain Alfredo uses for everyday tasks."
     }
     
@@ -981,7 +1004,12 @@ def render_api_vault():
                 for model in p_models:
                     col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 2, 2, 1.5, 1])
                     type_icon = "🏠" if model.get('is_local') else "☁️"
-                    col1.markdown(type_icon)
+                    if model.get('is_local'):
+                        status_sema = "🟢"
+                    else:
+                        env_key = model.get('env_var_name', '')
+                        status_sema = "🟢" if env_key in current_env and bool(current_env[env_key].strip()) else "🔴"
+                    col1.markdown(f"{type_icon} {status_sema}")
                     col2.text(f"P: {model['provider']}")
                     col3.text(f"M: {model['model_name']}")
                     key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
