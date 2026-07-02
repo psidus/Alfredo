@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Optional, Dict, Any
 
 
@@ -359,7 +360,6 @@ If the task is not complex, return this exact structure:
   "is_complex": false,
   "subtasks": []
 }}
-}}
 """
 
 WORKFLOW_COHERENCE_OPTIMIZER_PROMPT = """
@@ -554,6 +554,14 @@ class MasterAI:
             
         logger.info(f"MasterAI initialized with model: {self.model_provider}/{self.model_name}")
 
+    def _get_model_string(self) -> str:
+        """Returns the correctly formatted model string for LiteLLM calls."""
+        if self.model_provider == "openai":
+            return self.model_name
+        elif self.model_provider == "gemini" and "/" in self.model_name:
+            return self.model_name
+        return f"{self.model_provider}/{self.model_name}"
+
     def _fetch_workflows_context(self):
         """
         Retrieves and formats workflows from the database.
@@ -590,11 +598,12 @@ class MasterAI:
             
         return json.dumps(formatted_workflows, indent=2), requirements_map
 
-    def _sanitize_json(self, text: str) -> str:
+    def _sanitize_json(self, text) -> str:
         """
         Strips markdown backticks (```json) and any surrounding text from an LLM response.
         """
-        import re
+        if not isinstance(text, str):
+            text = str(text)
         match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
         if match:
             return match.group(1).strip()
@@ -704,11 +713,7 @@ class MasterAI:
         system_prompt = extended_prompt.replace("{workflows}", workflows_json)
         
         # Prepare the LiteLLM call
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name # Already has prefix
+        model_string = self._get_model_string()
             
         logger.info(f"MasterAI Attempting Intent Evaluation with: {model_string}")
         try:
@@ -762,11 +767,7 @@ class MasterAI:
 
         system_prompt = OUTPUT_REFINER_PROMPT.replace("{raw_output}", raw_str)
         
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         logger.info(f"MasterAI Refining output ({len(raw_str)} chars) with: {model_string}")
         
@@ -799,11 +800,7 @@ class MasterAI:
 
         system_prompt = CONTEXT_SUMMARIZER_PROMPT.replace("{global_context}", global_context)
         
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         logger.info(f"MasterAI Summarizing context ({len(global_context)} chars) with: {model_string}")
         
@@ -937,11 +934,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         messages.extend(chat_history)
         messages.append({"role": "user", "content": user_message})
         
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
  
         logger.info(f"MasterAI Attempting Planning with: {model_string}")
         try:
@@ -991,11 +984,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         Optimizes an agent's role, goal, and backstory prompts using the LLM.
         """
         system_prompt = AGENT_OPTIMIZER_PROMPT.format(role=role, goal=goal, backstory=backstory)
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         logger.info(f"MasterAI Optimizing agent fields with: {model_string}")
         try:
@@ -1031,11 +1020,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             task_description=task_description,
             expected_output=expected_output
         )
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
             
         try:
             raw_content = self._call_llm_with_retry(
@@ -1072,11 +1057,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             raw_output=raw_output, 
             user_feedback=user_feedback
         )
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
             
         try:
             new_output = self._call_llm_with_retry(
@@ -1102,11 +1083,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         Optimizes a task's description and expected output prompts using the LLM.
         """
         system_prompt = TASK_OPTIMIZER_PROMPT.format(description=description, expected_output=expected_output)
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         logger.info(f"MasterAI Optimizing task fields with: {model_string}")
         try:
@@ -1164,11 +1141,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         generated_files = []
         os.makedirs(output_dir, exist_ok=True)
         
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         # Use global context if available, otherwise fall back to final_text
         context_for_export = global_context if global_context else final_text
@@ -1259,11 +1232,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             human_validation=task.get('human_validation', False)
         )
 
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
 
         logger.info(f"MasterAI analyzing complexity of task '{name}' with {model_string}...")
         try:
@@ -1340,11 +1309,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         plan_json = json.dumps(plan, indent=2, ensure_ascii=False)
         system_prompt = WORKFLOW_COHERENCE_OPTIMIZER_PROMPT.replace("{expanded_plan}", plan_json)
         
-        model_string = f"{self.model_provider}/{self.model_name}"
-        if self.model_provider == "openai":
-            model_string = self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            model_string = self.model_name
+        model_string = self._get_model_string()
             
         logger.info(f"MasterAI: Running Workflow Coherence Optimizer with model: {model_string}")
         try:

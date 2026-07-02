@@ -571,71 +571,107 @@ def render_knowledge_base():
             scientific_mode = st.checkbox("🧪 Enable Scientific RAG (Advanced Agentic Ingestion)", help="Use VLMs to extract and describe graphs, tables, and P&ID drawings intelligently.")
             scientific_config = {}
             if scientific_mode:
-                st.markdown("Configure specific Vision-capable models for scientific parsing:")
+                st.markdown("Configure specific **Vision-capable** models for scientific parsing:")
                 
-                # Pre-defined list of the BEST vision models available (Gemini, Local, etc.)
-                vision_models_pool = [
-                    "google/gemini-1.5-pro",
-                    "google/gemini-1.5-flash",
-                    "google/gemini-2.0-flash",
-                    "google/gemini-2.5-pro",
-                    "openai/gpt-4o",
-                    "openai/gpt-4o-mini",
+                # ── Curated Vision Model Pools (role-specific) ──
+                # Each pool is ordered by recommendation strength for that task.
+                # Only models with proven vision/multimodal capabilities are listed.
+                
+                # GRAPHS: Need strong spatial reasoning + coordinate estimation
+                graph_models_pool = [
+                    # Cloud (best accuracy for digitizing curves)
+                    "google/gemini-2.5-pro",       # Best spatial reasoning
+                    "google/gemini-2.0-flash",      # Fast, good accuracy
+                    "google/gemini-1.5-pro",        # Proven strong on charts
+                    "openai/gpt-4o",                # Excellent coordinate estimation
+                    "openai/gpt-4o-mini",           # Lighter but capable
                     "anthropic/claude-3-5-sonnet-20240620",
-                    "ollama/llava",
-                    "ollama/bakllava",
-                    "ollama/moondream",
-                    "ollama/qwen2-vl",
-                    "ollama/llama3.2-vision"
+                    # Local (16GB friendly)
+                    "ollama/qwen3-vl:8b",           # SOTA local VLM, best for charts
+                    "ollama/gemma3:12b",            # Strong chart/document analysis
+                    "ollama/pixtral:12b",           # Mistral, native resolution for fine details
+                    "ollama/granite3.2-vision",     # IBM, good on technical charts
+                    "ollama/qwen2.5-vl:7b",         # Proven OCR + chart reading
+                    "ollama/minicpm-v",             # Lightweight, decent on graphs
                 ]
                 
-                available_vlms = []
+                # TABLES: Need strong OCR + structural formatting
+                table_models_pool = [
+                    # Cloud
+                    "google/gemini-2.0-flash",      # Fast OCR, excellent formatting
+                    "google/gemini-1.5-flash",      # Very fast, good table OCR
+                    "google/gemini-2.5-pro",        # Best accuracy
+                    "openai/gpt-4o",
+                    "anthropic/claude-3-5-sonnet-20240620",  # Excellent Markdown output
+                    # Local (16GB friendly — specialized)
+                    "ollama/glm-ocr",               # 0.9B, SOTA table/OCR specialist
+                    "ollama/granite3.2-vision",     # IBM, surgical on table extraction
+                    "ollama/qwen3-vl:8b",           # All-round strong
+                    "ollama/qwen2.5-vl:7b",
+                    "ollama/minicpm-v",
+                ]
                 
-                # Check .env to see which providers are active and filter the pool
-                if current_env.get("OPENAI_API_KEY"): 
-                    available_vlms.extend([m for m in vision_models_pool if m.startswith("openai/")])
-                if current_env.get("GEMINI_API_KEY") or current_env.get("GOOGLE_API_KEY"): 
-                    available_vlms.extend([m for m in vision_models_pool if m.startswith("google/")])
-                if current_env.get("ANTHROPIC_API_KEY"): 
-                    available_vlms.extend([m for m in vision_models_pool if m.startswith("anthropic/")])
+                # DRAWINGS (P&ID, PFD, schematics): Need strong spatial + engineering reasoning
+                drawing_models_pool = [
+                    # Cloud
+                    "google/gemini-2.5-pro",        # Best complex schematic reasoning
+                    "google/gemini-1.5-pro",        # Proven on P&ID
+                    "google/gemini-2.0-flash",
+                    "openai/gpt-4o",                # Strong engineering understanding
+                    "anthropic/claude-3-5-sonnet-20240620",
+                    # Local (16GB friendly)
+                    "ollama/qwen3-vl:8b",           # Best local for complex images
+                    "ollama/pixtral:12b",           # Mistral, native resolution captures tiny P&ID text
+                    "ollama/gemma3:12b",            # Good spatial reasoning
+                    "ollama/llama3.2-vision:11b",   # Meta, solid general vision
+                    "ollama/qwen2.5-vl:7b",
+                    "ollama/minicpm-v",
+                ]
                 
-                # We always add local vision models as an option
-                available_vlms.extend([m for m in vision_models_pool if m.startswith("ollama/")])
+                def _filter_available(pool):
+                    """Filter a pool to only include models whose provider API is active."""
+                    result = []
+                    for m in pool:
+                        if m.startswith("google/") and (current_env.get("GEMINI_API_KEY") or current_env.get("GOOGLE_API_KEY")):
+                            result.append(m)
+                        elif m.startswith("openai/") and current_env.get("OPENAI_API_KEY"):
+                            result.append(m)
+                        elif m.startswith("anthropic/") and current_env.get("ANTHROPIC_API_KEY"):
+                            result.append(m)
+                        elif m.startswith("ollama/"):
+                            result.append(m)  # Local models are always available
+                    result.append("Other (Manual Input)")
+                    return result
                 
-                # Make it unique and sort
-                available_vlms = sorted(list(set(available_vlms)))
-                available_vlms.append("Other (Manual Input)")
+                avail_graph = _filter_available(graph_models_pool)
+                avail_table = _filter_available(table_models_pool)
+                avail_drawing = _filter_available(drawing_models_pool)
                 
-                def get_model_selection(label, key, default_hint, preferred_models):
-                    idx = 0
-                    for pref in preferred_models:
-                        if pref in available_vlms:
-                            idx = available_vlms.index(pref)
-                            break
-                    sel = st.selectbox(label, options=available_vlms, index=idx, key=f"sel_{key}", help=default_hint)
+                def get_model_selection(label, key, default_hint, options):
+                    sel = st.selectbox(label, options=options, index=0, key=f"sel_{key}", help=default_hint)
                     if sel == "Other (Manual Input)":
-                        return st.text_input(f"Custom Model for {key} (e.g. provider/model)", key=f"cust_{key}")
+                        return st.text_input(f"Custom model (provider/model)", key=f"cust_{key}")
                     return sel
 
                 sc_col1, sc_col2 = st.columns(2)
                 with sc_col1:
                     graph_model = get_model_selection(
-                        "Model for Graphs (Coordinate Extractor)", "graphs", 
-                        "Best: Gemini 1.5 Pro, GPT-4o, Qwen2-VL for coordinate estimation.",
-                        ["google/gemini-1.5-pro", "ollama/qwen2-vl", "openai/gpt-4o", "ollama/llava"]
+                        "📈 Model for Graphs (Curve Digitizer)", "graphs", 
+                        "Extracts (X,Y) coordinates from curves. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or gemma3:12b.",
+                        avail_graph
                     )
                     table_model = get_model_selection(
-                        "Model for Tables (Markdown Converter)", "tables", 
-                        "Best: Gemini 1.5 Flash, Claude 3.5 Sonnet for OCR & structural Markdown.",
-                        ["google/gemini-1.5-flash", "google/gemini-1.5-pro", "ollama/llama3.2-vision", "ollama/llava"]
+                        "📊 Model for Tables (OCR → Markdown)", "tables", 
+                        "Converts table images to structured Markdown/CSV. Best cloud: Gemini 2.0 Flash. Best local: glm-ocr (0.9B specialist!) or granite3.2-vision.",
+                        avail_table
                     )
                 with sc_col2:
                     drawing_model = get_model_selection(
-                        "Model for Technical Drawings (P&ID)", "drawings", 
-                        "Best: Gemini 1.5 Pro, GPT-4o for complex schematics.",
-                        ["google/gemini-1.5-pro", "ollama/llava", "openai/gpt-4o"]
+                        "🏭 Model for Drawings (P&ID / PFD / Schematics)", "drawings", 
+                        "Describes technical schematics. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or gemma3:12b.",
+                        avail_drawing
                     )
-                    graph_points = st.number_input("Graph Extraction Points", min_value=3, max_value=100, value=10, help="How many (X,Y) points to digitize from curves.")
+                    graph_points = st.number_input("📐 Graph Extraction Points", min_value=3, max_value=100, value=10, help="How many (X,Y) data points to extract from each curve.")
                 
                 scientific_config = {
                     "models_config": {

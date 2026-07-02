@@ -863,7 +863,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 task_description=t_rec.get('description', ''), 
                 expected_output=t_rec.get('expected_output', '')
             )
-            user_feedback = request_human_input(chat_id, question, options=options)
+            user_feedback = request_human_input(chat_id, question, options=options, task_id=f"task_{task_id}")
             if user_feedback and user_feedback != "SYSTEM_ABORT":
                 task_out = master_ai.process_validation_feedback(task_out, user_feedback)
                 _auto_save_to_memory(memory_manager, task_id, task_out, f"{agent_role} (Human Edited)")
@@ -928,7 +928,8 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             parent_output = ""
             if data["depends_on"]:
                 parent_id = data["depends_on"][-1]
-                parent_output = node_outputs.get(parent_id, "")
+                with task_outputs_lock:
+                    parent_output = node_outputs.get(parent_id, "")
                 
             if not data["is_batch"]:
                 log_msg = f"Executing Node {n_id} (Task {data['task_id']})..."
@@ -986,8 +987,11 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             if not run_id: return
             names = []
             for nid in in_flight:
-                tdata = dag_nodes[nid]["task_data"]
-                names.append(tdata.get("name") or tdata.get("description", "")[:30])
+                step = dag_nodes[nid].get("step_def")
+                if isinstance(step, dict):
+                    names.append(step.get("name") or step.get("description", "")[:30])
+                else:
+                    names.append(f"Task {dag_nodes[nid].get('task_id', nid)}")
             try:
                 db.update_run(run_id, status='running', in_flight_tasks=names)
                 if on_flight_change:
@@ -1077,8 +1081,8 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         specialization = task_data.get('agent_specialization')
         
         if agent_role not in agents_data_by_role:
-            logging.warning(f"Task specifies unknown agent role '{agent_role}'.")
-            agent_instance = None
+            logging.warning(f"Task specifies unknown agent role '{agent_role}'. Skipping task.")
+            continue
         else:
             agent_info = agents_data_by_role[agent_role]
             
@@ -1130,7 +1134,8 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
                     tools=agent_tools,
                     verbose=True,
                     allow_delegation=False,
-                    max_iter=5
+                    max_iter=5,
+                    step_callback=check_abort
                 )
                 
                 if not specialization:
@@ -1334,7 +1339,8 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             parent_output = ""
             if data["depends_on"]:
                 parent_id = data["depends_on"][-1]
-                parent_output = node_outputs.get(parent_id, "")
+                with task_outputs_lock:
+                    parent_output = node_outputs.get(parent_id, "")
 
             if run_id:
                 db.update_run(run_id, status='running', current_task_idx=task_idx, task_outputs=task_outputs)
@@ -1494,7 +1500,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 from core.human_in_the_loop import request_human_input
                 master_ai = MasterAI()
                 question, options = master_ai.format_validation_request(task_out, task_description=task_data.get('description', ''), expected_output=task_data.get('expected_output', ''))
-                user_feedback = request_human_input(chat_id, question, options=options)
+                user_feedback = request_human_input(chat_id, question, options=options, task_id=f"dynamic_task_{task_idx}")
                 
                 if user_feedback and user_feedback != "SYSTEM_ABORT":
                     task_out = master_ai.process_validation_feedback(task_out, user_feedback)
