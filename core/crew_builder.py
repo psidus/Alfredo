@@ -1225,8 +1225,6 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
     llm_instance = _instantiate_llm(default_model_id)
     model_record = db.read_model(default_model_id)
-    is_local_model = False
-    if model_record:
     supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
     agents_data_by_role = {a['role']: a for a in plan.get('agents', [])}
