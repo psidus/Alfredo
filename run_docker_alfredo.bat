@@ -3,6 +3,11 @@ title Alfredo AI OS - Docker launcher
 cd /d "%~dp0"
 echo Starting Alfredo Docker containers...
 
+if not exist .env (
+    echo Creating .env file from .env.example...
+    copy .env.example .env
+)
+
 # Start containers in detached mode and rebuild if code changed
 docker compose up -d --build
 

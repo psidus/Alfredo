@@ -552,8 +552,11 @@ class DBManager:
                 task_ids = []
                 
             # If the deleted task is in the workflow, remove it and set warning
-            if any(int(tid) == task_id for tid in task_ids):
-                new_task_ids = [tid for tid in task_ids if int(tid) != task_id]
+            def get_tid(t):
+                return int(t.get('task_id', 0)) if isinstance(t, dict) else int(t)
+
+            if any(get_tid(tid) == task_id for tid in task_ids):
+                new_task_ids = [tid for tid in task_ids if get_tid(tid) != task_id]
                 self.cursor.execute(
                     "UPDATE workflows SET task_ids_json = ?, has_deletion_warning = 1 WHERE id = ?",
                     (json.dumps(new_task_ids), wf['id'])
@@ -599,7 +602,16 @@ class DBManager:
                 try:
                     t_ids = json.loads(wf['task_ids_json'])
                     # Filter: keep only IDs that still exist in our mapping, and update them
-                    new_t_ids = [mapping[int(tid)] for tid in t_ids if int(tid) in mapping]
+                    new_t_ids = []
+                    for tid in t_ids:
+                        actual_tid = int(tid.get('task_id', 0)) if isinstance(tid, dict) else int(tid)
+                        if actual_tid in mapping:
+                            if isinstance(tid, dict):
+                                new_dict = dict(tid)
+                                new_dict['task_id'] = mapping[actual_tid]
+                                new_t_ids.append(new_dict)
+                            else:
+                                new_t_ids.append(mapping[actual_tid])
                     
                     self.cursor.execute("UPDATE workflows SET task_ids_json = ? WHERE id = ?", 
                                         (json.dumps(new_t_ids), wf['id']))

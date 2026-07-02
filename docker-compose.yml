@@ -18,6 +18,7 @@ services:
       - ./storage:/app/storage
       - ./ui:/app/ui
       - ./core:/app/core
+      - ./.env:/app/.env
     restart: unless-stopped
 
   api:
@@ -38,6 +39,7 @@ services:
       - ./ui:/app/ui
       - ./core:/app/core
       - ./sdk:/app/sdk
+      - ./.env:/app/.env
     restart: unless-stopped
 
   headroom_proxy:

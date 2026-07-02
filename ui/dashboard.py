@@ -19,6 +19,36 @@ from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
 
+def safe_set_key(env_path, key_to_set, value_to_set):
+    """
+    In-place replacement of dotenv's set_key.
+    Docker bind-mounts individual files via inode. os.replace (used by python-dotenv)
+    changes the inode, throwing OSError 16 Device or resource busy.
+    This function modifies the file in-place preserving the inode.
+    """
+    if not os.path.exists(env_path):
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.write(f'{key_to_set}="{value_to_set}"\n')
+        return
+
+    with open(env_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    key_found = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{key_to_set}="):
+            lines[i] = f'{key_to_set}="{value_to_set}"\n'
+            key_found = True
+            break
+            
+    if not key_found:
+        if lines and not lines[-1].endswith('\n'):
+            lines.append('\n')
+        lines.append(f'{key_to_set}="{value_to_set}"\n')
+        
+    with open(env_path, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+
 @st.cache_resource
 def get_db_manager():
     return DBManager()
@@ -771,7 +801,8 @@ def render_api_vault():
         env_path = os.path.join(os.getcwd(), '.env')
         open(env_path, 'a').close()
 
-    current_env = dotenv_values(env_path)
+    # Merge OS environment variables (which Docker Compose populates) with the local .env file
+    current_env = {**os.environ, **dotenv_values(env_path)}
     
     suggested_keys = [
         "OPENAI_API_KEY", 
@@ -781,8 +812,9 @@ def render_api_vault():
         "OLLAMA_API_KEY"
     ]
     
-    # Combine suggested keys and any other keys already in .env, excluding Telegram configs
-    all_env_keys = sorted([k for k in set(suggested_keys + list(current_env.keys())) if "TELEGRAM" not in k.upper()])
+    # To prevent displaying internal Docker OS variables in the UI, we only list keys from the file + suggestions
+    file_keys = list(dotenv_values(env_path).keys())
+    all_env_keys = sorted([k for k in set(suggested_keys + file_keys) if "TELEGRAM" not in k.upper()])
     
     # Categorize keys dynamically
     llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA"]
@@ -806,31 +838,7 @@ def render_api_vault():
         with (col1 if i % 2 == 0 else col2):
             st.markdown(f"{status_icon} **{key}**")
             
-    st.divider()
-    
-    # 1.5 Headroom AI — Context Compression
-    st.subheader("Headroom AI")
-    st.markdown("Context compression to reduce token usage by 60-95%.")
-    
-    hr_enabled = current_env.get("HEADROOM_ENABLED", "").lower() == "true"
-    hr_proxy = current_env.get("HEADROOM_PROXY_URL", "").strip()
-    
-    h_col1, h_col2 = st.columns(2)
-    with h_col1:
-        st.markdown(f"{'🟢' if hr_enabled else '🔴'} **HEADROOM_ENABLED**")
-        st.caption("Active" if hr_enabled else "Inactive")
-    with h_col2:
-        if hr_enabled and hr_proxy:
-            st.markdown("🟢 **HEADROOM_PROXY_URL**")
-            st.caption(f"Proxy Mode: {hr_proxy}")
-        elif hr_enabled:
-            st.markdown("🟡 **HEADROOM_PROXY_URL**")
-            st.caption("Inline Mode (Proxy not set)")
-        else:
-            st.markdown("🔴 **HEADROOM_PROXY_URL**")
-            st.caption("Inactive")
 
-    st.divider()
     
     # Tooltip definitions for system/conn keys
     key_tooltips = {
@@ -844,6 +852,31 @@ def render_api_vault():
     st.markdown("Database, Headroom, and other global configuration variables.")
     
     with st.expander("View System Settings", expanded=False):
+        # Headroom AI — Context Compression
+        st.markdown("#### Headroom AI")
+        st.markdown("Context compression to reduce token usage by 60-95%.")
+        
+        hr_enabled_raw = str(current_env.get("HEADROOM_ENABLED", ""))
+        hr_enabled = hr_enabled_raw.strip('"\'').lower() == "true"
+        hr_proxy = str(current_env.get("HEADROOM_PROXY_URL", "")).strip('"\'').strip()
+        
+        h_col1, h_col2 = st.columns(2)
+        with h_col1:
+            st.markdown(f"{'🟢' if hr_enabled else '🔴'} **HEADROOM_ENABLED**")
+            st.caption("Active" if hr_enabled else "Inactive")
+        with h_col2:
+            if hr_enabled and hr_proxy:
+                st.markdown("🟢 **HEADROOM_PROXY_URL**")
+                st.caption(f"Proxy Mode: {hr_proxy}")
+            elif hr_enabled:
+                st.markdown("🟡 **HEADROOM_PROXY_URL**")
+                st.caption("Inline Mode (Proxy not set)")
+            else:
+                st.markdown("🔴 **HEADROOM_PROXY_URL**")
+                st.caption("Inactive")
+                
+        st.divider()
+
         col3, col4 = st.columns(2)
         for i, key in enumerate(system_keys):
             is_set = key in current_env and bool(current_env[key].strip())
@@ -867,7 +900,7 @@ def render_api_vault():
         new_max_vram = st.number_input("Maximum Local VRAM (GB)", min_value=1.0, max_value=256.0, value=current_max_vram_float, step=1.0, help="Used by the Task Scheduler to pause or downgrade agents when VRAM is full.")
         submitted_resources = st.form_submit_button("Save Resource Settings")
         if submitted_resources:
-            set_key(env_path, "MAX_VRAM_GB", str(new_max_vram))
+            safe_set_key(env_path, "MAX_VRAM_GB", str(new_max_vram))
             st.success("Resource settings saved.")
             st.rerun()
             
@@ -895,7 +928,7 @@ def render_api_vault():
                     if not result.get("success"):
                         st.error(f"Verification failed: {result.get('error')}")
                     else:
-                        set_key(env_path, final_key_name, key_value.strip())
+                        safe_set_key(env_path, final_key_name, key_value.strip())
                         
                         # Update models_map.yaml
                         model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
@@ -1090,7 +1123,7 @@ def render_agent_caserma():
         st.write("") # Spacer
         if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
             chosen_model_id = model_options[selected_master_model_str]
-            set_key(env_path, "MASTER_AI_MODEL_ID", str(chosen_model_id))
+            safe_set_key(env_path, "MASTER_AI_MODEL_ID", str(chosen_model_id))
             st.toast("Master AI Model saved successfully!", icon="✅")
             st.rerun()
             
@@ -1119,7 +1152,7 @@ def render_agent_caserma():
         st.write("") # Spacer
         if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
             chosen_model_id = model_options[selected_default_agent_model_str]
-            set_key(env_path, "DEFAULT_AGENT_MODEL_ID", str(chosen_model_id))
+            safe_set_key(env_path, "DEFAULT_AGENT_MODEL_ID", str(chosen_model_id))
             st.toast("Default Agent Model saved successfully!", icon="✅")
             st.rerun()
             
@@ -1759,16 +1792,16 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                         if save_outlook:
                             saved_any = False
                             if new_email.strip():
-                                set_key(env_path_email, "OUTLOOK_EMAIL", new_email.strip())
+                                safe_set_key(env_path_email, "OUTLOOK_EMAIL", new_email.strip())
                                 saved_any = True
                             if new_password.strip():
-                                set_key(env_path_email, "OUTLOOK_APP_PASSWORD", new_password.strip())
+                                safe_set_key(env_path_email, "OUTLOOK_APP_PASSWORD", new_password.strip())
                                 saved_any = True
                             if new_imap.strip():
-                                set_key(env_path_email, "OUTLOOK_IMAP_SERVER", new_imap.strip())
+                                safe_set_key(env_path_email, "OUTLOOK_IMAP_SERVER", new_imap.strip())
                                 saved_any = True
                             if new_smtp.strip():
-                                set_key(env_path_email, "OUTLOOK_SMTP_SERVER", new_smtp.strip())
+                                safe_set_key(env_path_email, "OUTLOOK_SMTP_SERVER", new_smtp.strip())
                                 saved_any = True
 
                             if saved_any:
@@ -3201,9 +3234,9 @@ def main():
                 
                 if st.form_submit_button("Save Telegram Config"):
                     if new_tg_token:
-                        set_key(env_path, "TELEGRAM_BOT_TOKEN", new_tg_token.strip())
+                        safe_set_key(env_path, "TELEGRAM_BOT_TOKEN", new_tg_token.strip())
                     if new_tg_ids:
-                        set_key(env_path, "TELEGRAM_ALLOWED_USER_IDS", new_tg_ids.strip())
+                        safe_set_key(env_path, "TELEGRAM_ALLOWED_USER_IDS", new_tg_ids.strip())
                     st.success("Telegram configuration saved to .env!")
                     st.rerun()
 
