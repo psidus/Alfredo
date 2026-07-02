@@ -44,9 +44,11 @@ app.add_middleware(
 )
 
 # Serve the JavaScript SDK as static files
-SDK_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sdk")
+SDK_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sdk")
 if os.path.isdir(SDK_DIR):
     app.mount("/sdk", StaticFiles(directory=SDK_DIR), name="sdk")
+else:
+    logger.warning(f"SDK directory not found at {SDK_DIR}. Static files will not be served.")
 
 
 # --- Authentication Dependency ---
