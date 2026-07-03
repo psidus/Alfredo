@@ -13,8 +13,11 @@ from langchain_chroma import Chroma
 
 # Embedding imports
 from langchain_openai import OpenAIEmbeddings
+try:
+    from langchain_ollama import OllamaEmbeddings
+except ImportError:
+    from langchain_community.embeddings import OllamaEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.embeddings import OllamaEmbeddings
 from core.data_manager import DataManager
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -56,9 +59,10 @@ class VectorManager:
                 
             api_key = os.getenv("OLLAMA_API_KEY")
             if api_key:
-                # Some versions of langchain_community OllamaEmbeddings don't strictly support headers 
-                # directly in kwargs without passing through client config, but we can try client_kwargs
-                kwargs["client_kwargs"] = {"headers": {"Authorization": f"Bearer {api_key}"}}
+                if "langchain_ollama" in OllamaEmbeddings.__module__:
+                    kwargs["client_kwargs"] = {"headers": {"Authorization": f"Bearer {api_key}"}}
+                else:
+                    kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
                 
             return OllamaEmbeddings(**kwargs)
         elif provider == 'gemini' or provider == 'google':

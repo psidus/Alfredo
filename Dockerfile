@@ -24,6 +24,8 @@ WORKDIR /app
 
 # Install only runtime system dependencies (Xvfb and its dependencies)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgl1 \
     xvfb \
     libx11-6 \
     libxext6 \

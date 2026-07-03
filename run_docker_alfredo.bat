@@ -8,8 +8,8 @@ if not exist .env (
     copy .env.example .env
 )
 
-# Start containers in detached mode and rebuild if code changed
-docker compose up -d --build
+:: Start containers in detached mode (smart mount allows code changes without rebuilding)
+docker compose up -d
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

@@ -540,6 +540,16 @@ def render_knowledge_base():
             current_env = dotenv_values(env_path)
             
             # Build embedding model dropdown: cloud models FIRST (best default), then local
+            ui_mem = {}
+            memory_path = os.path.join("storage", "ui_memory.json")
+            if os.path.exists(memory_path):
+                try:
+                    import json
+                    with open(memory_path, "r", encoding="utf-8") as f:
+                        ui_mem = json.load(f)
+                except:
+                    pass
+
             available_embedding_models = {}
             
             # 1. Dynamically load CLOUD models first (so they become the default when available)
@@ -569,11 +579,20 @@ def render_knowledge_base():
             # 2. Then add local Ollama models as fallback options
             available_embedding_models["Local (Ollama) / nomic-embed-text"] = {"provider": "ollama", "model_name": "nomic-embed-text"}
             available_embedding_models["Local (Ollama) / mxbai-embed-large"] = {"provider": "ollama", "model_name": "mxbai-embed-large"}
+            available_embedding_models["Local (Ollama) / bge-m3"] = {"provider": "ollama", "model_name": "bge-m3"}
+            available_embedding_models["Local (Ollama) / snowflake-arctic-embed"] = {"provider": "ollama", "model_name": "snowflake-arctic-embed"}
             available_embedding_models["Local (Ollama) / all-minilm"] = {"provider": "ollama", "model_name": "all-minilm"}
                 
             available_embedding_models["Other (Manual Input)"] = {"provider": "custom", "model_name": "custom"}
                 
-            selected_model_str = st.selectbox("Select Embedding Model", options=list(available_embedding_models.keys()))
+            opts = list(available_embedding_models.keys())
+            default_emb = ui_mem.get("embedding_model", opts[0] if opts else "")
+            try:
+                emb_idx = opts.index(default_emb)
+            except ValueError:
+                emb_idx = 0
+                
+            selected_model_str = st.selectbox("Select Embedding Model", options=opts, index=emb_idx)
             
             if selected_model_str == "Other (Manual Input)":
                 col_prov, col_mod = st.columns(2)
@@ -678,7 +697,12 @@ def render_knowledge_base():
                 avail_drawing = _filter_available(drawing_models_pool)
                 
                 def get_model_selection(label, key, default_hint, options):
-                    sel = st.selectbox(label, options=options, index=0, key=f"sel_{key}", help=default_hint)
+                    default_val = ui_mem.get(key, options[0] if options else "")
+                    try:
+                        idx = options.index(default_val)
+                    except ValueError:
+                        idx = 0
+                    sel = st.selectbox(label, options=options, index=idx, key=f"sel_{key}", help=default_hint)
                     if sel == "Other (Manual Input)":
                         return st.text_input(f"Custom model (provider/model)", key=f"cust_{key}")
                     return sel
@@ -701,7 +725,8 @@ def render_knowledge_base():
                         "Describes technical schematics. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or gemma3:12b.",
                         avail_drawing
                     )
-                    graph_points = st.number_input("📐 Graph Extraction Points", min_value=3, max_value=100, value=10, help="How many (X,Y) data points to extract from each curve.")
+                    default_gp = ui_mem.get("graph_points", 10)
+                    graph_points = st.number_input("📐 Graph Extraction Points", min_value=3, max_value=100, value=default_gp, help="How many (X,Y) data points to extract from each curve.")
                 
                 scientific_config = {
                     "models_config": {
@@ -714,6 +739,21 @@ def render_knowledge_base():
             
             submitted = st.button("Start Embedding", type="primary")
             if submitted:
+                # Save models to memory
+                try:
+                    import json
+                    ui_mem["embedding_model"] = selected_model_str
+                    if scientific_mode:
+                        ui_mem["graphs"] = graph_model
+                        ui_mem["tables"] = table_model
+                        ui_mem["drawings"] = drawing_model
+                        ui_mem["graph_points"] = graph_points
+                    os.makedirs("storage", exist_ok=True)
+                    with open(memory_path, "w", encoding="utf-8") as f:
+                        json.dump(ui_mem, f, indent=4)
+                except Exception:
+                    pass
+
                 if not db_name or not uploaded_files or not selected_model_name:
                     st.error("Please provide a name, select files, and choose a valid model.")
                 else:
