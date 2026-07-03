@@ -127,6 +127,8 @@ class DBManager:
                 name TEXT,
                 model_id INTEGER,
                 human_validation INTEGER DEFAULT 0, -- Indicates if task pauses for human feedback
+                max_input_context INTEGER DEFAULT 0,
+                max_output_tokens INTEGER DEFAULT 0,
                 FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL,
                 FOREIGN KEY (model_id) REFERENCES models (id) ON DELETE SET NULL
             );
@@ -260,6 +262,20 @@ class DBManager:
             # Migration to add vector_dbs_json to tasks if upgrading
             try:
                 self.cursor.execute("ALTER TABLE tasks ADD COLUMN vector_dbs_json TEXT;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add max_input_context to tasks if upgrading
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN max_input_context INTEGER DEFAULT 0;")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add max_output_tokens to tasks if upgrading
+            try:
+                self.cursor.execute("ALTER TABLE tasks ADD COLUMN max_output_tokens INTEGER DEFAULT 0;")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass
@@ -487,15 +503,15 @@ class DBManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
         vector_dbs_json = json.dumps(vector_dbs)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name, model_id, human_validation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation)))
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name, model_id, human_validation, max_input_context, max_output_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -518,7 +534,7 @@ class DBManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
@@ -527,10 +543,10 @@ class DBManager:
         vector_dbs_json = json.dumps(vector_dbs)
         sql = """
         UPDATE tasks 
-        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?, agent_specialization = ?, name = ?, model_id = ?, human_validation = ?
+        SET description = ?, expected_output = ?, agent_id = ?, tools_json = ?, required_inputs_json = ?, vector_dbs_json = ?, agent_specialization = ?, name = ?, model_id = ?, human_validation = ?, max_input_context = ?, max_output_tokens = ?
         WHERE id = ?
         """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), task_id))
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 

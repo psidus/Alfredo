@@ -116,10 +116,11 @@ ALLOWED_TOOLS = {
     "app_api_caller": None,      # Sentinel
 }
 
-def _instantiate_llm(model_id):
+def _instantiate_llm(model_id, task_record=None):
     """
     Securely creates an LLM string/object based on model_id from the database.
     Ensures API keys are injected into os.environ so that LiteLLM/CrewAI can find them.
+    Also injects max_input_context and max_tokens if provided via task_record.
     """
     DataManager.load_env() # Ensure .env is loaded first
 
@@ -165,6 +166,10 @@ def _instantiate_llm(model_id):
         else:
             logging.warning(f"No API key found for provider '{provider}' (expected '{env_var_name}').")
 
+    # --- Extract Task Overrides ---
+    max_input_context = task_record.get('max_input_context', 0) if task_record else 0
+    max_output_tokens = task_record.get('max_output_tokens', 0) if task_record else 0
+    
     # Build and return the LLM reference
     if provider == 'openai':
         if not os.getenv("OPENAI_API_KEY"):
@@ -172,13 +177,38 @@ def _instantiate_llm(model_id):
         # Lazy import so workflow execution doesn't hard-require LangChain packages
         # when running in minimal environments (e.g. Python 3.14 + CrewAI shim).
         from langchain_openai import ChatOpenAI  # type: ignore
-        return ChatOpenAI(model_name=model_name, temperature=0.7)
+        kwargs = {"model_name": model_name, "temperature": 0.7}
+        if max_output_tokens > 0:
+            kwargs["max_tokens"] = max_output_tokens
+        return ChatOpenAI(**kwargs)
     elif provider == 'ollama':
+        # If we have specific context sizes, we must instantiate via crewai.LLM
+        if max_input_context > 0 or max_output_tokens > 0:
+            try:
+                from crewai import LLM
+                kwargs = {
+                    "model": f"ollama/{model_name}",
+                    "base_url": os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+                }
+                if max_input_context > 0:
+                    kwargs["num_ctx"] = max_input_context
+                if max_output_tokens > 0:
+                    kwargs["max_tokens"] = max_output_tokens
+                return LLM(**kwargs)
+            except ImportError:
+                pass # fallback to string if LLM class not available
+                
         # Prefer LiteLLM-style string for compatibility with the CrewAI shim.
         return f"ollama/{model_name}"
     else:
         # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
         model_string = f"{provider}/{model_name}"
+        if max_output_tokens > 0:
+            try:
+                from crewai import LLM
+                return LLM(model=model_string, max_tokens=max_output_tokens)
+            except ImportError:
+                pass
         logging.info(f"LLM instantiated: {model_string}")
         return model_string
 
@@ -300,7 +330,7 @@ def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
 
     return task_tools if task_tools else None
 
-def _build_agent(agent_id, specialization=None, model_id_override=None):
+def _build_agent(agent_id, specialization=None, model_id_override=None, task_record=None):
     """
     Constructs a CrewAI Agent object from database records.
     Automatically disables tools for local models (Ollama/phi3, etc.)
@@ -333,7 +363,7 @@ def _build_agent(agent_id, specialization=None, model_id_override=None):
             logging.info(f"No model set for agent/task. Using first model as fallback: {models[0]['model_name']}")
 
     model_record = db.read_model(model_id) if model_id else None
-    llm_instance = _instantiate_llm(model_id) if model_id else None
+    llm_instance = _instantiate_llm(model_id, task_record=task_record) if model_id else None
     
     # --- LOCAL MODEL CHECK ---
     # Local models (Ollama, phi3, llama, etc.) do NOT support the tools/function-calling
@@ -431,8 +461,8 @@ def _build_task(task_id, agents_cache):
     # we must build a fresh, task-specific agent clone rather than pulling from the shared cache.
     # This prevents the specialized role/backstory and model override from leaking into other tasks.
     specialization = task_record.get('agent_specialization')
-    if specialization or task_model_id is not None:
-        agent_instance = _build_agent(agent_id, specialization=specialization, model_id_override=task_model_id)
+    if specialization or task_model_id is not None or task_record.get('max_input_context', 0) > 0 or task_record.get('max_output_tokens', 0) > 0:
+        agent_instance = _build_agent(agent_id, specialization=specialization, model_id_override=task_model_id, task_record=task_record)
     else:
         if agent_id not in agents_cache:
             agents_cache[agent_id] = _build_agent(agent_id)

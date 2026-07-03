@@ -136,7 +136,7 @@ def _fetch_anthropic(api_key: str):
 
 def _fetch_ollama(api_key: str):
     import os
-    base_url = os.getenv("OLLAMA_API_BASE", "https://api.ollama.com")
+    base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
     url = f"{base_url.rstrip('/')}/api/tags"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
@@ -161,3 +161,27 @@ def _fetch_ollama(api_key: str):
         return {"success": True, "chat_models": chat_models, "embed_models": embed_models}
     except Exception as e:
         return {"success": False, "error": f"Failed to fetch Ollama models from {url}: {e}"}
+
+def get_ollama_model_info(model_name: str, api_key: str = ""):
+    import os
+    import requests
+    base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+    url = f"{base_url.rstrip('/')}/api/show"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        response = requests.post(url, headers=headers, json={"name": model_name}, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        model_info = data.get("model_info", {})
+        
+        # Look for any key ending with '.context_length'
+        max_context = 8192
+        for k, v in model_info.items():
+            if k.endswith(".context_length"):
+                max_context = int(v)
+                break
+        
+        return {"success": True, "max_context": max_context}
+    except Exception as e:
+        return {"success": False, "error": str(e), "max_context": 8192}

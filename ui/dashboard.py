@@ -818,7 +818,7 @@ def render_api_vault():
     
     # Categorize keys dynamically
     llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA"]
-    llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords)]
+    llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords) and k != "OLLAMA_API_BASE"]
     
     connection_suffixes = ["_API_KEY", "_DB_URL", "_TOKEN", "_PASSWORD"]
     conn_keys = [k for k in all_env_keys if k not in llm_keys and any(k.endswith(s) for s in connection_suffixes)]
@@ -844,7 +844,8 @@ def render_api_vault():
     key_tooltips = {
         "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
         "ERP_DB_URL": "Address to access the external app database (e.g. Biomass DB).",
-        "MASTER_AI_MODEL_ID": "The main AI brain Alfredo uses for everyday tasks."
+        "MASTER_AI_MODEL_ID": "The main AI brain Alfredo uses for everyday tasks.",
+        "OLLAMA_API_BASE": "The URL of the local or remote Ollama server (e.g. http://192.168.178.105:11434)."
     }
     
     # 2. System & Integration Settings
@@ -879,7 +880,8 @@ def render_api_vault():
 
         col3, col4 = st.columns(2)
         for i, key in enumerate(system_keys):
-            is_set = key in current_env and bool(current_env[key].strip())
+            val = current_env.get(key)
+            is_set = bool(val and str(val).strip())
             status_icon = "🟢" if is_set else "🔴"
             tooltip = key_tooltips.get(key, "System configuration parameter.")
             
@@ -989,6 +991,15 @@ def render_api_vault():
     model_config = DataManager.load_yaml(model_map_path)
     PROVIDER_MAP = model_config.get('provider_map', {})
     LOCAL_MODELS = model_config.get('local_models', [])
+    
+    # Fetch dynamic local models from Ollama
+    from core.api_verifier import _fetch_ollama, get_ollama_model_info
+    ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
+    ollama_models = _fetch_ollama(ollama_api_key)
+    if ollama_models.get("success"):
+        # If API succeeds, only show the actually pulled models
+        LOCAL_MODELS = ollama_models.get("chat_models", [])
+    # else it falls back to the hardcoded list from models_map.yaml
     
     st.markdown("Add or update a model available for agents.")
     
@@ -1612,6 +1623,44 @@ def render_task_builder():
                 help="Select a specific LLM model to execute this task. If set to 'None / Use Agent Default', it will fallback to the agent's default model."
             )
             
+            task_max_input_context = 0
+            task_max_output_tokens = 0
+            
+            if selected_model_str and selected_model_str != "None / Use Agent Default":
+                selected_model_id = model_options.get(selected_model_str)
+                model_record = next((m for m in models if m['id'] == selected_model_id), None)
+                if model_record:
+                    is_ollama = bool(model_record.get('is_local')) or model_record.get('provider', '').lower() == 'ollama'
+                    
+                    st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
+                    task_max_output_tokens = st.slider(
+                        "Max Output Tokens", 
+                        min_value=256, max_value=128000, value=editing_task.get('max_output_tokens') or 4096 if editing_task else 4096, step=256,
+                        help="Maximum number of tokens the model is allowed to generate in its response.",
+                        key="task_out_tok"
+                    )
+                    
+                    if is_ollama:
+                        ollama_max = 128000
+                        try:
+                            from core.api_verifier import get_ollama_model_info
+                            info = get_ollama_model_info(model_record.get('model_name', ''))
+                            if info.get('success'):
+                                ollama_max = info.get('max_context', 128000)
+                        except Exception:
+                            pass
+                            
+                        default_in = editing_task.get('max_input_context') or 8192 if editing_task else 8192
+                        if default_in > ollama_max:
+                            default_in = ollama_max
+                            
+                        task_max_input_context = st.slider(
+                            "Max Input Context Size",
+                            min_value=1024, max_value=max(1024, ollama_max), value=default_in, step=1024,
+                            help=f"Allocates memory for context. Max supported by this model is {ollama_max}.",
+                            key="task_in_ctx"
+                        )
+            
         # --- Spacing ---
         st.markdown("<div style='margin-top: 12px;'></div>", unsafe_allow_html=True)
             
@@ -1868,7 +1917,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     task_model_id = model_options.get(selected_model_str)
                 
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0))
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -1880,7 +1929,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0))
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -3136,10 +3185,80 @@ def main():
             with open(bot_pid_file, 'w') as f:
                 f.write(str(p.pid))
 
+    @st.dialog("🚀 Guide & Placeholders", width="large")
+    def show_guide():
+        st.markdown("""
+        ### 🤖 What is Alfredo?
+        **Alfredo** is an AI Agentic Orchestrator powered by **CrewAI** and **Master AI**. It allows you to model custom teams of AI agents, organize them into sequential workflows, and execute them dynamically through natural language (via Streamlit or Telegram).
+
+        ### ⚙️ How It Works
+        1. **Define Team**: Register models and create agents with unique roles, backstories, and tools in **Agent Caserma**.
+        2. **Build Workflows**: Build individual tasks and link them sequentially in **Workflow Assembler**.
+        3. **Dynamic Planning**: Send a request. **Master AI** analyzes your intent, selects the workflow, asks for required inputs, and configures the agents.
+        4. **Execute**: The crew runs the tasks step-by-step, feeding results from one task to the next.
+
+        ---
+
+        ### 👤 Agent Specialization
+        Keep agents generic (e.g. *Researcher*) and specialize them per-task:
+        - **`{specialization}`**: Place this in the agent's **Role** or **Backstory** (e.g. `Researcher specialized in {specialization}`). Alfredo will inject the task's custom specialization at runtime.
+          *Note: If omitted, the task specialization is automatically appended.*
+
+        ### 📝 Task Inputs
+        Format task **Descriptions** or **Expected Outputs** with:
+        - **`{variable_name}`**: Define custom parameters in the task's **Required Inputs**. Alfredo will prompt you for them before execution.
+          *Tip: Identical variables across tasks are requested only once!*
+        - **`{user_input}`**: Inserts your initial message that triggered the workflow.
+        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task.
+
+        ---
+        ### 🛠️ Model & Tool Compatibility
+        - ✅ **Cloud Models** (OpenAI, Gemini, Anthropic, Groq): Full support for function calling and tools (web search, file access, shell commands).
+        - ❌ **Local Models** (Ollama): Do not support tool calling. Tools are automatically disabled for local models.
+
+        *Alfredo resolves all parameters dynamically during planning and execution.*
+        """)
+        st.divider()
+        st.info("The configuration is saved directly to your SQLite database.")
+
+    # --- CSS for guide robot button (injected before columns to avoid layout shift) ---
+    st.markdown("""
+    <style>
+    /* Guide 🤖 button: target only the primary button in the header */
+    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"] {
+        height: auto !important;
+        min-height: 58px !important;
+        padding: 2px !important;
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        cursor: pointer !important;
+        color: inherit !important;
+    }
+    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"]:hover {
+        background: rgba(128,128,128,0.1) !important;
+        border-radius: 12px !important;
+        transition: all 0.2s ease;
+    }
+    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"] p {
+        font-size: 2.8rem !important;
+        line-height: 1 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     # --- Header with Right Popovers ---
     col_title, col_tools = st.columns([7, 3])
     with col_title:
-        st.title("🤖 AI Workflow Configurator")
+        t_col1, t_col2 = st.columns([0.08, 0.92], vertical_alignment="center")
+        with t_col1:
+            if st.button("🤖", type="primary", use_container_width=True):
+                show_guide()
+        with t_col2:
+            st.markdown("<h1 style='margin-top: -18px;'>AI Workflow Configurator</h1>", unsafe_allow_html=True)
+            
         st.caption("A secure dashboard for building and managing AI agent workflows.")
         
         bot_running = is_bot_running()
@@ -3241,42 +3360,7 @@ def main():
                     st.rerun()
 
 
-    # --- Sidebar Guide ---
-    with st.sidebar:
-        st.header("🚀 Guide & Placeholders")
-        st.markdown("""
-        ### 🤖 What is Alfredo?
-        **Alfredo** is an AI Agentic Orchestrator powered by **CrewAI** and **Master AI**. It allows you to model custom teams of AI agents, organize them into sequential workflows, and execute them dynamically through natural language (via Streamlit or Telegram).
-
-        ### ⚙️ How It Works
-        1. **Define Team**: Register models and create agents with unique roles, backstories, and tools in **Agent Caserma**.
-        2. **Build Workflows**: Build individual tasks and link them sequentially in **Workflow Assembler**.
-        3. **Dynamic Planning**: Send a request. **Master AI** analyzes your intent, selects the workflow, asks for required inputs, and configures the agents.
-        4. **Execute**: The crew runs the tasks step-by-step, feeding results from one task to the next.
-
-        ---
-
-        ### 👤 Agent Specialization
-        Keep agents generic (e.g. *Researcher*) and specialize them per-task:
-        - **`{specialization}`**: Place this in the agent's **Role** or **Backstory** (e.g. `Researcher specialized in {specialization}`). Alfredo will inject the task's custom specialization at runtime.
-          *Note: If omitted, the task specialization is automatically appended.*
-
-        ### 📝 Task Inputs
-        Format task **Descriptions** or **Expected Outputs** with:
-        - **`{variable_name}`**: Define custom parameters in the task's **Required Inputs**. Alfredo will prompt you for them before execution.
-          *Tip: Identical variables across tasks are requested only once!*
-        - **`{user_input}`**: Inserts your initial message that triggered the workflow.
-        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task.
-
-        ---
-        ### 🛠️ Model & Tool Compatibility
-        - ✅ **Cloud Models** (OpenAI, Gemini, Anthropic, Groq): Full support for function calling and tools (web search, file access, shell commands).
-        - ❌ **Local Models** (Ollama): Do not support tool calling. Tools are automatically disabled for local models.
-
-        *Alfredo resolves all parameters dynamically during planning and execution.*
-        """)
-        st.divider()
-        st.info("The configuration is saved directly to your SQLite database.")
+    # Guide moved to st.dialog
 
     # Initialize session state for editing
     if 'editing_task_id' not in st.session_state:
@@ -3286,64 +3370,69 @@ def main():
     if 'editing_workflow_id' not in st.session_state:
         st.session_state.editing_workflow_id = None
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "Tab 1: Add Database",
-        "Tab 2: API Vault & Model Registry",
-        "Tab 3: Agent Caserma",
-        "Tab 4: Task Builder",
-        "Tab 5: Workflow Assembler",
-        "Tab 6: History & Monitoring",
-        "Tab 7: 🔗 My Apps"
-    ])
-
-    with tab1:
-        try:
-            render_knowledge_base()
-        except Exception as e:
-            st.error(f"Errore nel caricamento del Database: {e}")
-            st.exception(e)
-
-    with tab2:
+    def page_api_vault():
         try:
             render_api_vault()
         except Exception as e:
             st.error(f"Errore nel caricamento di API Vault & Model Registry: {e}")
             st.exception(e)
 
-    with tab3:
+    def page_agent_caserma():
         try:
             render_agent_caserma()
         except Exception as e:
             st.error(f"Errore nel caricamento di Agent Caserma: {e}")
             st.exception(e)
-    
-    with tab4:
+
+    def page_task_builder():
+        st.subheader("🗄️ Knowledge Base")
+        try:
+            render_knowledge_base()
+        except Exception as e:
+            st.error(f"Errore nel caricamento del Database: {e}")
+            st.exception(e)
+            
+        st.divider()
+        
+        st.subheader("📋 Task Builder")
         try:
             render_task_builder()
         except Exception as e:
             st.error(f"Errore nel caricamento di Task Builder: {e}")
             st.exception(e)
 
-    with tab5:
+    def page_workflow_assembler():
         try:
             render_workflow_assembler()
         except Exception as e:
             st.error(f"Errore nel caricamento di Workflow Assembler: {e}")
             st.exception(e)
 
-    with tab6:
+    def page_history_monitoring():
         try:
             render_history_monitoring()
         except Exception as e:
             st.error(f"Errore nel caricamento di History & Monitoring: {e}")
             st.exception(e)
 
-    with tab7:
+    def page_my_apps():
         try:
             render_my_apps()
         except Exception as e:
             st.error(f"Error loading My Apps: {e}")
             st.exception(e)
+
+    pages = [
+        st.Page(page_api_vault, title="API Vault", icon="🔐"),
+        st.Page(page_agent_caserma, title="Agent Caserma", icon="🎖️"),
+        st.Page(page_task_builder, title="Task Builder", icon="📋"),
+        st.Page(page_workflow_assembler, title="Workflow Assembler", icon="🧩"),
+        st.Page(page_history_monitoring, title="History & Monitoring", icon="📊"),
+        st.Page(page_my_apps, title="My Apps", icon="🔗")
+    ]
+    
+    pg = st.navigation(pages)
+    pg.run()
 
 
 if __name__ == "__main__":
