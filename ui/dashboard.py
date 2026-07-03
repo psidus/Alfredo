@@ -814,7 +814,10 @@ def render_api_vault():
     
     # To prevent displaying internal Docker OS variables in the UI, we only list keys from the file + suggestions
     file_keys = list(dotenv_values(env_path).keys())
-    all_env_keys = sorted([k for k in set(suggested_keys + file_keys) if "TELEGRAM" not in k.upper()])
+    all_env_keys = sorted([
+        k for k in set(suggested_keys + file_keys) 
+        if k and str(k).replace('\ufeff', '').strip() and "TELEGRAM" not in k.upper()
+    ])
     
     # Categorize keys dynamically
     llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA"]
@@ -827,19 +830,6 @@ def render_api_vault():
     headroom_keys = ["HEADROOM_ENABLED", "HEADROOM_PROXY_URL"]
     system_keys = [k for k in all_env_keys if k not in llm_keys and k not in conn_keys and k not in agent_keys and k not in headroom_keys]
     
-    # 1. LLM Provider API Keys
-    st.subheader("LLM Provider API Keys")
-    st.markdown("Monitor and manage API keys for AI models.")
-    
-    col1, col2 = st.columns(2)
-    for i, key in enumerate(llm_keys):
-        is_set = key in current_env and bool(current_env[key].strip())
-        status_icon = "🟢" if is_set else "🔴"
-        with (col1 if i % 2 == 0 else col2):
-            st.markdown(f"{status_icon} **{key}**")
-            
-
-    
     # Tooltip definitions for system/conn keys
     key_tooltips = {
         "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
@@ -848,66 +838,83 @@ def render_api_vault():
         "OLLAMA_API_BASE": "The URL of the local or remote Ollama server (e.g. http://192.168.178.105:11434)."
     }
     
-    # 2. System & Integration Settings
-    st.subheader("System Settings")
-    st.markdown("Database, Headroom, and other global configuration variables.")
-    
-    with st.expander("View System Settings", expanded=False):
-        # Headroom AI — Context Compression
-        st.markdown("#### Headroom AI")
-        st.markdown("Context compression to reduce token usage by 60-95%.")
+    tab_sys, tab_models = st.tabs(["System Setting", "Load Models"])
+
+    with tab_sys:
+        # 1. System & Integration Settings
+        st.subheader("System Settings")
+        st.markdown("Database, Headroom, and other global configuration variables.")
         
-        hr_enabled_raw = str(current_env.get("HEADROOM_ENABLED", ""))
-        hr_enabled = hr_enabled_raw.strip('"\'').lower() == "true"
-        hr_proxy = str(current_env.get("HEADROOM_PROXY_URL", "")).strip('"\'').strip()
+        with st.expander("View System Settings", expanded=False):
+            # Headroom AI — Context Compression
+            st.markdown("#### Headroom AI")
+            st.markdown("Context compression to reduce token usage by 60-95%.")
+            
+            hr_enabled_raw = str(current_env.get("HEADROOM_ENABLED", ""))
+            hr_enabled = hr_enabled_raw.strip('"\'').lower() == "true"
+            hr_proxy = str(current_env.get("HEADROOM_PROXY_URL", "")).strip('"\'').strip()
+            
+            h_col1, h_col2 = st.columns(2)
+            with h_col1:
+                st.markdown(f"{'🟢' if hr_enabled else '🔴'} **HEADROOM_ENABLED**")
+                st.caption("Active" if hr_enabled else "Inactive")
+            with h_col2:
+                if hr_enabled and hr_proxy:
+                    st.markdown("🟢 **HEADROOM_PROXY_URL**")
+                    st.caption(f"Proxy Mode: {hr_proxy}")
+                elif hr_enabled:
+                    st.markdown("🟡 **HEADROOM_PROXY_URL**")
+                    st.caption("Inline Mode (Proxy not set)")
+                else:
+                    st.markdown("🔴 **HEADROOM_PROXY_URL**")
+                    st.caption("Inactive")
+                    
+            st.divider()
+
+            col3, col4 = st.columns(2)
+            for i, key in enumerate(system_keys):
+                val = current_env.get(key)
+                is_set = bool(val and str(val).strip())
+                status_icon = "🟢" if is_set else "🔴"
+                tooltip = key_tooltips.get(key, "System configuration parameter.")
+                
+                with (col3 if i % 2 == 0 else col4):
+                    # Using HTML title attribute to create a native tooltip
+                    st.markdown(f'<span title="{tooltip}" style="cursor: help;">{status_icon} <b>{key}</b></span>', unsafe_allow_html=True)
+
+        st.divider()
+        st.subheader("Global Resource Settings")
+        st.markdown("Configure limits for parallel agent execution based on your hardware.")
+        with st.form("resource_limits_form"):
+            current_max_vram = current_env.get("MAX_VRAM_GB", "16.0")
+            try:
+                current_max_vram_float = float(current_max_vram)
+            except ValueError:
+                current_max_vram_float = 16.0
+                
+            new_max_vram = st.number_input("Maximum Local VRAM (GB)", min_value=1.0, max_value=256.0, value=current_max_vram_float, step=1.0, help="Used by the Task Scheduler to pause or downgrade agents when VRAM is full.")
+            submitted_resources = st.form_submit_button("Save Resource Settings")
+            if submitted_resources:
+                safe_set_key(env_path, "MAX_VRAM_GB", str(new_max_vram))
+                st.success("Resource settings saved.")
+                st.rerun()
+
+    with tab_models:
+        # 2. LLM Provider API Keys
+        st.subheader("LLM Provider API Keys")
+        st.markdown("Monitor and manage API keys for AI models.")
         
-        h_col1, h_col2 = st.columns(2)
-        with h_col1:
-            st.markdown(f"{'🟢' if hr_enabled else '🔴'} **HEADROOM_ENABLED**")
-            st.caption("Active" if hr_enabled else "Inactive")
-        with h_col2:
-            if hr_enabled and hr_proxy:
-                st.markdown("🟢 **HEADROOM_PROXY_URL**")
-                st.caption(f"Proxy Mode: {hr_proxy}")
-            elif hr_enabled:
-                st.markdown("🟡 **HEADROOM_PROXY_URL**")
-                st.caption("Inline Mode (Proxy not set)")
-            else:
-                st.markdown("🔴 **HEADROOM_PROXY_URL**")
-                st.caption("Inactive")
+        col1, col2 = st.columns(2)
+        for i, key in enumerate(llm_keys):
+            is_set = key in current_env and bool(current_env[key].strip())
+            status_icon = "🟢" if is_set else "🔴"
+            with (col1 if i % 2 == 0 else col2):
+                st.markdown(f"{status_icon} **{key}**")
                 
         st.divider()
-
-        col3, col4 = st.columns(2)
-        for i, key in enumerate(system_keys):
-            val = current_env.get(key)
-            is_set = bool(val and str(val).strip())
-            status_icon = "🟢" if is_set else "🔴"
-            tooltip = key_tooltips.get(key, "System configuration parameter.")
-            
-            with (col3 if i % 2 == 0 else col4):
-                # Using HTML title attribute to create a native tooltip
-                st.markdown(f'<span title="{tooltip}" style="cursor: help;">{status_icon} <b>{key}</b></span>', unsafe_allow_html=True)
-            
-    st.divider()
-    st.subheader("Global Resource Settings")
-    st.markdown("Configure limits for parallel agent execution based on your hardware.")
-    with st.form("resource_limits_form"):
-        current_max_vram = current_env.get("MAX_VRAM_GB", "16.0")
-        try:
-            current_max_vram_float = float(current_max_vram)
-        except ValueError:
-            current_max_vram_float = 16.0
-            
-        new_max_vram = st.number_input("Maximum Local VRAM (GB)", min_value=1.0, max_value=256.0, value=current_max_vram_float, step=1.0, help="Used by the Task Scheduler to pause or downgrade agents when VRAM is full.")
-        submitted_resources = st.form_submit_button("Save Resource Settings")
-        if submitted_resources:
-            safe_set_key(env_path, "MAX_VRAM_GB", str(new_max_vram))
-            st.success("Resource settings saved.")
-            st.rerun()
-            
-    with st.form("api_key_form"):
-        st.markdown("Add or Update an API Key")
+                
+        st.subheader("Load cloud models")
+        st.markdown("Add or update an API Key for cloud providers.")
         form_col1, form_col2 = st.columns(2)
         with form_col1:
             selected_key = st.selectbox("Select Key", options=["Custom..."] + suggested_keys)
@@ -915,7 +922,7 @@ def render_api_vault():
         with form_col2:
             key_value = st.text_input("API Key Value", type="password", placeholder="Enter key here...")
             
-        submitted_key = st.form_submit_button("Save to .env")
+        submitted_key = st.button("Save to .env", type="primary", key="save_cloud_model_btn")
         if submitted_key:
             final_key_name = custom_key.strip() if selected_key == "Custom..." else selected_key
             if final_key_name and key_value:
@@ -982,91 +989,91 @@ def render_api_vault():
             else:
                 st.error("Please provide both a valid Key Name and a Value.")
 
-    st.divider()
+        st.divider()
 
-    st.subheader("Model Registry")
-    
-    # Load model config
-    model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
-    model_config = DataManager.load_yaml(model_map_path)
-    PROVIDER_MAP = model_config.get('provider_map', {})
-    LOCAL_MODELS = model_config.get('local_models', [])
-    
-    # Fetch dynamic local models from Ollama
-    from core.api_verifier import _fetch_ollama, get_ollama_model_info
-    ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
-    ollama_models = _fetch_ollama(ollama_api_key)
-    if ollama_models.get("success"):
-        # If API succeeds, only show the actually pulled models
-        LOCAL_MODELS = ollama_models.get("chat_models", [])
-    # else it falls back to the hardcoded list from models_map.yaml
-    
-    st.markdown("Add or update a model available for agents.")
-    
-    # --- Only Local Models can be added manually now ---
-    provider = "Ollama"
-    env_var_name = ""
-    is_local = True
-    
-    local_col1, local_col2 = st.columns(2)
-    with local_col1:
-        selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
-        if selected_local == "Other (Manual)...":
-            model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
-        else:
-            model_name = selected_local
-    with local_col2:
-        vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=4.0, step=0.5, help="Estimated memory used by this model.")
-
-    submitted = st.button("Add Local Model", type="primary")
-    if submitted and provider and model_name:
-        import sqlite3
-        try:
-            db.create_model(provider, model_name, "", True, vram_gb=vram_gb)
-            st.success(f"Added local model '{model_name}' requiring {vram_gb} GB VRAM.")
-            st.rerun()
-        except sqlite3.IntegrityError:
-            st.error(f"Il modello '{model_name}' è già presente nel database.")
-        except Exception as e:
-            st.error(f"Errore durante l'aggiunta del modello: {e}")
-
-    models = db.read_all_models()
-    if models:
-        st.write("Registered Models:")
+        st.subheader("Local Model registry")
         
-        # Group by provider
-        providers_dict = {}
-        for model in models:
-            p = model.get('provider', 'Other')
-            if p not in providers_dict:
-                providers_dict[p] = []
-            providers_dict[p].append(model)
+        # Load model config
+        model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
+        model_config = DataManager.load_yaml(model_map_path)
+        PROVIDER_MAP = model_config.get('provider_map', {})
+        LOCAL_MODELS = model_config.get('local_models', [])
+        
+        # Fetch dynamic local models from Ollama
+        from core.api_verifier import _fetch_ollama, get_ollama_model_info
+        ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
+        ollama_models = _fetch_ollama(ollama_api_key)
+        if ollama_models.get("success"):
+            # If API succeeds, only show the actually pulled models
+            LOCAL_MODELS = ollama_models.get("chat_models", [])
+        # else it falls back to the hardcoded list from models_map.yaml
+        
+        st.markdown("Add or update a model available for agents.")
+        
+        # --- Only Local Models can be added manually now ---
+        provider = "Ollama"
+        env_var_name = ""
+        is_local = True
+        
+        local_col1, local_col2 = st.columns(2)
+        with local_col1:
+            selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
+            if selected_local == "Other (Manual)...":
+                model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
+            else:
+                model_name = selected_local
+        with local_col2:
+            vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=4.0, step=0.5, help="Estimated memory used by this model.")
+
+        submitted = st.button("Add Local Model", type="primary")
+        if submitted and provider and model_name:
+            import sqlite3
+            try:
+                db.create_model(provider, model_name, "", True, vram_gb=vram_gb)
+                st.success(f"Added local model '{model_name}' requiring {vram_gb} GB VRAM.")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.error(f"Il modello '{model_name}' è già presente nel database.")
+            except Exception as e:
+                st.error(f"Errore durante l'aggiunta del modello: {e}")
+
+        models = db.read_all_models()
+        if models:
+            st.write("Registered Models:")
             
-        for provider_name, p_models in providers_dict.items():
-            st.markdown(f"**{provider_name}**")
-            with st.container(height=250, border=True):
-                for model in p_models:
-                    col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 2, 2, 1.5, 1])
-                    type_icon = "🏠" if model.get('is_local') else "☁️"
-                    if model.get('is_local'):
-                        status_sema = "🟢"
-                    else:
-                        env_key = model.get('env_var_name', '')
-                        status_sema = "🟢" if env_key in current_env and bool(current_env[env_key].strip()) else "🔴"
-                    col1.markdown(f"{type_icon} {status_sema}")
-                    col2.text(f"P: {model['provider']}")
-                    col3.text(f"M: {model['model_name']}")
-                    key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
-                    col4.text(f"Key: {key_display}")
-                    vram_val = model.get('vram_gb', 0.0)
-                    vram_display = f"{vram_val} GB" if model.get('is_local') else "---"
-                    col5.text(f"VRAM: {vram_display}")
-                    if col6.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
-                        db.delete_model(model['id'])
-                        st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
-                        st.rerun()
-    else:
-        st.info("No models registered yet.")
+            # Group by provider
+            providers_dict = {}
+            for model in models:
+                p = model.get('provider', 'Other')
+                if p not in providers_dict:
+                    providers_dict[p] = []
+                providers_dict[p].append(model)
+                
+            for provider_name, p_models in providers_dict.items():
+                st.markdown(f"**{provider_name}**")
+                with st.container(height=250, border=True):
+                    for model in p_models:
+                        col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 2, 2, 1.5, 1])
+                        type_icon = "🏠" if model.get('is_local') else "☁️"
+                        if model.get('is_local'):
+                            status_sema = "🟢"
+                        else:
+                            env_key = model.get('env_var_name', '')
+                            status_sema = "🟢" if env_key in current_env and bool(current_env[env_key].strip()) else "🔴"
+                        col1.markdown(f"{type_icon} {status_sema}")
+                        col2.text(f"P: {model['provider']}")
+                        col3.text(f"M: {model['model_name']}")
+                        key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
+                        col4.text(f"Key: {key_display}")
+                        vram_val = model.get('vram_gb', 0.0)
+                        vram_display = f"{vram_val} GB" if model.get('is_local') else "---"
+                        col5.text(f"VRAM: {vram_display}")
+                        if col6.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
+                            db.delete_model(model['id'])
+                            st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
+                            st.rerun()
+        else:
+            st.info("No models registered yet.")
 
 
 def render_agent_caserma():
@@ -2071,394 +2078,415 @@ def render_workflow_assembler():
     db = get_db_manager()
     st.header("Workflow Assembler")
     st.markdown("Combine individual tasks into a sequential workflow.")
+    tab_wf, tab_test = st.tabs(["Workflow + Saved Workflow", "Live System Test"])
+    with tab_wf:
 
-    # Inject CSS/JS to style task buttons to look like normal clickable text
-    st.markdown("""
-<style>
-/* CSS to style task buttons inside the task scroll container to look like plain text */
-div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button {
-    background-color: transparent !important;
-    border: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    color: inherit !important;
-    text-align: left !important;
-    font-weight: normal !important;
-    box-shadow: none !important;
-    height: auto !important;
-    min-height: 0 !important;
-    width: 100% !important;
-    justify-content: flex-start !important;
-    display: inline-block !important;
-    cursor: pointer !important;
-    white-space: normal !important;
-    line-height: inherit !important;
-}
-div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:hover {
-    color: #29B6F6 !important;
-    background-color: transparent !important;
-    text-decoration: underline !important;
-}
-div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:focus {
-    background-color: transparent !important;
-    box-shadow: none !important;
-    color: inherit !important;
-    outline: none !important;
-}
-div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:active {
-    background-color: transparent !important;
-    color: #29B6F6 !important;
-}
-</style>
+        # Inject CSS/JS to style task buttons to look like normal clickable text
+        st.markdown("""
+    <style>
+    /* CSS to style task buttons inside the task scroll container to look like plain text */
+    div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button {
+        background-color: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        color: inherit !important;
+        text-align: left !important;
+        font-weight: normal !important;
+        box-shadow: none !important;
+        height: auto !important;
+        min-height: 0 !important;
+        width: 100% !important;
+        justify-content: flex-start !important;
+        display: inline-block !important;
+        cursor: pointer !important;
+        white-space: normal !important;
+        line-height: inherit !important;
+    }
+    div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:hover {
+        color: #29B6F6 !important;
+        background-color: transparent !important;
+        text-decoration: underline !important;
+    }
+    div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:focus {
+        background-color: transparent !important;
+        box-shadow: none !important;
+        color: inherit !important;
+        outline: none !important;
+    }
+    div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="stElementContainer"] button:active {
+        background-color: transparent !important;
+        color: #29B6F6 !important;
+    }
+    </style>
 
-<script>
-(function() {
-    function styleTaskButtons() {
-        const markers = document.querySelectorAll('.task-text-marker');
-        markers.forEach(marker => {
-            const container = marker.closest('div[data-testid="stElementContainer"]');
-            if (container) {
-                const nextContainer = container.nextElementSibling;
-                if (nextContainer) {
-                    const btn = nextContainer.querySelector('button');
-                    if (btn) {
-                        btn.style.backgroundColor = 'transparent';
-                        btn.style.border = 'none';
-                        btn.style.padding = '0';
-                        btn.style.margin = '0';
-                        btn.style.boxShadow = 'none';
-                        btn.style.color = 'inherit';
-                        btn.style.textAlign = 'left';
-                        btn.style.justifyContent = 'flex-start';
-                        btn.style.display = 'inline-block';
-                        btn.style.width = '100%';
-                        btn.style.height = 'auto';
-                        btn.style.minHeight = '0';
-                        btn.style.fontWeight = 'normal';
-                        btn.style.cursor = 'pointer';
-                        btn.style.whiteSpace = 'normal';
-                        
-                        btn.onmouseover = () => {
-                            btn.style.color = '#29B6F6';
-                            btn.style.textDecoration = 'underline';
+    <script>
+    (function() {
+        function styleTaskButtons() {
+            const markers = document.querySelectorAll('.task-text-marker');
+            markers.forEach(marker => {
+                const container = marker.closest('div[data-testid="stElementContainer"]');
+                if (container) {
+                    const nextContainer = container.nextElementSibling;
+                    if (nextContainer) {
+                        const btn = nextContainer.querySelector('button');
+                        if (btn) {
                             btn.style.backgroundColor = 'transparent';
-                        };
-                        btn.onmouseout = () => {
-                            btn.style.color = 'inherit';
-                            btn.style.textDecoration = 'none';
-                            btn.style.backgroundColor = 'transparent';
-                        };
-                        btn.onfocus = () => {
-                            btn.style.backgroundColor = 'transparent';
-                            btn.style.outline = 'none';
+                            btn.style.border = 'none';
+                            btn.style.padding = '0';
+                            btn.style.margin = '0';
                             btn.style.boxShadow = 'none';
-                        };
+                            btn.style.color = 'inherit';
+                            btn.style.textAlign = 'left';
+                            btn.style.justifyContent = 'flex-start';
+                            btn.style.display = 'inline-block';
+                            btn.style.width = '100%';
+                            btn.style.height = 'auto';
+                            btn.style.minHeight = '0';
+                            btn.style.fontWeight = 'normal';
+                            btn.style.cursor = 'pointer';
+                            btn.style.whiteSpace = 'normal';
+                        
+                            btn.onmouseover = () => {
+                                btn.style.color = '#29B6F6';
+                                btn.style.textDecoration = 'underline';
+                                btn.style.backgroundColor = 'transparent';
+                            };
+                            btn.onmouseout = () => {
+                                btn.style.color = 'inherit';
+                                btn.style.textDecoration = 'none';
+                                btn.style.backgroundColor = 'transparent';
+                            };
+                            btn.onfocus = () => {
+                                btn.style.backgroundColor = 'transparent';
+                                btn.style.outline = 'none';
+                                btn.style.boxShadow = 'none';
+                            };
+                        }
                     }
                 }
-            }
-        });
-    }
-    if (!window.taskButtonsIntervalID) {
-        window.taskButtonsIntervalID = setInterval(styleTaskButtons, 300);
-    }
-    styleTaskButtons();
-})();
-</script>
-""", unsafe_allow_html=True)
+            });
+        }
+        if (!window.taskButtonsIntervalID) {
+            window.taskButtonsIntervalID = setInterval(styleTaskButtons, 300);
+        }
+        styleTaskButtons();
+    })();
+    </script>
+    """, unsafe_allow_html=True)
 
-    tasks = db.read_all_tasks()
-    workflows = db.read_all_workflows()
+        tasks = db.read_all_tasks()
+        workflows = db.read_all_workflows()
 
-    if not tasks:
-        st.warning("No tasks found. Please create tasks in 'Tab 3: Task Builder' first.")
-        return
+        if not tasks:
+            st.warning("No tasks found. Please create tasks in 'Tab 3: Task Builder' first.")
+            return
 
-    task_id_map = {task['id']: task for task in tasks}
-    agents = db.read_all_agents()
-    agent_id_map = {agent['id']: agent for agent in agents}
+        task_id_map = {task['id']: task for task in tasks}
+        agents = db.read_all_agents()
+        agent_id_map = {agent['id']: agent for agent in agents}
     
-    # Build tasks grouped by agent
-    tasks_by_agent = {agent['id']: [] for agent in agents}
-    for task in tasks:
-        a_id = task.get('agent_id')
-        if a_id in tasks_by_agent:
-            tasks_by_agent[a_id].append(task)
+        # Build tasks grouped by agent
+        tasks_by_agent = {agent['id']: [] for agent in agents}
+        for task in tasks:
+            a_id = task.get('agent_id')
+            if a_id in tasks_by_agent:
+                tasks_by_agent[a_id].append(task)
 
-    # --- Edit/Create Workflow State Management ---
-    editing_workflow = None
-    if 'editing_workflow_id' in st.session_state and st.session_state.editing_workflow_id:
-        wf_id = st.session_state.editing_workflow_id
-        editing_workflow = next((w for w in workflows if w['id'] == wf_id), None)
+        # --- Edit/Create Workflow State Management ---
+        editing_workflow = None
+        if 'editing_workflow_id' in st.session_state and st.session_state.editing_workflow_id:
+            wf_id = st.session_state.editing_workflow_id
+            editing_workflow = next((w for w in workflows if w['id'] == wf_id), None)
         
-    current_editing_wf_id = editing_workflow['id'] if editing_workflow else None
+        current_editing_wf_id = editing_workflow['id'] if editing_workflow else None
     
-    default_wf_name = (editing_workflow['name'] or "") if editing_workflow else ""
-    default_wf_human_check = editing_workflow['requires_human_check'] if editing_workflow else False
+        default_wf_name = (editing_workflow['name'] or "") if editing_workflow else ""
+        default_wf_human_check = editing_workflow['requires_human_check'] if editing_workflow else False
     
-    import uuid
-    raw_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
-    default_wf_task_ids = []
-    for i, t in enumerate(raw_task_ids):
-        if isinstance(t, int):
-            default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1})
-        elif isinstance(t, dict):
-            if "id" not in t:
-                t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
-            if "depends_on" not in t:
-                t["depends_on"] = []
-            if "execution_level" not in t:
-                t["execution_level"] = 1
-            default_wf_task_ids.append(t)
-    raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
-    default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
+        import uuid
+        raw_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
+        default_wf_task_ids = []
+        for i, t in enumerate(raw_task_ids):
+            if isinstance(t, int):
+                default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1})
+            elif isinstance(t, dict):
+                if "id" not in t:
+                    t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
+                if "depends_on" not in t:
+                    t["depends_on"] = []
+                if "execution_level" not in t:
+                    t["execution_level"] = 1
+                default_wf_task_ids.append(t)
+        raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
+        default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
 
-    if "last_editing_workflow_id" not in st.session_state or st.session_state.last_editing_workflow_id != current_editing_wf_id:
-        st.session_state.last_editing_workflow_id = current_editing_wf_id
-        st.session_state.wf_name_input = default_wf_name
-        st.session_state.wf_human_check = default_wf_human_check
-        st.session_state.wf_expected_exports = default_wf_expected_exports
-        st.session_state.wf_selected_task_ids = default_wf_task_ids
-        for k in list(st.session_state.keys()):
-            if k.startswith("wf_check_"):
-                del st.session_state[k]
+        if "last_editing_workflow_id" not in st.session_state or st.session_state.last_editing_workflow_id != current_editing_wf_id:
+            st.session_state.last_editing_workflow_id = current_editing_wf_id
+            st.session_state.wf_name_input = default_wf_name
+            st.session_state.wf_human_check = default_wf_human_check
+            st.session_state.wf_expected_exports = default_wf_expected_exports
+            st.session_state.wf_selected_task_ids = default_wf_task_ids
+            for k in list(st.session_state.keys()):
+                if k.startswith("wf_check_"):
+                    del st.session_state[k]
                 
-    # Failsafe check
-    if "wf_selected_task_ids" not in st.session_state:
-        st.session_state.wf_selected_task_ids = default_wf_task_ids
+        # Failsafe check
+        if "wf_selected_task_ids" not in st.session_state:
+            st.session_state.wf_selected_task_ids = default_wf_task_ids
 
-    def remove_wf_task(task_id):
-        if task_id in st.session_state.wf_selected_task_ids:
-            st.session_state.wf_selected_task_ids.remove(task_id)
-            chk_key = f"wf_check_{task_id}"
-            if chk_key in st.session_state:
-                del st.session_state[chk_key]
+        def remove_wf_task(task_id):
+            if task_id in st.session_state.wf_selected_task_ids:
+                st.session_state.wf_selected_task_ids.remove(task_id)
+                chk_key = f"wf_check_{task_id}"
+                if chk_key in st.session_state:
+                    del st.session_state[chk_key]
 
-    def move_wf_task_up(idx):
-        lst = st.session_state.wf_selected_task_ids
-        if idx > 0:
-            lst[idx], lst[idx - 1] = lst[idx - 1], lst[idx]
+        def move_wf_task_up(idx):
+            lst = st.session_state.wf_selected_task_ids
+            if idx > 0:
+                lst[idx], lst[idx - 1] = lst[idx - 1], lst[idx]
 
-    def move_wf_task_down(idx):
-        lst = st.session_state.wf_selected_task_ids
-        if idx < len(lst) - 1:
-            lst[idx], lst[idx + 1] = lst[idx + 1], lst[idx]
+        def move_wf_task_down(idx):
+            lst = st.session_state.wf_selected_task_ids
+            if idx < len(lst) - 1:
+                lst[idx], lst[idx + 1] = lst[idx + 1], lst[idx]
 
-    with st.container(border=True):
-        if editing_workflow:
-            st.subheader(f"Edit Workflow: {editing_workflow['name']}")
-        else:
-            st.subheader("Create a New Workflow")
-            
-        workflow_name = st.text_input("Workflow Name", key="wf_name_input")
-        requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
-        
-        try:
-            from core.export_tools import EXPORT_TOOL_MAP
-            available_exports = list(EXPORT_TOOL_MAP.keys())
-        except ImportError:
-            available_exports = ["python", "json", "markdown", "text", "word", "excel"]
-
-        # Ensure default values are valid options
-        current_defaults = st.session_state.get("wf_expected_exports", [])
-        valid_defaults = [x for x in current_defaults if x in available_exports]
-
-        parsed_exports = st.multiselect(
-            "Expected File Outputs (Generated by Master AI)",
-            options=available_exports,
-            default=valid_defaults,
-            key="wf_expected_exports_multiselect"
-        )
-        
-        # Keep session state updated with the selected list so if validation fails it persists
-        st.session_state.wf_expected_exports = parsed_exports
-
-        # --- Export Instructions (optional guidance for the Master AI) ---
-        default_export_instructions = ""
-        if editing_workflow:
-            default_export_instructions = editing_workflow.get("export_instructions", "") or ""
-        
-        if "wf_export_instructions" not in st.session_state or st.session_state.get("last_editing_workflow_id") != current_editing_wf_id:
-            st.session_state.wf_export_instructions = default_export_instructions
-
-        export_instructions = st.text_area(
-            "📝 Export Instructions (Optional)",
-            key="wf_export_instructions_input",
-            value=st.session_state.wf_export_instructions,
-            placeholder="e.g., For Python: extract the simulation model from the Developer agent. For Excel: use the metrics from the Analyst agent. For Word: write a full report.",
-            help="Guide the Master AI on what to extract from each agent's output for each file format. Leave empty to let the AI decide automatically.",
-            height=100
-        )
-        st.session_state.wf_export_instructions = export_instructions
-
-        
-        st.markdown("---")
-        st.markdown("**📋 Add Workflow Blocks**")
-        
-        block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], horizontal=True)
-
-        if block_type == "Single Task":
-            if not agents:
-                st.info("No agents available.")
+        with st.container(border=True):
+            if editing_workflow:
+                st.subheader(f"Edit Workflow: {editing_workflow['name']}")
             else:
-                agent_options = {f"{a['name']} - {a['role']}": a['id'] for a in agents}
-                sel_agent_str = st.selectbox("Select Agent", list(agent_options.keys()), key="wf_single_agent")
-                agent_id = agent_options[sel_agent_str]
-                agent_tasks = tasks_by_agent.get(agent_id, [])
-                if agent_tasks:
-                    task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
-                    sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
-                    if st.button("➕ Add Single Task"):
-                        import uuid
-                        new_node = {
-                            "id": f"node_{uuid.uuid4().hex[:8]}",
-                            "task_id": task_options[sel_task_str],
-                            "depends_on": [],
-                            "execution_level": 1
-                        }
-                        st.session_state.wf_selected_task_ids.append(new_node)
-                        st.rerun()
-                else:
-                    st.info("No tasks assigned to this agent.")
+                st.subheader("Create a New Workflow")
+            
+            workflow_name = st.text_input("Workflow Name", key="wf_name_input")
+            requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
+        
+            try:
+                from core.export_tools import EXPORT_TOOL_MAP
+                available_exports = list(EXPORT_TOOL_MAP.keys())
+            except ImportError:
+                available_exports = ["python", "json", "markdown", "text", "word", "excel"]
 
-        elif block_type == "Batch Loop":
-            with st.container(border=True):
-                st.markdown("**Batch Loop Properties**")
-                b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=5)
-                b_source = st.text_input("Source Variable", value="{previous_result}", help="The variable or output holding the JSON array to iterate over.")
-                
-                st.markdown("**Select inner loop tasks (in order):**")
-                if tasks:
-                    all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
-                    sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()))
-                    if st.button("➕ Add Batch Loop"):
-                        inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
-                        if inner_ids:
+            # Ensure default values are valid options
+            current_defaults = st.session_state.get("wf_expected_exports", [])
+            valid_defaults = [x for x in current_defaults if x in available_exports]
+
+            parsed_exports = st.multiselect(
+                "Expected File Outputs (Generated by Master AI)",
+                options=available_exports,
+                default=valid_defaults,
+                key="wf_expected_exports_multiselect"
+            )
+        
+            # Keep session state updated with the selected list so if validation fails it persists
+            st.session_state.wf_expected_exports = parsed_exports
+
+            # --- Export Instructions (optional guidance for the Master AI) ---
+            default_export_instructions = ""
+            if editing_workflow:
+                default_export_instructions = editing_workflow.get("export_instructions", "") or ""
+        
+            if "wf_export_instructions" not in st.session_state or st.session_state.get("last_editing_workflow_id") != current_editing_wf_id:
+                st.session_state.wf_export_instructions = default_export_instructions
+
+            export_instructions = st.text_area(
+                "📝 Export Instructions (Optional)",
+                key="wf_export_instructions_input",
+                value=st.session_state.wf_export_instructions,
+                placeholder="e.g., For Python: extract the simulation model from the Developer agent. For Excel: use the metrics from the Analyst agent. For Word: write a full report.",
+                help="Guide the Master AI on what to extract from each agent's output for each file format. Leave empty to let the AI decide automatically.",
+                height=100
+            )
+            st.session_state.wf_export_instructions = export_instructions
+
+        
+            st.markdown("---")
+            st.markdown("**📋 Add Workflow Blocks**")
+        
+            block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], horizontal=True)
+
+            if block_type == "Single Task":
+                if not agents:
+                    st.info("No agents available.")
+                else:
+                    agent_options = {f"{a['name']} - {a['role']}": a['id'] for a in agents}
+                    sel_agent_str = st.selectbox("Select Agent", list(agent_options.keys()), key="wf_single_agent")
+                    agent_id = agent_options[sel_agent_str]
+                    agent_tasks = tasks_by_agent.get(agent_id, [])
+                    if agent_tasks:
+                        task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
+                        sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
+                        if st.button("➕ Add Single Task"):
                             import uuid
-                            new_block = {
+                            new_node = {
                                 "id": f"node_{uuid.uuid4().hex[:8]}",
-                                "type": "batch_loop",
-                                "task_ids": inner_ids,
-                                "batch_size": b_size,
-                                "source_variable": b_source,
+                                "task_id": task_options[sel_task_str],
                                 "depends_on": [],
                                 "execution_level": 1
                             }
-                            st.session_state.wf_selected_task_ids.append(new_block)
+                            st.session_state.wf_selected_task_ids.append(new_node)
                             st.rerun()
-                        else:
-                            st.error("Select at least one inner task.")
-                else:
-                    st.info("No tasks available.")
-
-        # --- Ordered Task Preview ---
-        st.markdown("---")
-        st.markdown("**⚙️ Workflow Nodes (DAG Order)**")
-        st.markdown("Nodes execute in parallel when dependencies allow. Reorder nodes to change dependency constraints.")
-        
-        if not st.session_state.wf_selected_task_ids:
-            st.info("No tasks selected yet.")
-        else:
-            def rem_step(idx):
-                removed_id = st.session_state.wf_selected_task_ids[idx]["id"]
-                st.session_state.wf_selected_task_ids.pop(idx)
-                # Cleanup dependencies pointing to removed node
-                for step in st.session_state.wf_selected_task_ids:
-                    if removed_id in step.get("depends_on", []):
-                        step["depends_on"].remove(removed_id)
-
-            def get_node_label(step):
-                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                if is_batch:
-                    return f"🔄 Batch Loop ({step['id']})"
-                task = task_id_map.get(int(step.get("task_id", -1)))
-                t_name = task.get('name') or f"Task #{task['id']}" if task else "Unknown"
-                return f"{t_name} ({step['id']})"
-
-            levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
-            if not levels:
-                levels = [1]
-                
-            st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
-            st.markdown("""
-            <style>
-            div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
-                flex-wrap: nowrap !important;
-                overflow-x: auto !important;
-                padding-bottom: 10px !important;
-            }
-            div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                min-width: 350px !important;
-            }
-            </style>
-            """, unsafe_allow_html=True)
-            
-            level_columns = st.columns(len(levels))
-            
-            for lvl_idx, lvl in enumerate(levels):
-                with level_columns[lvl_idx]:
-                    st.markdown(f"### 📍 Livello {lvl}")
-                    
-                    for i, step in enumerate(st.session_state.wf_selected_task_ids):
-                        if step.get("execution_level", 1) != lvl:
-                            continue
-                            
-                        with st.container(border=True):
-                            col_main = st.container()
-                            
-                            is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                            if not is_batch:
-                                task_id = step if isinstance(step, int) else step.get("task_id")
-                                task = task_id_map.get(int(task_id))
-                                if task:
-                                    agent = agent_id_map.get(task['agent_id'])
-                                    a_name = agent['name'] if agent else "Unknown Agent"
-                                    t_name = task.get('name') or f"Task #{task['id']}"
-                                    tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
-                                    col_main.markdown(f"🚀 **{t_name}** {tooltip_html} (👤 {a_name})<br><sub>{task['description'][:100]}...</sub>", unsafe_allow_html=True)
-                                else:
-                                    col_main.markdown(f"❌ Unknown Task ID: {task_id}")
-                            else:
-                                inner_ids = step.get("task_ids", [])
-                                b_size = step.get("batch_size")
-                                tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
-                                col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
-                                for inner_id in inner_ids:
-                                    itask = task_id_map.get(int(inner_id))
-                                    if itask:
-                                        iagent = agent_id_map.get(itask['agent_id'])
-                                        i_aname = iagent['name'] if iagent else "Unknown Agent"
-                                        i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                        col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
-                                    else:
-                                        col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
-                            
-                            # Execution Level Selection
-                            step["execution_level"] = col_main.number_input("Level (Parallelism)", min_value=1, value=lvl, key=f"lvl_{step['id']}")
-                            
-                            # Dependency Selection
-                            possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids if prev_step["id"] != step["id"]}
-                            current_deps = step.get("depends_on", [])
-                            valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
-                            
-                            selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}", placeholder="No dependencies (Default)")
-                            step["depends_on"] = [possible_deps[label] for label in selected_labels]
-
-                            # Actions
-                            c_up, c_down, c_rem = col_main.columns(3)
-                            c_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,))
-                            c_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,))
-                            c_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,))
-        st.markdown("---")
-        if editing_workflow:
-            col_save, col_cancel = st.columns([1, 1])
-            with col_save:
-                if st.button("💾 Update Workflow", type="primary", use_container_width=True):
-                    sane_workflow_name = sanitize_input(workflow_name)
-                    if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
-                        st.error("Workflow Name and at least one Task are required.")
                     else:
-                        db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
-                        st.success(f"Workflow '{sane_workflow_name}' updated successfully!")
+                        st.info("No tasks assigned to this agent.")
+
+            elif block_type == "Batch Loop":
+                with st.container(border=True):
+                    st.markdown("**Batch Loop Properties**")
+                    b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=5)
+                    b_source = st.text_input("Source Variable", value="{previous_result}", help="The variable or output holding the JSON array to iterate over.")
+                
+                    st.markdown("**Select inner loop tasks (in order):**")
+                    if tasks:
+                        all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
+                        sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()))
+                        if st.button("➕ Add Batch Loop"):
+                            inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
+                            if inner_ids:
+                                import uuid
+                                new_block = {
+                                    "id": f"node_{uuid.uuid4().hex[:8]}",
+                                    "type": "batch_loop",
+                                    "task_ids": inner_ids,
+                                    "batch_size": b_size,
+                                    "source_variable": b_source,
+                                    "depends_on": [],
+                                    "execution_level": 1
+                                }
+                                st.session_state.wf_selected_task_ids.append(new_block)
+                                st.rerun()
+                            else:
+                                st.error("Select at least one inner task.")
+                    else:
+                        st.info("No tasks available.")
+
+            # --- Ordered Task Preview ---
+            st.markdown("---")
+            st.markdown("**⚙️ Workflow Nodes (DAG Order)**")
+            st.markdown("Nodes execute in parallel when dependencies allow. Reorder nodes to change dependency constraints.")
+        
+            if not st.session_state.wf_selected_task_ids:
+                st.info("No tasks selected yet.")
+            else:
+                def rem_step(idx):
+                    removed_id = st.session_state.wf_selected_task_ids[idx]["id"]
+                    st.session_state.wf_selected_task_ids.pop(idx)
+                    # Cleanup dependencies pointing to removed node
+                    for step in st.session_state.wf_selected_task_ids:
+                        if removed_id in step.get("depends_on", []):
+                            step["depends_on"].remove(removed_id)
+
+                def get_node_label(step):
+                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                    if is_batch:
+                        return f"🔄 Batch Loop ({step['id']})"
+                    task = task_id_map.get(int(step.get("task_id", -1)))
+                    t_name = task.get('name') or f"Task #{task['id']}" if task else "Unknown"
+                    return f"{t_name} ({step['id']})"
+
+                levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
+                if not levels:
+                    levels = [1]
+                
+                st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
+                st.markdown("""
+                <style>
+                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
+                    flex-wrap: nowrap !important;
+                    overflow-x: auto !important;
+                    padding-bottom: 10px !important;
+                }
+                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                    min-width: 350px !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+            
+                level_columns = st.columns(len(levels))
+            
+                for lvl_idx, lvl in enumerate(levels):
+                    with level_columns[lvl_idx]:
+                        st.markdown(f"### 📍 Livello {lvl}")
+                    
+                        for i, step in enumerate(st.session_state.wf_selected_task_ids):
+                            if step.get("execution_level", 1) != lvl:
+                                continue
+                            
+                            with st.container(border=True):
+                                col_main = st.container()
+                            
+                                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                                if not is_batch:
+                                    task_id = step if isinstance(step, int) else step.get("task_id")
+                                    task = task_id_map.get(int(task_id))
+                                    if task:
+                                        agent = agent_id_map.get(task['agent_id'])
+                                        a_name = agent['name'] if agent else "Unknown Agent"
+                                        t_name = task.get('name') or f"Task #{task['id']}"
+                                        tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
+                                        col_main.markdown(f"🚀 **{t_name}** {tooltip_html} (👤 {a_name})<br><sub>{task['description'][:100]}...</sub>", unsafe_allow_html=True)
+                                    else:
+                                        col_main.markdown(f"❌ Unknown Task ID: {task_id}")
+                                else:
+                                    inner_ids = step.get("task_ids", [])
+                                    b_size = step.get("batch_size")
+                                    tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
+                                    col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
+                                    for inner_id in inner_ids:
+                                        itask = task_id_map.get(int(inner_id))
+                                        if itask:
+                                            iagent = agent_id_map.get(itask['agent_id'])
+                                            i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                            i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                            col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                        else:
+                                            col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
+                            
+                                # Execution Level Selection
+                                step["execution_level"] = col_main.number_input("Level (Parallelism)", min_value=1, value=lvl, key=f"lvl_{step['id']}")
+                            
+                                # Dependency Selection
+                                possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids if prev_step["id"] != step["id"]}
+                                current_deps = step.get("depends_on", [])
+                                valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
+                            
+                                selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}", placeholder="No dependencies (Default)")
+                                step["depends_on"] = [possible_deps[label] for label in selected_labels]
+
+                                # Actions
+                                c_up, c_down, c_rem = col_main.columns(3)
+                                c_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,))
+                                c_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,))
+                                c_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,))
+            st.markdown("---")
+            if editing_workflow:
+                col_save, col_cancel = st.columns([1, 1])
+                with col_save:
+                    if st.button("💾 Update Workflow", type="primary", use_container_width=True):
+                        sane_workflow_name = sanitize_input(workflow_name)
+                        if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
+                            st.error("Workflow Name and at least one Task are required.")
+                        else:
+                            db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
+                            st.success(f"Workflow '{sane_workflow_name}' updated successfully!")
+                            st.session_state.editing_workflow_id = None
+                            if 'last_editing_workflow_id' in st.session_state:
+                                del st.session_state.last_editing_workflow_id
+                            if 'wf_selected_task_ids' in st.session_state:
+                                del st.session_state.wf_selected_task_ids
+                            if 'wf_name_input' in st.session_state:
+                                del st.session_state.wf_name_input
+                            if 'wf_human_check' in st.session_state:
+                                del st.session_state.wf_human_check
+                            if 'wf_expected_exports' in st.session_state:
+                                del st.session_state.wf_expected_exports
+                            if 'wf_export_instructions' in st.session_state:
+                                del st.session_state.wf_export_instructions
+                            for k in list(st.session_state.keys()):
+                                if k.startswith("wf_check_"):
+                                    del st.session_state[k]
+                            st.rerun()
+                with col_cancel:
+                    if st.button("❌ Cancel Edit", use_container_width=True):
                         st.session_state.editing_workflow_id = None
                         if 'last_editing_workflow_id' in st.session_state:
                             del st.session_state.last_editing_workflow_id
@@ -2476,275 +2504,256 @@ div[data-testid="stElementContainer"]:has(.task-text-marker) + div[data-testid="
                             if k.startswith("wf_check_"):
                                 del st.session_state[k]
                         st.rerun()
-            with col_cancel:
-                if st.button("❌ Cancel Edit", use_container_width=True):
-                    st.session_state.editing_workflow_id = None
-                    if 'last_editing_workflow_id' in st.session_state:
-                        del st.session_state.last_editing_workflow_id
-                    if 'wf_selected_task_ids' in st.session_state:
-                        del st.session_state.wf_selected_task_ids
-                    if 'wf_name_input' in st.session_state:
-                        del st.session_state.wf_name_input
-                    if 'wf_human_check' in st.session_state:
-                        del st.session_state.wf_human_check
-                    if 'wf_expected_exports' in st.session_state:
-                        del st.session_state.wf_expected_exports
-                    if 'wf_export_instructions' in st.session_state:
-                        del st.session_state.wf_export_instructions
-                    for k in list(st.session_state.keys()):
-                        if k.startswith("wf_check_"):
-                            del st.session_state[k]
-                    st.rerun()
-        else:
-            if st.button("💾 Save Workflow", type="primary", use_container_width=True):
-                sane_workflow_name = sanitize_input(workflow_name)
-                if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
-                    st.error("Workflow Name and at least one Task are required.")
-                else:
-                    db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
-                    st.success(f"Workflow '{sane_workflow_name}' created successfully!")
-                    if 'wf_selected_task_ids' in st.session_state:
-                        del st.session_state.wf_selected_task_ids
-                    if 'wf_name_input' in st.session_state:
-                        del st.session_state.wf_name_input
-                    if 'wf_human_check' in st.session_state:
-                        del st.session_state.wf_human_check
-                    if 'wf_expected_exports' in st.session_state:
-                        del st.session_state.wf_expected_exports
-                    if 'wf_export_instructions' in st.session_state:
-                        del st.session_state.wf_export_instructions
-                    for k in list(st.session_state.keys()):
-                        if k.startswith("wf_check_"):
-                            del st.session_state[k]
-                    st.rerun()
+            else:
+                if st.button("💾 Save Workflow", type="primary", use_container_width=True):
+                    sane_workflow_name = sanitize_input(workflow_name)
+                    if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
+                        st.error("Workflow Name and at least one Task are required.")
+                    else:
+                        db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
+                        st.success(f"Workflow '{sane_workflow_name}' created successfully!")
+                        if 'wf_selected_task_ids' in st.session_state:
+                            del st.session_state.wf_selected_task_ids
+                        if 'wf_name_input' in st.session_state:
+                            del st.session_state.wf_name_input
+                        if 'wf_human_check' in st.session_state:
+                            del st.session_state.wf_human_check
+                        if 'wf_expected_exports' in st.session_state:
+                            del st.session_state.wf_expected_exports
+                        if 'wf_export_instructions' in st.session_state:
+                            del st.session_state.wf_export_instructions
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("wf_check_"):
+                                del st.session_state[k]
+                        st.rerun()
 
-    st.divider()
-    st.subheader("Saved Workflows")
-    if not workflows:
-        st.info("No workflows created yet. Use the form above to add one.")
-    else:
-        agents = db.read_all_agents()
-        agent_id_map = {agent['id']: agent for agent in agents}
+        st.divider()
+        st.subheader("Saved Workflows")
+        if not workflows:
+            st.info("No workflows created yet. Use the form above to add one.")
+        else:
+            agents = db.read_all_agents()
+            agent_id_map = {agent['id']: agent for agent in agents}
         
-        for workflow in workflows:
-            wf_label = f"**Workflow:** {workflow['name']}"
-            if workflow.get('has_deletion_warning'):
-                wf_label += " ⚠️ **(one or more task deleted)**"
-            
-            with st.expander(wf_label):
+            for workflow in workflows:
+                wf_label = f"**Workflow:** {workflow['name']}"
                 if workflow.get('has_deletion_warning'):
-                    st.warning("One or more tasks previously associated with this workflow have been deleted. The workflow has been updated to remove them.")
-                    if st.button("Dismiss Warning", key=f"dismiss_wf_warn_{workflow['id']}", use_container_width=True):
-                        db.dismiss_workflow_warning(workflow['id'])
-                        st.rerun()
-                
-                # The db_manager processes task_ids_json into task_ids list automatically
-                task_ids = workflow.get('task_ids', [])
-                st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
-                # Grouping by execution level
-                levels = sorted(list(set(step.get("execution_level", 1) if isinstance(step, dict) else 1 for step in task_ids)))
-                if not levels:
-                    levels = [1]
-                    
-                st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
-                st.markdown("""
-                <style>
-                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
-                    flex-wrap: nowrap !important;
-                    overflow-x: auto !important;
-                    padding-bottom: 10px !important;
-                }
-                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                    min-width: 350px !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-                
-                level_columns = st.columns(len(levels))
-                
-                for lvl_idx, lvl in enumerate(levels):
-                    with level_columns[lvl_idx]:
-                        st.markdown(f"### 📍 Livello {lvl}")
-                        
-                        for i, step in enumerate(task_ids):
-                            exec_lvl = step.get("execution_level", 1) if isinstance(step, dict) else 1
-                            if exec_lvl != lvl:
-                                continue
-                                
-                            with st.container(border=True):
-                                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                                if not is_batch:
-                                    task_id = step if isinstance(step, int) else step.get("task_id")
-                                    task = task_id_map.get(int(task_id))
-                                    if task:
-                                        agent = agent_id_map.get(task['agent_id'])
-                                        col_avatar, col_text = st.columns([1, 6])
-                                        with col_avatar:
-                                            if agent:
-                                                st.image(get_agent_avatar_url(agent), use_container_width=True)
-                                            else:
-                                                st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
-                                        with col_text:
-                                            t_name_display = task.get('name') or f"Task #{task['id']}"
-                                            node_id = step.get('id', 'N/A') if isinstance(step, dict) else 'N/A'
-                                            deps = step.get('depends_on', []) if isinstance(step, dict) else []
-                                            deps_str = f" **(Depends on: {', '.join(deps)})**" if deps else ""
-                                            tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
-                                            st.markdown(f"🚀 **{t_name_display}** {tooltip_html}{deps_str}<br><sub>{task['description']}</sub>", unsafe_allow_html=True)
-                                            if task.get('human_validation'):
-                                                st.markdown("✋ **Human Validation Checkpoint**")
-                                    else:
-                                        st.error(f"Step {i+1}: Task ID {task_id} not found")
-                                else:
-                                    inner_ids = step.get("task_ids", [])
-                                    b_size = step.get("batch_size")
-                                    node_id = step.get('id', 'N/A')
-                                    tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
-                                    st.markdown(f"**Step {i+1}** | 🔄 **Batch Loop** {tooltip_html} | Chunk Size: {b_size}, Source: `{step.get('source_variable')}`", unsafe_allow_html=True)
-                                    for inner_id in inner_ids:
-                                        itask = task_id_map.get(int(inner_id))
-                                        if itask:
-                                            iagent = agent_id_map.get(itask['agent_id'])
-                                            i_aname = iagent['name'] if iagent else "Unknown Agent"
-                                            i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
-                                        else:
-                                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
-                
-                # --- ARCHITECTURAL MANDATE M1_T3-A2 & M1_T3-A3: Secure Export Logic ---
-                # 1. Construct the data structure for YAML in-memory
-                export_data = {'workflow': {'name': workflow['name'], 'tasks': []}}
-                for step in task_ids:
-                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                    if not is_batch:
-                        task_id = step if isinstance(step, int) else step.get("task_id")
-                        task = task_id_map.get(int(task_id))
-                        if task:
-                            agent = agent_id_map.get(task['agent_id'])
-                            task_data = {
-                                'name': task.get('name') or f"Task #{task['id']}",
-                                'description': task['description'],
-                                'expected_output': task['expected_output'],
-                                'agent': agent['name'] if agent else 'Unknown Agent'
-                            }
-                            export_data['workflow']['tasks'].append(task_data)
-                    else:
-                        batch_info = {
-                            'type': 'batch_loop',
-                            'batch_size': step.get('batch_size'),
-                            'source_variable': step.get('source_variable'),
-                            'tasks': []
-                        }
-                        for inner_id in step.get("task_ids", []):
-                            itask = task_id_map.get(int(inner_id))
-                            if itask:
-                                iagent = agent_id_map.get(itask['agent_id'])
-                                task_data = {
-                                    'name': itask.get('name') or f"Task #{itask['id']}",
-                                    'description': itask['description'],
-                                    'expected_output': itask['expected_output'],
-                                    'agent': iagent['name'] if iagent else 'Unknown Agent'
-                                }
-                                batch_info['tasks'].append(task_data)
-                        export_data['workflow']['tasks'].append(batch_info)
-                # 2. Generate YAML string in-memory. NOTE: yaml.dump is safe for exporting.
-                yaml_string = yaml.dump(export_data, sort_keys=False, indent=2)
-                
-                # 3. Sanitize filename and provide download button
-                safe_filename = f"{sanitize_filename(workflow['name'])}.yaml"
-                
-                col_del, col_edit, col_export = st.columns([1, 1, 2])
-                with col_edit:
-                    if st.button("Edit", key=f"edit_wf_{workflow['id']}", use_container_width=True):
-                        st.session_state.editing_workflow_id = workflow['id']
-                        if 'last_editing_workflow_id' in st.session_state:
-                            del st.session_state.last_editing_workflow_id
-                        st.rerun()
-                with col_del:
-                    with st.popover("Delete", use_container_width=True):
-                        st.markdown("Are you sure?")
-                        if st.button("Yes", key=f"yes_del_wf_{workflow['id']}", type="primary", use_container_width=True):
-                            db.delete_workflow(workflow['id'])
-                            st.toast(f"Deleted workflow {workflow['name']}", icon="🗑️")
-                            if st.session_state.get('editing_workflow_id') == workflow['id']:
-                                st.session_state.editing_workflow_id = None
-                                if 'last_editing_workflow_id' in st.session_state:
-                                    del st.session_state.last_editing_workflow_id
+                    wf_label += " ⚠️ **(one or more task deleted)**"
+            
+                with st.expander(wf_label):
+                    if workflow.get('has_deletion_warning'):
+                        st.warning("One or more tasks previously associated with this workflow have been deleted. The workflow has been updated to remove them.")
+                        if st.button("Dismiss Warning", key=f"dismiss_wf_warn_{workflow['id']}", use_container_width=True):
+                            db.dismiss_workflow_warning(workflow['id'])
                             st.rerun()
-                with col_export:
-                    st.download_button(
-                        label="Export to YAML",
-                        data=yaml_string.encode('utf-8'),
-                        file_name=safe_filename,
-                        mime="application/x-yaml",
-                        key=f"export_wf_{workflow['id']}",
-                        use_container_width=True
-                    )
-
-    st.divider()
-    st.subheader("🧪 Live System Test")
-    st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**.")
-    
-    test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
-    
-    if st.button("🚀 Execute Integration Test", type="primary"):
-        if not test_prompt:
-            st.error("Please enter a prompt.")
-        else:
-            with st.status("Running Integration Test...", expanded=True) as status:
-                try:
-                    # 1. Master AI Routing
-                    st.write("🧠 **Master AI** is analyzing the intent...")
-                    master = MasterAI()
-                    routing = master.evaluate_intent(test_prompt)
-                    st.json(routing)
+                
+                    # The db_manager processes task_ids_json into task_ids list automatically
+                    task_ids = workflow.get('task_ids', [])
+                    st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
+                    # Grouping by execution level
+                    levels = sorted(list(set(step.get("execution_level", 1) if isinstance(step, dict) else 1 for step in task_ids)))
+                    if not levels:
+                        levels = [1]
                     
-                    if routing.get('status') == 'success' and routing.get('workflow_id'):
-                        wf_id = routing['workflow_id']
-                        st.write(f"✅ Route found: **Workflow ID {wf_id}**")
+                    st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
+                    st.markdown("""
+                    <style>
+                    div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
+                        flex-wrap: nowrap !important;
+                        overflow-x: auto !important;
+                        padding-bottom: 10px !important;
+                    }
+                    div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                        min-width: 350px !important;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                
+                    level_columns = st.columns(len(levels))
+                
+                    for lvl_idx, lvl in enumerate(levels):
+                        with level_columns[lvl_idx]:
+                            st.markdown(f"### 📍 Livello {lvl}")
                         
-                        # 2. Crew Building
-                        st.write("🛠️ **Crew Builder** is assembling the agents...")
-                        crew = build_crew(wf_id)
+                            for i, step in enumerate(task_ids):
+                                exec_lvl = step.get("execution_level", 1) if isinstance(step, dict) else 1
+                                if exec_lvl != lvl:
+                                    continue
+                                
+                                with st.container(border=True):
+                                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                                    if not is_batch:
+                                        task_id = step if isinstance(step, int) else step.get("task_id")
+                                        task = task_id_map.get(int(task_id))
+                                        if task:
+                                            agent = agent_id_map.get(task['agent_id'])
+                                            col_avatar, col_text = st.columns([1, 6])
+                                            with col_avatar:
+                                                if agent:
+                                                    st.image(get_agent_avatar_url(agent), use_container_width=True)
+                                                else:
+                                                    st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                                            with col_text:
+                                                t_name_display = task.get('name') or f"Task #{task['id']}"
+                                                node_id = step.get('id', 'N/A') if isinstance(step, dict) else 'N/A'
+                                                deps = step.get('depends_on', []) if isinstance(step, dict) else []
+                                                deps_str = f" **(Depends on: {', '.join(deps)})**" if deps else ""
+                                                tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
+                                                st.markdown(f"🚀 **{t_name_display}** {tooltip_html}{deps_str}<br><sub>{task['description']}</sub>", unsafe_allow_html=True)
+                                                if task.get('human_validation'):
+                                                    st.markdown("✋ **Human Validation Checkpoint**")
+                                        else:
+                                            st.error(f"Step {i+1}: Task ID {task_id} not found")
+                                    else:
+                                        inner_ids = step.get("task_ids", [])
+                                        b_size = step.get("batch_size")
+                                        node_id = step.get('id', 'N/A')
+                                        tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
+                                        st.markdown(f"**Step {i+1}** | 🔄 **Batch Loop** {tooltip_html} | Chunk Size: {b_size}, Source: `{step.get('source_variable')}`", unsafe_allow_html=True)
+                                        for inner_id in inner_ids:
+                                            itask = task_id_map.get(int(inner_id))
+                                            if itask:
+                                                iagent = agent_id_map.get(itask['agent_id'])
+                                                i_aname = iagent['name'] if iagent else "Unknown Agent"
+                                                i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                            else:
+                                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
+                
+                    # --- ARCHITECTURAL MANDATE M1_T3-A2 & M1_T3-A3: Secure Export Logic ---
+                    # 1. Construct the data structure for YAML in-memory
+                    export_data = {'workflow': {'name': workflow['name'], 'tasks': []}}
+                    for step in task_ids:
+                        is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                        if not is_batch:
+                            task_id = step if isinstance(step, int) else step.get("task_id")
+                            task = task_id_map.get(int(task_id))
+                            if task:
+                                agent = agent_id_map.get(task['agent_id'])
+                                task_data = {
+                                    'name': task.get('name') or f"Task #{task['id']}",
+                                    'description': task['description'],
+                                    'expected_output': task['expected_output'],
+                                    'agent': agent['name'] if agent else 'Unknown Agent'
+                                }
+                                export_data['workflow']['tasks'].append(task_data)
+                        else:
+                            batch_info = {
+                                'type': 'batch_loop',
+                                'batch_size': step.get('batch_size'),
+                                'source_variable': step.get('source_variable'),
+                                'tasks': []
+                            }
+                            for inner_id in step.get("task_ids", []):
+                                itask = task_id_map.get(int(inner_id))
+                                if itask:
+                                    iagent = agent_id_map.get(itask['agent_id'])
+                                    task_data = {
+                                        'name': itask.get('name') or f"Task #{itask['id']}",
+                                        'description': itask['description'],
+                                        'expected_output': itask['expected_output'],
+                                        'agent': iagent['name'] if iagent else 'Unknown Agent'
+                                    }
+                                    batch_info['tasks'].append(task_data)
+                            export_data['workflow']['tasks'].append(batch_info)
+                    # 2. Generate YAML string in-memory. NOTE: yaml.dump is safe for exporting.
+                    yaml_string = yaml.dump(export_data, sort_keys=False, indent=2)
+                
+                    # 3. Sanitize filename and provide download button
+                    safe_filename = f"{sanitize_filename(workflow['name'])}.yaml"
+                
+                    col_del, col_edit, col_export = st.columns([1, 1, 2])
+                    with col_edit:
+                        if st.button("Edit", key=f"edit_wf_{workflow['id']}", use_container_width=True):
+                            st.session_state.editing_workflow_id = workflow['id']
+                            if 'last_editing_workflow_id' in st.session_state:
+                                del st.session_state.last_editing_workflow_id
+                            st.rerun()
+                    with col_del:
+                        with st.popover("Delete", use_container_width=True):
+                            st.markdown("Are you sure?")
+                            if st.button("Yes", key=f"yes_del_wf_{workflow['id']}", type="primary", use_container_width=True):
+                                db.delete_workflow(workflow['id'])
+                                st.toast(f"Deleted workflow {workflow['name']}", icon="🗑️")
+                                if st.session_state.get('editing_workflow_id') == workflow['id']:
+                                    st.session_state.editing_workflow_id = None
+                                    if 'last_editing_workflow_id' in st.session_state:
+                                        del st.session_state.last_editing_workflow_id
+                                st.rerun()
+                    with col_export:
+                        st.download_button(
+                            label="Export to YAML",
+                            data=yaml_string.encode('utf-8'),
+                            file_name=safe_filename,
+                            mime="application/x-yaml",
+                            key=f"export_wf_{workflow['id']}",
+                            use_container_width=True
+                        )
+
+    with tab_test:
+        st.subheader("🧪 Live System Test")
+        st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**.")
+    
+        test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
+    
+        if st.button("🚀 Execute Integration Test", type="primary"):
+            if not test_prompt:
+                st.error("Please enter a prompt.")
+            else:
+                with st.status("Running Integration Test...", expanded=True) as status:
+                    try:
+                        # 1. Master AI Routing
+                        st.write("🧠 **Master AI** is analyzing the intent...")
+                        master = MasterAI()
+                        routing = master.evaluate_intent(test_prompt)
+                        st.json(routing)
+                    
+                        if routing.get('status') == 'success' and routing.get('workflow_id'):
+                            wf_id = routing['workflow_id']
+                            st.write(f"✅ Route found: **Workflow ID {wf_id}**")
                         
-                        # 3. Execution
-                        st.write("⚡ **Executing Workflow...**")
-                        # Pass extracted params if available, otherwise raw prompt
-                        inputs = routing.get('extracted_params', {})
-                        # Create a run record with inputs
-                        run_id = db.create_run(wf_id, status='running', inputs=inputs)
+                            # 2. Crew Building
+                            st.write("🛠️ **Crew Builder** is assembling the agents...")
+                            crew = build_crew(wf_id)
                         
-                        try:
-                            from core.crew_builder import execute_run_with_resume
-                            result = execute_run_with_resume(
-                                run_id, 
-                                status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
-                            )
+                            # 3. Execution
+                            st.write("⚡ **Executing Workflow...**")
+                            # Pass extracted params if available, otherwise raw prompt
+                            inputs = routing.get('extracted_params', {})
+                            # Create a run record with inputs
+                            run_id = db.create_run(wf_id, status='running', inputs=inputs)
+                        
+                            try:
+                                from core.crew_builder import execute_run_with_resume
+                                result = execute_run_with_resume(
+                                    run_id, 
+                                    status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
+                                )
                             
-                            # Update run record
-                            db.update_run(run_id, status='completed', result=str(result))
+                                # Update run record
+                                db.update_run(run_id, status='completed', result=str(result))
 
-                            # Send notification
-                            notifier = NotificationManager()
-                            workflow = db.read_workflow(wf_id)
-                            wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
-                            notifier.notify_workflow_completion(wf_name, result)
+                                # Send notification
+                                notifier = NotificationManager()
+                                workflow = db.read_workflow(wf_id)
+                                wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
+                                notifier.notify_workflow_completion(wf_name, result)
 
-                            st.success("✅ Execution Complete!")
-                            st.markdown("### Final Output")
-                            st.markdown(str(result))
-                        except Exception as e:
-                            db.update_run(run_id, status='failed', result=str(e))
-                            raise e
-                    else:
-                        st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
+                                st.success("✅ Execution Complete!")
+                                st.markdown("### Final Output")
+                                st.markdown(str(result))
+                            except Exception as e:
+                                db.update_run(run_id, status='failed', result=str(e))
+                                raise e
+                        else:
+                            st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
                     
-                    status.update(label="Test Finished", state="complete")
-                except Exception as e:
-                    st.error(f"❌ Error during test: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
-                    status.update(label="Test Failed", state="error")
+                        status.update(label="Test Finished", state="complete")
+                    except Exception as e:
+                        st.error(f"❌ Error during test: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                        status.update(label="Test Failed", state="error")
 
 
 
@@ -3346,8 +3355,11 @@ def main():
             st.markdown(f"{ids_status} **Allowed User IDs**")
             
             with st.form("telegram_vault_form_standalone"):
-                new_tg_token = st.text_input("Telegram Bot Token", type="password", value=tg_token, placeholder="123456789:ABCDEF...")
-                new_tg_ids = st.text_input("Allowed User IDs", value=tg_ids, placeholder="e.g. 123456789, 987654321")
+                token_placeholder = "Saved (enter new to overwrite)" if tg_token.strip() else "123456789:ABCDEF..."
+                ids_placeholder = "Saved (enter new to overwrite)" if tg_ids.strip() else "e.g. 123456789, 987654321"
+                
+                new_tg_token = st.text_input("Telegram Bot Token", type="password", value="", placeholder=token_placeholder)
+                new_tg_ids = st.text_input("Allowed User IDs", type="password", value="", placeholder=ids_placeholder)
                 st.caption("IDs must be comma-separated integers.")
                 
                 if st.form_submit_button("Save Telegram Config"):
@@ -3384,21 +3396,21 @@ def main():
             st.exception(e)
 
     def page_task_builder():
-        st.subheader("🗄️ Knowledge Base")
-        try:
-            render_knowledge_base()
-        except Exception as e:
-            st.error(f"Errore nel caricamento del Database: {e}")
-            st.exception(e)
-            
-        st.divider()
+        tab_kb, tab_builder = st.tabs(["Knowledge Base", "Task Builder"])
         
-        st.subheader("📋 Task Builder")
-        try:
-            render_task_builder()
-        except Exception as e:
-            st.error(f"Errore nel caricamento di Task Builder: {e}")
-            st.exception(e)
+        with tab_kb:
+            try:
+                render_knowledge_base()
+            except Exception as e:
+                st.error(f"Errore nel caricamento del Database: {e}")
+                st.exception(e)
+                
+        with tab_builder:
+            try:
+                render_task_builder()
+            except Exception as e:
+                st.error(f"Errore nel caricamento di Task Builder: {e}")
+                st.exception(e)
 
     def page_workflow_assembler():
         try:
