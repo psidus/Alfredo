@@ -3221,43 +3221,42 @@ def main():
         st.divider()
         st.info("The configuration is saved directly to your SQLite database.")
 
-    # --- CSS for guide robot button (injected before columns to avoid layout shift) ---
-    st.markdown("""
-    <style>
-    /* Guide 🤖 button: target only the primary button in the header */
-    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"] {
-        height: auto !important;
-        min-height: 58px !important;
-        padding: 2px !important;
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        cursor: pointer !important;
-        color: inherit !important;
-    }
-    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"]:hover {
-        background: rgba(128,128,128,0.1) !important;
-        border-radius: 12px !important;
-        transition: all 0.2s ease;
-    }
-    [data-testid="stHorizontalBlock"] .stButton button[kind="primary"] p {
-        font-size: 2.8rem !important;
-        line-height: 1 !important;
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
     # --- Header with Right Popovers ---
     col_title, col_tools = st.columns([7, 3])
     with col_title:
         t_col1, t_col2 = st.columns([0.08, 0.92], vertical_alignment="center")
         with t_col1:
-            if st.button("🤖", type="primary", use_container_width=True):
+            if st.button("🤖", use_container_width=True):
                 show_guide()
         with t_col2:
-            st.markdown("<h1 style='margin-top: -18px;'>AI Workflow Configurator</h1>", unsafe_allow_html=True)
+            st.markdown("""
+            <div class='robot-marker'></div>
+            <style>
+            /* Target exactly the column IMMEDIATELY PRECEDING the column with .robot-marker */
+            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button {
+                height: auto !important;
+                min-height: 58px !important;
+                padding: 2px !important;
+                background: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
+                cursor: pointer !important;
+                color: inherit !important;
+            }
+            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button:hover {
+                background: rgba(128,128,128,0.1) !important;
+                border-radius: 12px !important;
+                transition: all 0.2s ease;
+            }
+            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button p {
+                font-size: 2.8rem !important;
+                line-height: 1 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+            </style>
+            <h1 style='margin-top: -18px;'>AI Workflow Configurator</h1>
+            """, unsafe_allow_html=True)
             
         st.caption("A secure dashboard for building and managing AI agent workflows.")
         
