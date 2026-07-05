@@ -18,6 +18,7 @@ services:
       - ./storage:/app/storage
       - ./ui:/app/ui
       - ./core:/app/core
+      - ./config:/app/config
       - ./.env:/app/.env
     restart: unless-stopped
 
@@ -38,6 +39,7 @@ services:
       - ./storage:/app/storage
       - ./ui:/app/ui
       - ./core:/app/core
+      - ./config:/app/config
       - ./sdk:/app/sdk
       - ./.env:/app/.env
     restart: unless-stopped

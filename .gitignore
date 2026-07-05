@@ -42,6 +42,9 @@ prd.json
 rapid_prompt.txt
 storage/vector_dbs_test/
 workspace/
+venv_rag/
+start_marker_gpu.bat
+config/advanced_rag_setup.json
 test_*.txt
 test_*.py
 fix_*.py

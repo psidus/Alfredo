@@ -17,6 +17,8 @@ langchain-google-genai
 duckduckgo-search>=5.1.0
 requests
 langchain-chroma
+langchain-qdrant
+qdrant-client
 python-docx
 openpyxl
 mss

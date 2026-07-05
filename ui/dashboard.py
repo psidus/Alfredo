@@ -619,7 +619,55 @@ def render_knowledge_base():
             # --- Scientific RAG Parameters ---
             scientific_mode = st.checkbox("🧪 Enable Scientific RAG (Advanced Agentic Ingestion)", help="Use VLMs to extract and describe graphs, tables, and P&ID drawings intelligently.")
             scientific_config = {}
+            
+            # Check setup status
+            marker_setup_done = False
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_path = os.path.join(base_dir, "config", "advanced_rag_setup.json")
+            if os.path.exists(config_path):
+                try:
+                    import json
+                    with open(config_path, "r") as f:
+                        cfg = json.load(f)
+                        marker_setup_done = cfg.get("marker_ready", False)
+                except Exception:
+                    pass
+
             if scientific_mode:
+                if not marker_setup_done:
+                    st.info("🚀 **Advanced RAG Setup (Marker GPU & Qdrant)**\n\n"
+                            "Marker provides lightning-fast GPU-accelerated PDF parsing, while Qdrant provides a high-performance scalable vector storage.\n"
+                            "These require a one-time setup (downloading PyTorch CUDA and Docker Qdrant).")
+                    if st.button("Download & Setup Dependencies"):
+                        with st.spinner("Setting up Marker and Qdrant... (this may take several minutes)"):
+                            import subprocess
+                            import sys
+                            setup_script = os.path.join(base_dir, "tools", "setup_advanced_rag.py")
+                            try:
+                                subprocess.run([sys.executable, setup_script], check=True)
+                                st.success("Setup complete! Please interact with the app to refresh.")
+                                st.rerun()
+                            except subprocess.CalledProcessError:
+                                st.error("Setup failed. Check the console for details.")
+                    scientific_config["parser"] = "pdfplumber"
+                    scientific_config["vectordb"] = "chroma"
+                else:
+                    st.success("✅ Marker GPU and Qdrant are ready.")
+                    col_p, col_v = st.columns(2)
+                    with col_p:
+                        parser_choice = st.selectbox("📄 PDF Parser", ["Marker (GPU Accelerated)", "Marker + VLM (Maximum Quality)", "pdfplumber (Fallback)"], index=0)
+                    with col_v:
+                        vectordb_choice = st.selectbox("🗄️ Vector Database", ["Qdrant (Scalable Server)", "Chroma (Local File)"], index=0)
+                        
+                    scientific_config["vectordb"] = "qdrant" if vectordb_choice.startswith("Qdrant") else "chroma"
+                    
+                    if parser_choice.startswith("Marker + VLM"):
+                        scientific_config["parser"] = "marker_vlm"
+                    elif parser_choice.startswith("Marker"):
+                        scientific_config["parser"] = "marker"
+                    else:
+                        scientific_config["parser"] = "pdfplumber"
+
                 st.markdown("Configure specific **Vision-capable** models for scientific parsing:")
                 
                 # ── Curated Vision Model Pools (role-specific) ──

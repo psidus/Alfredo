@@ -15,17 +15,19 @@ from litellm import completion
 logger = logging.getLogger(__name__)
 
 class ScientificParser:
-    def __init__(self, models_config: Dict[str, str], graph_points: int = 10, db_path: str = None):
+    def __init__(self, models_config: Dict[str, str], graph_points: int = 10, db_path: str = None, parser_type: str = "pdfplumber"):
         """
         Args:
             models_config: Dictionary mapping roles to model names.
                            e.g., {"graphs": "gpt-4o", "tables": "claude-3-5-sonnet-20240620", "drawings": "gemini/gemini-1.5-pro"}
             graph_points: Number of data points to extract from graphs.
-            db_path: Path to the ChromaDB directory (used to save structured CSVs).
+            db_path: Path to the ChromaDB/Qdrant directory (used to save structured CSVs).
+            parser_type: "pdfplumber" or "marker"
         """
         self.models_config = models_config
         self.graph_points = graph_points
         self.db_path = db_path
+        self.parser_type = parser_type
         
     def _encode_image(self, pil_img: Image.Image) -> str:
         """Convert PIL Image to base64 string for VLM API."""
@@ -166,9 +168,29 @@ class ScientificParser:
         Replaces complex objects with VLM-generated semantic descriptions.
         Returns a list of LangChain Documents (one per page or major chunk).
         """
-        logger.info(f"Starting Scientific RAG parsing for {file_path}")
-        documents = []
+        logger.info(f"Starting Scientific RAG parsing for {file_path} using {self.parser_type}")
         
+        documents = []
+        skip_text_extraction = False
+        
+        if self.parser_type in ["marker", "marker_vlm"]:
+            try:
+                from core.marker_parser import MarkerParser
+                marker_parser = MarkerParser(db_path=self.db_path)
+                docs = marker_parser.parse_pdf(file_path)
+                if docs:
+                    if self.parser_type == "marker":
+                        return docs
+                    else:
+                        documents.extend(docs)
+                        skip_text_extraction = True
+                else:
+                    logger.warning(f"Marker returned no documents for {file_path}. Falling back to pdfplumber.")
+            except ImportError as e:
+                logger.error(f"Could not import MarkerParser: {e}. Falling back to pdfplumber.")
+            except Exception as e:
+                logger.error(f"Marker parser failed: {e}. Falling back to pdfplumber.")
+
         try:
             with pdfplumber.open(file_path) as pdf:
                 for i, page in enumerate(pdf.pages):
@@ -178,12 +200,12 @@ class ScientificParser:
                     # 1. Extract raw text
                     text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
                     
+                    if skip_text_extraction:
+                        enriched_text = "" # Text already extracted by Marker
+                    else:
+                        enriched_text = text + "\n\n"
+                    
                     # 2. Extract images/figures
-                    # pdfplumber finds images in page.images
-                    # We will crop them from the page to send to VLMs
-                    
-                    enriched_text = text + "\n\n"
-                    
                     if page.images:
                         logger.info(f"Found {len(page.images)} images on page {page_num}.")
                         for j, img_obj in enumerate(page.images):
@@ -196,18 +218,6 @@ class ScientificParser:
                                 
                                 # Crop the image from the page as a PIL Image
                                 cropped = page.crop((x0, top, x1, bottom)).to_image(resolution=150).original
-                                
-                                # --- Basic Heuristics for Classification ---
-                                # In a real advanced system we might use an object detection model like LayoutLMv3.
-                                # Here we rely on aspect ratio, size, or surrounding text, or just prompt a smart VLM.
-                                # For demonstration, we'll try to infer from text or let the user choose.
-                                # Let's assume we ask a lightweight model to classify, or we just pass it to 
-                                # the drawing model by default unless we detect 'table' or 'graph' nearby.
-                                
-                                # Simple heuristic: if we find axis lines, it's a graph. If we find grid, it's a table.
-                                # For this implementation, we will pass to a classifier prompt or use 'graphs' if uncertain.
-                                # To save time/tokens, we just classify as "drawing" and let the prompt figure it out,
-                                # OR we could use a single VLM call to classify. Let's do a fast heuristic:
                                 
                                 obj_type = "drawings" # default
                                 context_text = text.lower()
@@ -240,7 +250,7 @@ class ScientificParser:
                         documents.append(
                             Document(
                                 page_content=enriched_text,
-                                metadata={"source": file_path, "page": page_num, "scientific_rag": True}
+                                metadata={"source": file_path, "page": page_num, "scientific_rag": True, "type": "vlm_extraction" if skip_text_extraction else "full_page"}
                             )
                         )
                         

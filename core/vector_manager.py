@@ -8,8 +8,13 @@ from typing import List, Dict, Any, Optional, Callable
 
 import pandas as pd
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownTextSplitter
 from langchain_chroma import Chroma
+import requests
+try:
+    from langchain_qdrant import QdrantVectorStore
+except ImportError:
+    pass
 
 # Embedding imports
 from langchain_openai import OpenAIEmbeddings
@@ -38,6 +43,18 @@ class VectorManager:
         self.storage_dir = storage_dir
         os.makedirs(self.storage_dir, exist_ok=True)
         
+
+    def _get_qdrant_client_params(self, db_name: str):
+        """Check if Docker Qdrant is available, otherwise fallback to local path."""
+        url = "http://localhost:6333"
+        try:
+            response = requests.get(url, timeout=1)
+            if response.status_code == 200:
+                return {"url": url, "collection_name": db_name}
+        except Exception:
+            pass
+        return {"path": os.path.join(self.storage_dir, "qdrant_local"), "collection_name": db_name}
+
     def _get_embedding_function(self, provider: str, model_name: str) -> Any:
         """
         Instantiates the appropriate embedding function based on the provider.
@@ -111,7 +128,8 @@ class VectorManager:
         db_path: str,
         batch_size: int = DEFAULT_BATCH_SIZE,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-        existing_db: bool = False
+        existing_db: bool = False,
+        vectordb_type: str = "chroma"
     ) -> Dict[str, Any]:
         """
         Embeds chunks into ChromaDB in batches with automatic retry and exponential backoff.
@@ -146,26 +164,25 @@ class VectorManager:
             success = False
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
+
                     if vector_store is None:
-                        if db_initialized:
-                            # Reconnect to existing ChromaDB after a DB error reset
-                            logging.info(f"🔄 Reconnecting to ChromaDB at {db_path}...")
-                            vector_store = Chroma(
-                                persist_directory=db_path,
-                                embedding_function=embedding_function
-                            )
+                        if vectordb_type == "qdrant":
+                            db_name = os.path.basename(db_path)
+                            qdrant_params = self._get_qdrant_client_params(db_name)
+                            vector_store = QdrantVectorStore(embedding=embedding_function, **qdrant_params)
                             vector_store.add_documents(batch)
-                        else:
-                            # First batch ever: create the store
-                            vector_store = Chroma.from_documents(
-                                documents=batch,
-                                embedding=embedding_function,
-                                persist_directory=db_path
-                            )
                             db_initialized = True
+                        else:
+                            if db_initialized:
+                                logging.info(f"🔄 Reconnecting to ChromaDB at {db_path}...")
+                                vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
+                                vector_store.add_documents(batch)
+                            else:
+                                vector_store = Chroma.from_documents(documents=batch, embedding=embedding_function, persist_directory=db_path)
+                                db_initialized = True
                     else:
-                        # Normal path: add to existing in-memory store
                         vector_store.add_documents(batch)
+
 
                     embedded_count += len(batch)
                     logging.info(f"✅ {batch_label} embedded successfully ({embedded_count}/{total_chunks} total)")
@@ -338,6 +355,8 @@ class VectorManager:
         return df
 
     def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None, scientific_mode: bool = False, scientific_config: Dict[str, Any] = None) -> Dict[str, Any]:
+        if scientific_config is None:
+            scientific_config = {}
         """
         Creates a new vector database from a list of files with customizable chunking.
         Excel/CSV files are NOT vectorized — they are cleaned and saved as CSVs in a
@@ -367,7 +386,8 @@ class VectorManager:
                     "chunk_size": chunk_size,
                     "chunk_overlap": chunk_overlap,
                     "provider": provider,
-                    "model_name": model_name
+                    "model_name": model_name,
+                    "vectordb": scientific_config.get("vectordb", "chroma")
                 }, f, indent=4)
         except Exception as e:
             logging.error(f"Could not save config.json to {db_path}: {e}")
@@ -412,7 +432,8 @@ class VectorManager:
             parser = ScientificParser(
                 models_config=scientific_config.get("models_config", {}),
                 graph_points=scientific_config.get("graph_points", 10),
-                db_path=db_path
+                db_path=db_path,
+                parser_type=scientific_config.get("parser", "pdfplumber")
             )
             documents = []
             load_skipped = []
@@ -448,7 +469,13 @@ class VectorManager:
         if progress_callback:
             progress_callback(0, 0, f"✂️ Splitting {len(documents)} document(s) into chunks...")
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        if scientific_mode:
+            # MarkdownTextSplitter is smarter for scientific mode since output is rich markdown
+            # It splits at markdown headers, code blocks, tables before splitting paragraphs
+            text_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        else:
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            
         chunks = text_splitter.split_documents(documents)
 
         if not chunks:
@@ -466,12 +493,14 @@ class VectorManager:
 
         # 5. Embed in batches with automatic retry
         logging.info(f"Starting batched embedding: {len(chunks)} chunks in batches of {batch_size}")
+        vectordb_type = scientific_config.get('vectordb', 'chroma')
         embed_result = self._embed_in_batches(
             chunks=chunks,
             embedding_function=embedding_function,
             db_path=db_path,
             batch_size=batch_size,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            vectordb_type=vectordb_type
         )
 
         embedded = embed_result["embedded_count"]
@@ -538,7 +567,17 @@ class VectorManager:
 
         try:
             embedding_function = self._get_embedding_function(provider, model_name)
-            vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
+            
+            # Check if Qdrant collection exists (by checking config or assuming Chroma fallback)
+            config = self.get_database_config(db_path)
+            vectordb_type = config.get("vectordb", "chroma")
+            
+            if vectordb_type == "qdrant":
+                db_name = os.path.basename(db_path)
+                qdrant_params = self._get_qdrant_client_params(db_name)
+                vector_store = QdrantVectorStore(embedding=embedding_function, **qdrant_params)
+            else:
+                vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
 
             results = vector_store.similarity_search(query, k=k)
 
@@ -573,31 +612,58 @@ class VectorManager:
             ])
             
         # 2. Vectorized files
-        chroma_db_file = os.path.join(db_path, "chroma.sqlite3")
-        if os.path.exists(chroma_db_file):
+        config = self.get_database_config(db_path)
+        vectordb_type = config.get("vectordb", "chroma")
+        
+        if vectordb_type == "qdrant":
             try:
-                import sqlite3
-                conn = sqlite3.connect(chroma_db_file)
-                cur = conn.cursor()
-                cur.execute("SELECT DISTINCT string_value FROM embedding_metadata WHERE key = 'source';")
-                sources = {row[0] for row in cur.fetchall() if row[0]}
-                conn.close()
+                from qdrant_client import QdrantClient
+                from qdrant_client.http.models import FieldCondition, MatchValue, Filter
+                db_name = os.path.basename(db_path)
+                params = self._get_qdrant_client_params(db_name)
+                
+                # Setup client
+                if "url" in params:
+                    client = QdrantClient(url=params["url"])
+                else:
+                    client = QdrantClient(path=params["path"])
+                
+                # Fetch distinct sources
+                res, _ = client.scroll(collection_name=db_name, limit=10000, with_payload=True, with_vectors=False)
+                sources = set()
+                for record in res:
+                    if record.payload and "metadata" in record.payload and "source" in record.payload["metadata"]:
+                        sources.add(record.payload["metadata"]["source"])
                 results['vectorized'] = sorted(list(sources))
             except Exception as e:
-                logging.warning(f"Failed to query unique sources via SQLite: {e}. Falling back to LangChain vector_store.get")
+                logging.error(f"Error reading vectorized files from Qdrant: {e}")
+                
+        else:
+            chroma_db_file = os.path.join(db_path, "chroma.sqlite3")
+            if os.path.exists(chroma_db_file):
                 try:
-                    embedding_function = self._get_embedding_function(provider, model_name)
-                    vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
-                    # Fetch metadatas to extract unique sources
-                    data = vector_store.get(include=['metadatas'])
-                    sources = set()
-                    if data and 'metadatas' in data:
-                        for meta in data['metadatas']:
-                            if meta and 'source' in meta:
-                                sources.add(meta['source'])
+                    import sqlite3
+                    conn = sqlite3.connect(chroma_db_file)
+                    cur = conn.cursor()
+                    cur.execute("SELECT DISTINCT string_value FROM embedding_metadata WHERE key = 'source';")
+                    sources = {row[0] for row in cur.fetchall() if row[0]}
+                    conn.close()
                     results['vectorized'] = sorted(list(sources))
-                except Exception as ex:
-                    logging.error(f"Error reading vectorized files from Chroma: {ex}")
+                except Exception as e:
+                    logging.warning(f"Failed to query unique sources via SQLite: {e}. Falling back to LangChain vector_store.get")
+                    try:
+                        embedding_function = self._get_embedding_function(provider, model_name)
+                        vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
+                        # Fetch metadatas to extract unique sources
+                        data = vector_store.get(include=['metadatas'])
+                        sources = set()
+                        if data and 'metadatas' in data:
+                            for meta in data['metadatas']:
+                                if meta and 'source' in meta:
+                                    sources.add(meta['source'])
+                        results['vectorized'] = sorted(list(sources))
+                    except Exception as ex:
+                        logging.error(f"Error reading vectorized files from Chroma: {ex}")
                 
         return results
 
@@ -619,15 +685,43 @@ class VectorManager:
             return True
             
         elif file_type == 'vectorized':
-            try:
-                embedding_function = self._get_embedding_function(provider, model_name)
-                vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
-                # Delete chunks matching the source file path
-                vector_store.delete(where={"source": file_identifier})
-                return True
-            except Exception as e:
-                logging.error(f"Error deleting vectorized file {file_identifier} from Chroma: {e}")
-                return False
+            config = self.get_database_config(db_path)
+            vectordb_type = config.get("vectordb", "chroma")
+            
+            if vectordb_type == "qdrant":
+                try:
+                    from qdrant_client import QdrantClient
+                    from qdrant_client.http.models import FieldCondition, MatchValue, Filter
+                    db_name = os.path.basename(db_path)
+                    params = self._get_qdrant_client_params(db_name)
+                    
+                    if "url" in params:
+                        client = QdrantClient(url=params["url"])
+                    else:
+                        client = QdrantClient(path=params["path"])
+                        
+                    client.delete(
+                        collection_name=db_name,
+                        points_selector=Filter(
+                            must=[
+                                FieldCondition(key="metadata.source", match=MatchValue(value=file_identifier))
+                            ]
+                        )
+                    )
+                    return True
+                except Exception as e:
+                    logging.error(f"Error deleting vectorized file {file_identifier} from Qdrant: {e}")
+                    return False
+            else:
+                try:
+                    embedding_function = self._get_embedding_function(provider, model_name)
+                    vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
+                    # Delete chunks matching the source file path
+                    vector_store.delete(where={"source": file_identifier})
+                    return True
+                except Exception as e:
+                    logging.error(f"Error deleting vectorized file {file_identifier} from Chroma: {e}")
+                    return False
                 
         return False
 
@@ -673,18 +767,27 @@ class VectorManager:
             all_skipped.extend(load_skipped)
             
             if documents:
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                # Use Markdown Splitter if it's likely scientific markdown (e.g. if we are adding to a scientific DB)
+                config = self.get_database_config(db_path)
+                if config.get("parser", "pdfplumber") in ["marker", "marker_vlm"]:
+                    text_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                else:
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+                    
                 chunks = text_splitter.split_documents(documents)
                 if chunks:
                     try:
                         embedding_function = self._get_embedding_function(provider, model_name)
+                        config = self.get_database_config(db_path)
+                        vectordb_type = config.get("vectordb", "chroma")
                         # Use batched embedding with retry (existing_db=True since we're adding to an existing DB)
                         embed_result = self._embed_in_batches(
                             chunks=chunks,
                             embedding_function=embedding_function,
                             db_path=db_path,
                             progress_callback=progress_callback,
-                            existing_db=True
+                            existing_db=True,
+                            vectordb_type=vectordb_type
                         )
                         if embed_result["status"] in ("success", "partial"):
                             summary_parts.append(
