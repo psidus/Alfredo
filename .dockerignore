@@ -1,4 +1,4 @@
-venv/
+﻿venv/
 env/
 .env
 __pycache__/
@@ -22,3 +22,5 @@ storage/
 huggingface_raw_db/
 huggingface_ready_for_vector_db/
 scratch/
+venv_rag/
+

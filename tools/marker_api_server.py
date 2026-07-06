@@ -47,8 +47,7 @@ async def parse_pdf(file: UploadFile = File(...)):
             str(marker_exe),
             temp_pdf_path,
             "--output_dir", output_dir,
-            "--output_format", "markdown",
-            "--batch_multiplier", "2"
+            "--output_format", "markdown"
         ]
         
         logger.info(f"Running marker: {' '.join(cmd)}")
@@ -69,7 +68,21 @@ async def parse_pdf(file: UploadFile = File(...)):
         with open(md_file, "r", encoding="utf-8") as f:
             markdown_text = f.read()
             
-        return JSONResponse(content={"markdown": markdown_text})
+        images = {}
+        import base64
+        for file in os.listdir(result_dir):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                img_path = os.path.join(result_dir, file)
+                try:
+                    with open(img_path, "rb") as img_f:
+                        images[file] = base64.b64encode(img_f.read()).decode('utf-8')
+                except Exception as e:
+                    logger.error(f"Failed to read image {file}: {e}")
+            
+        return JSONResponse(content={
+            "markdown": markdown_text,
+            "images": images
+        })
 
 if __name__ == "__main__":
     logger.info(f"Starting Marker API Server on port 8001...")

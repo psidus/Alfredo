@@ -31,6 +31,15 @@ class ScientificParser:
         
     def _encode_image(self, pil_img: Image.Image) -> str:
         """Convert PIL Image to base64 string for VLM API."""
+        # Resize image if it's too large to prevent Ollama payload limits
+        max_size = 1024
+        if pil_img.width > max_size or pil_img.height > max_size:
+            pil_img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            
+        # Ensure image is in a safe format (RGB or L)
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
+            
         buffered = BytesIO()
         pil_img.save(buffered, format="PNG")
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
@@ -85,10 +94,12 @@ class ScientificParser:
 
         try:
             # LiteLLM automatically routes to the right provider based on the model name prefix
+            api_base = os.getenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
             response = completion(
                 model=model,
                 messages=messages,
-                temperature=0.0
+                temperature=0.0,
+                api_base=api_base
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -162,6 +173,106 @@ class ScientificParser:
         except Exception as e:
             logger.error(f"Failed to save CSV {filename}: {e}")
 
+    def _extract_markdown_tables(self, markdown_text: str, filename_prefix: str):
+        """Finds markdown tables in text and saves them as CSV files."""
+        if not self.db_path:
+            return
+            
+        structured_dir = os.path.join(self.db_path, "structured")
+        os.makedirs(structured_dir, exist_ok=True)
+        
+        lines = markdown_text.split('\n')
+        current_table = []
+        table_count = 0
+        
+        for line in lines:
+            if line.strip().startswith('|') and line.strip().endswith('|'):
+                current_table.append(line.strip())
+            elif current_table:
+                # We reached the end of a table
+                self._save_markdown_table_to_csv(current_table, os.path.join(structured_dir, f"{filename_prefix}_table_{table_count}.csv"))
+                table_count += 1
+                current_table = []
+                
+        # Handle table at the end of the file
+        if current_table:
+            self._save_markdown_table_to_csv(current_table, os.path.join(structured_dir, f"{filename_prefix}_table_{table_count}.csv"))
+
+    def _save_markdown_table_to_csv(self, table_lines: List[str], csv_path: str):
+        try:
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                for line in table_lines:
+                    if set(line.replace('|', '').replace('-', '').replace(':', '').strip()) == set():
+                        continue # Skip separator line
+                    row = [cell.strip() for cell in line.split('|')[1:-1]]
+                    writer.writerow(row)
+            logger.info(f"Saved extracted structured data to {csv_path}")
+        except Exception as e:
+            logger.error(f"Failed to save CSV {csv_path}: {e}")
+
+    def _process_marker_images(self, doc: Document) -> Document:
+        """Processes images returned by Marker using the VLM."""
+        images_dict = doc.metadata.get("images", {})
+        if not images_dict:
+            return doc
+            
+        content = doc.page_content
+        import re
+        import io
+        
+        # Find all image references in markdown, e.g. ![...](.../filename.png)
+        img_pattern = re.compile(r'!\[.*?\]\((.*?([^/]+?\.(?:png|jpg|jpeg|webp)))\)', re.IGNORECASE)
+        
+        def replace_image(match):
+            full_path = match.group(1)
+            filename = match.group(2)
+            
+            # Find the base64 image
+            b64_data = None
+            for key, val in images_dict.items():
+                if filename in key or key in filename:
+                    b64_data = val
+                    break
+                    
+            if not b64_data:
+                return match.group(0)
+                
+            try:
+                img_bytes = base64.b64decode(b64_data)
+                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                
+                # Context heuristic based on surrounding text could be added here, 
+                # but for simplicity we assume 'drawings' unless 'table'/'graph' is nearby
+                # We can grab 500 chars before the image
+                start_idx = max(0, match.start() - 500)
+                context_text = content[start_idx:match.start()].lower()
+                
+                obj_type = "drawings"
+                if "figure" in context_text or "fig." in context_text:
+                    if "plot" in context_text or "curve" in context_text or "graph" in context_text:
+                        obj_type = "graphs"
+                elif "table" in context_text:
+                    obj_type = "tables"
+                    
+                logger.info(f"Marker VLM processing image {filename} as {obj_type}")
+                
+                if obj_type == "graphs":
+                    desc = self._process_graph(pil_img, 1, filename)
+                elif obj_type == "tables":
+                    desc = self._process_table(pil_img, 1, filename)
+                else:
+                    desc = self._process_drawing(pil_img)
+                    
+                return f"\n\n--- Start of Extracted {obj_type.capitalize()} ({filename}) ---\n{desc}\n--- End of Extracted {obj_type.capitalize()} ---\n\n"
+            except Exception as e:
+                logger.error(f"Failed to process Marker image {filename}: {e}")
+                return match.group(0)
+                
+        new_content = img_pattern.sub(replace_image, content)
+        doc.page_content = new_content
+        return doc
+
     def parse_pdf(self, file_path: str) -> List[Document]:
         """
         Parses a PDF, extracting text and images/tables in reading order.
@@ -171,7 +282,6 @@ class ScientificParser:
         logger.info(f"Starting Scientific RAG parsing for {file_path} using {self.parser_type}")
         
         documents = []
-        skip_text_extraction = False
         
         if self.parser_type in ["marker", "marker_vlm"]:
             try:
@@ -179,11 +289,14 @@ class ScientificParser:
                 marker_parser = MarkerParser(db_path=self.db_path)
                 docs = marker_parser.parse_pdf(file_path)
                 if docs:
-                    if self.parser_type == "marker":
-                        return docs
-                    else:
-                        documents.extend(docs)
-                        skip_text_extraction = True
+                    base_name = os.path.splitext(os.path.basename(file_path))[0]
+                    self._extract_markdown_tables(docs[0].page_content, base_name)
+                    
+                    if self.parser_type == "marker_vlm":
+                        logger.info(f"Processing Marker images with VLM for {file_path}")
+                        docs[0] = self._process_marker_images(docs[0])
+                        
+                    return docs
                 else:
                     logger.warning(f"Marker returned no documents for {file_path}. Falling back to pdfplumber.")
             except ImportError as e:
@@ -199,11 +312,7 @@ class ScientificParser:
                     
                     # 1. Extract raw text
                     text = page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-                    
-                    if skip_text_extraction:
-                        enriched_text = "" # Text already extracted by Marker
-                    else:
-                        enriched_text = text + "\n\n"
+                    enriched_text = text + "\n\n"
                     
                     # 2. Extract images/figures
                     if page.images:

@@ -60,10 +60,16 @@ class MarkerParser:
                     data = resp.json()
                     content = data.get("markdown", "")
                     if content.strip():
+                        images = data.get("images", {})
                         documents.append(
                             Document(
                                 page_content=content,
-                                metadata={"source": file_path, "scientific_rag": True, "parser": "marker_gpu_api"}
+                                metadata={
+                                    "source": file_path, 
+                                    "scientific_rag": True, 
+                                    "parser": "marker_gpu_api",
+                                    "images": images
+                                }
                             )
                         )
                         return documents
@@ -112,10 +118,26 @@ class MarkerParser:
                     content = f.read()
                     
                 if content.strip():
+                    import base64
+                    images = {}
+                    for img_file in os.listdir(output_folder):
+                        if img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                            img_path = os.path.join(output_folder, img_file)
+                            try:
+                                with open(img_path, "rb") as img_f:
+                                    images[img_file] = base64.b64encode(img_f.read()).decode('utf-8')
+                            except Exception as e:
+                                logger.error(f"Failed to read image {img_file}: {e}")
+                                
                     documents.append(
                         Document(
                             page_content=content,
-                            metadata={"source": file_path, "scientific_rag": True, "parser": "marker_gpu_local"}
+                            metadata={
+                                "source": file_path, 
+                                "scientific_rag": True, 
+                                "parser": "marker_gpu_local",
+                                "images": images
+                            }
                         )
                     )
             except Exception as e:
