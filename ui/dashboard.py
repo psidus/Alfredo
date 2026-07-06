@@ -759,31 +759,29 @@ def render_knowledge_base():
                 with sc_col1:
                     graph_model = get_model_selection(
                         "📈 Model for Graphs (Curve Digitizer)", "graphs", 
-                        "Extracts (X,Y) coordinates from curves. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or gemma3:12b.",
+                        "Extracts (X,Y) coordinates from curves. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b, llama3.2-vision:11b, or granite3.2-vision. (DO NOT use text-only models like gemma3).",
                         avail_graph
                     )
                     table_model = get_model_selection(
                         "📊 Model for Tables (OCR → Markdown)", "tables", 
-                        "Converts table images to structured Markdown/CSV. Best cloud: Gemini 2.0 Flash. Best local: glm-ocr (0.9B specialist!) or granite3.2-vision.",
+                        "Converts table images to structured Markdown/CSV. Best cloud: Gemini 2.0 Flash. Best local: glm-ocr, qwen3-vl:8b, or granite3.2-vision. (DO NOT use text-only models).",
                         avail_table
                     )
                 with sc_col2:
                     drawing_model = get_model_selection(
                         "🏭 Model for Drawings (P&ID / PFD / Schematics)", "drawings", 
-                        "Describes technical schematics. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or gemma3:12b.",
+                        "Describes technical schematics. Best cloud: Gemini 2.5 Pro. Best local: qwen3-vl:8b or llama3.2-vision:11b. (DO NOT use text-only models).",
                         avail_drawing
                     )
                     default_gp = ui_mem.get("graph_points", 10)
                     graph_points = st.number_input("📐 Graph Extraction Points", min_value=3, max_value=100, value=default_gp, help="How many (X,Y) data points to extract from each curve.")
                 
-                scientific_config = {
-                    "models_config": {
-                        "graphs": graph_model,
-                        "tables": table_model,
-                        "drawings": drawing_model
-                    },
-                    "graph_points": graph_points
+                scientific_config["models_config"] = {
+                    "graphs": graph_model,
+                    "tables": table_model,
+                    "drawings": drawing_model
                 }
+                scientific_config["graph_points"] = graph_points
             
             submitted = st.button("Start Embedding", type="primary")
             if submitted:

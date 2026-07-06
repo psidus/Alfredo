@@ -41,7 +41,7 @@ class ScientificParser:
             pil_img = pil_img.convert("RGB")
             
         buffered = BytesIO()
-        pil_img.save(buffered, format="PNG")
+        pil_img.save(buffered, format="JPEG", quality=85)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
         
     def _preprocess_graph(self, pil_img: Image.Image) -> Image.Image:
@@ -85,7 +85,7 @@ class ScientificParser:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/png;base64,{base64_img}"
+                            "url": f"data:image/jpeg;base64,{base64_img}"
                         }
                     }
                 ]
