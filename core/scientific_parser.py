@@ -359,7 +359,7 @@ class ScientificParser:
                         documents.append(
                             Document(
                                 page_content=enriched_text,
-                                metadata={"source": file_path, "page": page_num, "scientific_rag": True, "type": "vlm_extraction" if skip_text_extraction else "full_page"}
+                                metadata={"source": file_path, "page": page_num, "scientific_rag": True, "type": "full_page"}
                             )
                         )
                         

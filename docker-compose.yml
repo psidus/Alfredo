@@ -2,7 +2,7 @@ services:
   dashboard:
     build: .
     container_name: alfredo_dashboard
-    command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --server.maxUploadSize=2000
+    command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --server.maxUploadSize=2000 --server.fileWatcherType=none
     ports:
       - "8501:8501"
     env_file:
