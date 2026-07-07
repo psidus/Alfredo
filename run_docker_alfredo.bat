@@ -31,10 +31,22 @@ echo ==========================================
 echo Alfredo AI OS is running in Docker!
 echo ==========================================
 echo.
+if exist config\advanced_rag_setup.json (
+    echo [Marker GPU Enabled] Starting Marker API Server in background...
+    start /min "Marker GPU API Server" cmd /c "start_marker_api.bat"
+)
+
 echo [To STOP Alfredo, close this window or press any key to shutdown containers]
 echo.
 pause
 
 echo Stopping Alfredo Docker containers...
 docker compose down
+
+if exist config\advanced_rag_setup.json (
+    echo Stopping Marker API Server...
+    taskkill /FI "WINDOWTITLE eq Marker GPU API Server*" /F >nul 2>&1
+    :: Fallback to stop the specific python process if window title kill fails
+    for /f "tokens=5" %%a in ('netstat -aon ^| find "8001" ^| find "LISTENING"') do taskkill /f /pid %%a >nul 2>&1
+)
 exit

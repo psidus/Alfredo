@@ -81,8 +81,8 @@ def sanitize_filename(name: str) -> str:
     """
     if not isinstance(name, str):
         return "invalid_name"
-    name = name.lower().replace(' ', '_')
-    name = re.sub(r'[^a-z0-9_-]', '', name)
+    name = name.strip().replace(' ', '_')
+    name = re.sub(r'[^a-zA-Z0-9_-]', '', name)
     return name or "unnamed_workflow"
 
 # --- Helper Functions for Callbacks ---
@@ -196,6 +196,13 @@ def render_knowledge_base():
                             if folder_exists:
                                 vm.delete_database(vdb['name'])
                             db.delete_vector_db(vdb['id'])
+                            
+                            # Close the modal/query if the deleted database is currently open
+                            if "manage_vdb" in st.session_state and st.session_state.manage_vdb['id'] == vdb['id']:
+                                del st.session_state.manage_vdb
+                            if "query_vdb" in st.session_state and st.session_state.query_vdb['id'] == vdb['id']:
+                                del st.session_state.query_vdb
+                                
                             st.toast(f"Database {vdb['name']} removed", icon="🗑️")
                             st.rerun()
 

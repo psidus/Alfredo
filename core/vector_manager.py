@@ -387,7 +387,9 @@ class VectorManager:
                     "chunk_overlap": chunk_overlap,
                     "provider": provider,
                     "model_name": model_name,
-                    "vectordb": scientific_config.get("vectordb", "chroma")
+                    "vectordb": scientific_config.get("vectordb", "chroma"),
+                    "scientific_mode": scientific_mode,
+                    "scientific_config": scientific_config
                 }, f, indent=4)
         except Exception as e:
             logging.error(f"Could not save config.json to {db_path}: {e}")
@@ -763,11 +765,39 @@ class VectorManager:
         if vectorizable_files:
             if progress_callback:
                 progress_callback(0, 0, "📄 Loading additional documents...")
-            documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
+                
+            config = self.get_database_config(db_path)
+            scientific_mode = config.get("scientific_mode", False)
+            scientific_config = config.get("scientific_config", {})
+            
+            if scientific_mode:
+                from core.scientific_parser import ScientificParser
+                parser = ScientificParser(
+                    models_config=scientific_config.get("models_config", {}),
+                    graph_points=scientific_config.get("graph_points", 10),
+                    db_path=db_path,
+                    parser_type=scientific_config.get("parser", "pdfplumber")
+                )
+                documents = []
+                load_skipped = []
+                for f in vectorizable_files:
+                    if f.lower().endswith(".pdf"):
+                        if progress_callback:
+                            progress_callback(0, 0, f"🧪 Scientifically parsing {os.path.basename(f)}...")
+                        docs = parser.parse_pdf(f)
+                        if not docs:
+                            load_skipped.append(f"Failed to parse PDF scientifically: {f}")
+                        documents.extend(docs)
+                    else:
+                        docs, skip = self.load_documents([f], progress_callback=progress_callback)
+                        documents.extend(docs)
+                        load_skipped.extend(skip)
+            else:
+                documents, load_skipped = self.load_documents(vectorizable_files, progress_callback=progress_callback)
+                
             all_skipped.extend(load_skipped)
             
             if documents:
-                # Use Markdown Splitter if it's likely scientific markdown (e.g. if we are adding to a scientific DB)
                 config = self.get_database_config(db_path)
                 if config.get("parser", "pdfplumber") in ["marker", "marker_vlm"]:
                     text_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)

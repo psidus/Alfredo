@@ -120,14 +120,15 @@ class MarkerParser:
                 if content.strip():
                     import base64
                     images = {}
-                    for img_file in os.listdir(output_folder):
-                        if img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                            img_path = os.path.join(output_folder, img_file)
-                            try:
-                                with open(img_path, "rb") as img_f:
-                                    images[img_file] = base64.b64encode(img_f.read()).decode('utf-8')
-                            except Exception as e:
-                                logger.error(f"Failed to read image {img_file}: {e}")
+                    for root_dir, _, files_list in os.walk(output_folder):
+                        for img_file in files_list:
+                            if img_file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                                img_path = os.path.join(root_dir, img_file)
+                                try:
+                                    with open(img_path, "rb") as img_f:
+                                        images[img_file] = base64.b64encode(img_f.read()).decode('utf-8')
+                                except Exception as e:
+                                    logger.error(f"Failed to read image {img_file}: {e}")
                                 
                     documents.append(
                         Document(
