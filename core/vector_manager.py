@@ -25,7 +25,18 @@ except ImportError:
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from core.data_manager import DataManager
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure root logger with FileHandler
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    os.makedirs("storage", exist_ok=True)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh = logging.FileHandler("storage/app_debug.log")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 
 # File extensions that should be stored as structured CSV data, not vectorized
 TABULAR_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
@@ -54,6 +65,66 @@ class VectorManager:
         except Exception:
             pass
         return {"path": os.path.join(self.storage_dir, "qdrant_local"), "collection_name": db_name}
+
+    def _get_qdrant_vector_store(self, db_name: str, embedding_function: Any):
+        from qdrant_client import QdrantClient
+        from langchain_qdrant import QdrantVectorStore
+        
+        params = self._get_qdrant_client_params(db_name)
+        if "url" in params:
+            client = QdrantClient(url=params["url"])
+        elif "path" in params:
+            client = QdrantClient(path=params["path"])
+        else:
+            raise ValueError("Qdrant configuration must contain either 'url' or 'path'")
+            
+        return QdrantVectorStore(
+            client=client,
+            collection_name=params["collection_name"],
+            embedding=embedding_function
+        )
+        
+    def _create_or_add_qdrant(self, db_name: str, embedding_function: Any, batch: List[Any]) -> Any:
+        from qdrant_client import QdrantClient
+        from langchain_qdrant import QdrantVectorStore
+        
+        params = self._get_qdrant_client_params(db_name)
+        
+        if "url" in params:
+            client = QdrantClient(url=params["url"])
+        else:
+            client = QdrantClient(path=params["path"])
+            
+        if client.collection_exists(params["collection_name"]):
+            # Initialize VectorStore and add documents
+            vector_store = QdrantVectorStore(
+                client=client,
+                collection_name=params["collection_name"],
+                embedding=embedding_function
+            )
+            vector_store.add_documents(batch)
+            return vector_store
+        else:
+            # Determine vector size from embedding
+            test_emb = embedding_function.embed_query("test")
+            vector_size = len(test_emb)
+            
+            from qdrant_client.http.models import Distance, VectorParams
+            
+            # Create collection
+            client.create_collection(
+                collection_name=params["collection_name"],
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+            
+            # Initialize VectorStore and add documents
+            vector_store = QdrantVectorStore(
+                client=client,
+                collection_name=params["collection_name"],
+                embedding=embedding_function
+            )
+            vector_store.add_documents(batch)
+            return vector_store
 
     def _get_embedding_function(self, provider: str, model_name: str) -> Any:
         """
@@ -168,9 +239,7 @@ class VectorManager:
                     if vector_store is None:
                         if vectordb_type == "qdrant":
                             db_name = os.path.basename(db_path)
-                            qdrant_params = self._get_qdrant_client_params(db_name)
-                            vector_store = QdrantVectorStore(embedding=embedding_function, **qdrant_params)
-                            vector_store.add_documents(batch)
+                            vector_store = self._create_or_add_qdrant(db_name, embedding_function, batch)
                             db_initialized = True
                         else:
                             if db_initialized:
@@ -576,8 +645,7 @@ class VectorManager:
             
             if vectordb_type == "qdrant":
                 db_name = os.path.basename(db_path)
-                qdrant_params = self._get_qdrant_client_params(db_name)
-                vector_store = QdrantVectorStore(embedding=embedding_function, **qdrant_params)
+                vector_store = self._get_qdrant_vector_store(db_name, embedding_function)
             else:
                 vector_store = Chroma(persist_directory=db_path, embedding_function=embedding_function)
 

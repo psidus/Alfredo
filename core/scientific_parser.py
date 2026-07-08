@@ -13,6 +13,13 @@ from langchain_core.documents import Document
 from litellm import completion
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# Add file handler to capture logs
+if not logger.handlers:
+    os.makedirs("storage", exist_ok=True)
+    fh = logging.FileHandler("storage/app_debug.log")
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(fh)
 
 class ScientificParser:
     def __init__(self, models_config: Dict[str, str], graph_points: int = 10, db_path: str = None, parser_type: str = "pdfplumber"):

@@ -11,6 +11,13 @@ from typing import List
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# Add file handler to capture logs
+if not logger.handlers:
+    os.makedirs("storage", exist_ok=True)
+    fh = logging.FileHandler("storage/app_debug.log")
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(fh)
 
 class MarkerParser:
     def __init__(self, db_path: str = None):
@@ -54,7 +61,7 @@ class MarkerParser:
             try:
                 with open(file_path, "rb") as f:
                     files = {"file": (os.path.basename(file_path), f, "application/pdf")}
-                    resp = requests.post(f"{self.api_url}/parse_pdf", files=files, timeout=600)
+                    resp = requests.post(f"{self.api_url}/parse_pdf", files=files, timeout=7200)
                 
                 if resp.status_code == 200:
                     data = resp.json()
