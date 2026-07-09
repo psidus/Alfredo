@@ -4,6 +4,7 @@ import shutil
 import logging
 import time
 import math
+import sys
 from typing import List, Dict, Any, Optional, Callable
 
 import pandas as pd
@@ -50,10 +51,20 @@ class VectorManager:
     """
     Manages the creation, population, and querying of local vector databases using ChromaDB.
     """
+    _local_qdrant_client = None
+
     def __init__(self, storage_dir: str = "storage/vector_dbs"):
         self.storage_dir = storage_dir
         os.makedirs(self.storage_dir, exist_ok=True)
         
+    def _get_qdrant_client(self, params: dict):
+        from qdrant_client import QdrantClient
+        if "url" in params:
+            return QdrantClient(url=params["url"])
+        else:
+            if VectorManager._local_qdrant_client is None:
+                VectorManager._local_qdrant_client = QdrantClient(path=params["path"])
+            return VectorManager._local_qdrant_client
 
     def _get_qdrant_client_params(self, db_name: str):
         """Check if Docker Qdrant is available, otherwise fallback to local path."""
@@ -67,16 +78,10 @@ class VectorManager:
         return {"path": os.path.join(self.storage_dir, "qdrant_local"), "collection_name": db_name}
 
     def _get_qdrant_vector_store(self, db_name: str, embedding_function: Any):
-        from qdrant_client import QdrantClient
         from langchain_qdrant import QdrantVectorStore
         
         params = self._get_qdrant_client_params(db_name)
-        if "url" in params:
-            client = QdrantClient(url=params["url"])
-        elif "path" in params:
-            client = QdrantClient(path=params["path"])
-        else:
-            raise ValueError("Qdrant configuration must contain either 'url' or 'path'")
+        client = self._get_qdrant_client(params)
             
         return QdrantVectorStore(
             client=client,
@@ -85,15 +90,10 @@ class VectorManager:
         )
         
     def _create_or_add_qdrant(self, db_name: str, embedding_function: Any, batch: List[Any]) -> Any:
-        from qdrant_client import QdrantClient
         from langchain_qdrant import QdrantVectorStore
         
         params = self._get_qdrant_client_params(db_name)
-        
-        if "url" in params:
-            client = QdrantClient(url=params["url"])
-        else:
-            client = QdrantClient(path=params["path"])
+        client = self._get_qdrant_client(params)
             
         if client.collection_exists(params["collection_name"]):
             # Initialize VectorStore and add documents
@@ -176,7 +176,7 @@ class VectorManager:
         retryable_keywords = [
             "429", "resource_exhausted", "rate limit", "quota",
             "too many requests", "overloaded", "503", "service unavailable",
-            "timeout", "timed out", "connection", "temporarily unavailable",
+            "timeout", "timed out", "connection", "connect", "temporarily unavailable",
             "readonly", "locked", "malformed"
         ]
         return any(kw in error_str for kw in retryable_keywords)
@@ -622,10 +622,16 @@ class VectorManager:
         if not os.path.exists(db_path):
             return f"Error: Database at {db_path} not found."
 
-        # Check if there is a Chroma vector index in this directory
+        config = self.get_database_config(db_path)
+        vectordb_type = config.get("vectordb", "chroma")
+
+        # Check if there is a vector index in this directory
         chroma_db_file = os.path.join(db_path, "chroma.sqlite3")
         structured_dir = os.path.join(db_path, "structured")
-        if not os.path.exists(chroma_db_file):
+        
+        has_vector_data = True if vectordb_type == "qdrant" else os.path.exists(chroma_db_file)
+        
+        if not has_vector_data:
             if os.path.isdir(structured_dir):
                 csv_files = [f for f in os.listdir(structured_dir) if f.endswith('.csv')]
                 if csv_files:
@@ -638,10 +644,6 @@ class VectorManager:
 
         try:
             embedding_function = self._get_embedding_function(provider, model_name)
-            
-            # Check if Qdrant collection exists (by checking config or assuming Chroma fallback)
-            config = self.get_database_config(db_path)
-            vectordb_type = config.get("vectordb", "chroma")
             
             if vectordb_type == "qdrant":
                 db_name = os.path.basename(db_path)
@@ -687,19 +689,24 @@ class VectorManager:
         
         if vectordb_type == "qdrant":
             try:
-                from qdrant_client import QdrantClient
-                from qdrant_client.http.models import FieldCondition, MatchValue, Filter
                 db_name = os.path.basename(db_path)
                 params = self._get_qdrant_client_params(db_name)
                 
                 # Setup client
-                if "url" in params:
-                    client = QdrantClient(url=params["url"])
-                else:
-                    client = QdrantClient(path=params["path"])
+                client = self._get_qdrant_client(params)
                 
-                # Fetch distinct sources
-                res, _ = client.scroll(collection_name=db_name, limit=10000, with_payload=True, with_vectors=False)
+                # Fetch distinct sources efficiently by only requesting the source field
+                try:
+                    from qdrant_client.http import models
+                    res, _ = client.scroll(
+                        collection_name=db_name, 
+                        limit=10000, 
+                        with_payload=models.PayloadSelectorInclude(include=["metadata.source"]), 
+                        with_vectors=False
+                    )
+                except Exception as ex:
+                    # Fallback if PayloadSelectorInclude is unsupported
+                    res, _ = client.scroll(collection_name=db_name, limit=10000, with_payload=True, with_vectors=False)
                 sources = set()
                 for record in res:
                     if record.payload and "metadata" in record.payload and "source" in record.payload["metadata"]:
@@ -760,15 +767,11 @@ class VectorManager:
             
             if vectordb_type == "qdrant":
                 try:
-                    from qdrant_client import QdrantClient
                     from qdrant_client.http.models import FieldCondition, MatchValue, Filter
                     db_name = os.path.basename(db_path)
                     params = self._get_qdrant_client_params(db_name)
                     
-                    if "url" in params:
-                        client = QdrantClient(url=params["url"])
-                    else:
-                        client = QdrantClient(path=params["path"])
+                    client = self._get_qdrant_client(params)
                         
                     client.delete(
                         collection_name=db_name,

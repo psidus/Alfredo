@@ -61,7 +61,7 @@ class MarkerParser:
             try:
                 with open(file_path, "rb") as f:
                     files = {"file": (os.path.basename(file_path), f, "application/pdf")}
-                    resp = requests.post(f"{self.api_url}/parse_pdf", files=files, timeout=7200)
+                    resp = requests.post(f"{self.api_url}/parse_pdf", files=files, timeout=(10, 7200))
                 
                 if resp.status_code == 200:
                     data = resp.json()

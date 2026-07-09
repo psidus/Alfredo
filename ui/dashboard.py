@@ -316,25 +316,46 @@ def render_knowledge_base():
                 else:
                     # Scrollable container if there are multiple tables
                     container_ctx = st.container(height=200) if len(files_dict['structured']) > 4 else st.container()
-                    with container_ctx:
-                        for idx, s_file in enumerate(files_dict['structured']):
-                            col_file_name, col_file_action = st.columns([5, 1.2])
-                            with col_file_name:
-                                st.write(f"📊 `{s_file}`")
-                            with col_file_action:
-                                if st.button("🗑️ Remove", key=f"rm_struct_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
-                                    success = vm.remove_file_from_database(
-                                        db_path=vdb['path'],
-                                        provider=vdb['provider'],
-                                        model_name=vdb['model_name'],
-                                        file_type='structured',
-                                        file_identifier=s_file
-                                    )
-                                    if success:
-                                        st.toast(f"Removed structured table '{s_file}'", icon="✅")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Could not remove '{s_file}'")
+                    
+                    if len(files_dict['structured']) > 50:
+                        st.warning(f"There are {len(files_dict['structured'])} tables. Showing a dropdown for removal to prevent UI lag.")
+                        col_sel, col_btn = st.columns([5, 1.2])
+                        with col_sel:
+                            selected_file = st.selectbox("Select table to remove", files_dict['structured'])
+                        with col_btn:
+                            if st.button("🗑️ Remove", key=f"rm_struct_bulk_{vdb['id']}", type="secondary", use_container_width=True):
+                                success = vm.remove_file_from_database(
+                                    db_path=vdb['path'],
+                                    provider=vdb['provider'],
+                                    model_name=vdb['model_name'],
+                                    file_type='structured',
+                                    file_identifier=selected_file
+                                )
+                                if success:
+                                    st.toast(f"Removed structured table '{selected_file}'", icon="✅")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Could not remove '{selected_file}'")
+                    else:
+                        with container_ctx:
+                            for idx, s_file in enumerate(files_dict['structured']):
+                                col_file_name, col_file_action = st.columns([5, 1.2])
+                                with col_file_name:
+                                    st.write(f"📊 `{s_file}`")
+                                with col_file_action:
+                                    if st.button("🗑️ Remove", key=f"rm_struct_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
+                                        success = vm.remove_file_from_database(
+                                            db_path=vdb['path'],
+                                            provider=vdb['provider'],
+                                            model_name=vdb['model_name'],
+                                            file_type='structured',
+                                            file_identifier=s_file
+                                        )
+                                        if success:
+                                            st.toast(f"Removed structured table '{s_file}'", icon="✅")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Could not remove '{s_file}'")
                 
                 st.divider()
                 
@@ -361,28 +382,48 @@ def render_knowledge_base():
                     else:
                         st.info("No vectorized files inside this database.")
                 else:
-                    # Constrain height to 300px to enable scrollbar
-                    with st.container(height=300):
-                        for idx, v_file in enumerate(filtered_vectorized):
-                            col_file_name, col_file_action = st.columns([5, 1.2])
-                            v_base = os.path.basename(v_file)
-                            with col_file_name:
-                                st.write(f"📄 `{v_base}`")
-                                st.caption(v_file)
-                            with col_file_action:
-                                if st.button("🗑️ Remove", key=f"rm_vect_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
-                                    success = vm.remove_file_from_database(
-                                        db_path=vdb['path'],
-                                        provider=vdb['provider'],
-                                        model_name=vdb['model_name'],
-                                        file_type='vectorized',
-                                        file_identifier=v_file
-                                    )
-                                    if success:
-                                        st.toast(f"Removed '{v_base}' from vector store", icon="✅")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Could not remove '{v_base}'")
+                    if len(filtered_vectorized) > 50:
+                        st.warning(f"There are {len(filtered_vectorized)} documents. Showing a dropdown for removal to prevent UI lag.")
+                        col_sel, col_btn = st.columns([5, 1.2])
+                        with col_sel:
+                            selected_vfile = st.selectbox("Select document to remove", filtered_vectorized, key=f"sel_vect_{vdb['id']}")
+                        with col_btn:
+                            if st.button("🗑️ Remove", key=f"rm_vect_bulk_{vdb['id']}", type="secondary", use_container_width=True):
+                                success = vm.remove_file_from_database(
+                                    db_path=vdb['path'],
+                                    provider=vdb['provider'],
+                                    model_name=vdb['model_name'],
+                                    file_type='vectorized',
+                                    file_identifier=selected_vfile
+                                )
+                                if success:
+                                    st.toast(f"Removed vectorized file '{selected_vfile}'", icon="✅")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Could not remove '{selected_vfile}'")
+                    else:
+                        # Constrain height to 300px to enable scrollbar
+                        with st.container(height=300):
+                            for idx, v_file in enumerate(filtered_vectorized):
+                                col_file_name, col_file_action = st.columns([5, 1.2])
+                                v_base = os.path.basename(v_file)
+                                with col_file_name:
+                                    st.write(f"📄 `{v_base}`")
+                                    st.caption(v_file)
+                                with col_file_action:
+                                    if st.button("🗑️ Remove", key=f"rm_vect_{idx}_{vdb['id']}", type="secondary", use_container_width=True):
+                                        success = vm.remove_file_from_database(
+                                            db_path=vdb['path'],
+                                            provider=vdb['provider'],
+                                            model_name=vdb['model_name'],
+                                            file_type='vectorized',
+                                            file_identifier=v_file
+                                        )
+                                        if success:
+                                            st.toast(f"Removed '{v_base}' from vector store", icon="✅")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Could not remove '{v_base}'")
                                     
             # Form to add files to this database
             st.markdown("### ➕ Add Files to this Database")
