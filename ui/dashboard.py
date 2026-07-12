@@ -664,6 +664,8 @@ def render_knowledge_base():
                 with col_c2:
                     chunk_overlap = st.number_input("Chunk Overlap", min_value=0, max_value=2000, value=200, step=50,
                                                     help="The number of overlapping characters between chunks to maintain context continuity.")
+                
+                use_intelligent_chunking = st.checkbox("🧠 Use Intelligent Markdown Chunking", value=True, help="When enabled, respects Markdown headers and tables during chunking. Recommended for Scientific RAG or .md files.")
             # --- Scientific RAG Parameters ---
             scientific_mode = st.checkbox("🧪 Enable Scientific RAG (Advanced Agentic Ingestion)", help="Use VLMs to extract and describe graphs, tables, and P&ID drawings intelligently.")
             scientific_config = {}
@@ -703,7 +705,17 @@ def render_knowledge_base():
                     st.success("✅ Marker GPU and Qdrant are ready.")
                     col_p, col_v = st.columns(2)
                     with col_p:
-                        parser_choice = st.selectbox("📄 PDF Parser", ["Marker (GPU Accelerated)", "Marker + VLM (Maximum Quality)", "pdfplumber (Fallback)"], index=0)
+                        parser_choice = st.selectbox(
+                            "📄 PDF Parser", 
+                            [
+                                "Marker (GPU Accelerated)", 
+                                "Mistral OCR 4 (Cloud API)",
+                                "Marker + VLM (Maximum Quality)", 
+                                "pdfplumber (Fallback)"
+                            ], 
+                            index=0,
+                            help="Pricing info: Mistral OCR 4 is ~4$/1000 pages. Google Document AI is ~5$/1000 pages."
+                        )
                     with col_v:
                         vectordb_choice = st.selectbox("🗄️ Vector Database", ["Qdrant (Scalable Server)", "Chroma (Local File)"], index=0)
                         
@@ -711,6 +723,8 @@ def render_knowledge_base():
                     
                     if parser_choice.startswith("Marker + VLM"):
                         scientific_config["parser"] = "marker_vlm"
+                    elif parser_choice.startswith("Mistral OCR"):
+                        scientific_config["parser"] = "mistral_ocr"
                     elif parser_choice.startswith("Marker"):
                         scientific_config["parser"] = "marker"
                     else:
@@ -891,7 +905,8 @@ def render_knowledge_base():
                                 chunk_overlap=chunk_overlap,
                                 progress_callback=ui_progress_callback,
                                 scientific_mode=scientific_mode,
-                                scientific_config=scientific_config
+                                scientific_config=scientific_config,
+                                use_intelligent_chunking=use_intelligent_chunking
                             )
                             
                             if result["status"] in ("success", "partial"):

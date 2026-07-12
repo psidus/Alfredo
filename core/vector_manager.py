@@ -51,7 +51,7 @@ class VectorManager:
     """
     Manages the creation, population, and querying of local vector databases using ChromaDB.
     """
-    _local_qdrant_client = None
+    _local_qdrant_clients = {}
 
     def __init__(self, storage_dir: str = "storage/vector_dbs"):
         self.storage_dir = storage_dir
@@ -60,21 +60,29 @@ class VectorManager:
     def _get_qdrant_client(self, params: dict):
         from qdrant_client import QdrantClient
         if "url" in params:
-            return QdrantClient(url=params["url"])
+            return QdrantClient(url=params["url"], timeout=30.0)
         else:
-            if VectorManager._local_qdrant_client is None:
-                VectorManager._local_qdrant_client = QdrantClient(path=params["path"])
-            return VectorManager._local_qdrant_client
+            path = params["path"]
+            if path not in VectorManager._local_qdrant_clients:
+                VectorManager._local_qdrant_clients[path] = QdrantClient(path=path)
+            return VectorManager._local_qdrant_clients[path]
 
     def _get_qdrant_client_params(self, db_name: str):
-        """Check if Docker Qdrant is available, otherwise fallback to local path."""
-        url = "http://localhost:6333"
-        try:
-            response = requests.get(url, timeout=1)
-            if response.status_code == 200:
-                return {"url": url, "collection_name": db_name}
-        except Exception:
-            pass
+        """Check if Docker Qdrant is available, otherwise fallback to local path.
+        
+        Tries Docker container DNS name first (qdrant_server), then localhost,
+        then falls back to local file-based storage.
+        """
+        # Try Docker internal DNS first (container-to-container communication)
+        for url in ["http://qdrant_server:6333", "http://localhost:6333"]:
+            try:
+                response = requests.get(url, timeout=1)
+                if response.status_code == 200:
+                    logging.info(f"Connected to Qdrant server at {url}")
+                    return {"url": url, "collection_name": db_name}
+            except Exception:
+                pass
+        logging.warning("Qdrant server not reachable, falling back to local file storage")
         return {"path": os.path.join(self.storage_dir, "qdrant_local"), "collection_name": db_name}
 
     def _get_qdrant_vector_store(self, db_name: str, embedding_function: Any):
@@ -89,6 +97,46 @@ class VectorManager:
             embedding=embedding_function
         )
         
+    QDRANT_MAX_PAYLOAD_BYTES = 30 * 1024 * 1024  # 30 MB safety limit per HTTP call
+
+    @staticmethod
+    def _estimate_doc_size(doc: Any) -> int:
+        """Estimate the JSON-serialized byte size of a single document."""
+        import sys
+        # page_content is stored as UTF-8 text
+        text_size = len(doc.page_content.encode("utf-8"))
+        # metadata is serialized as JSON; use sys.getsizeof as a fast approximation
+        metadata_size = sys.getsizeof(str(doc.metadata))
+        return text_size + metadata_size
+
+    def _qdrant_add_documents(self, vector_store: Any, batch: List[Any]) -> None:
+        """Uploads documents to Qdrant in dynamically-sized sub-batches.
+        
+        Sub-batch boundaries are determined by the estimated serialized size of
+        each document, ensuring no single HTTP call exceeds QDRANT_MAX_PAYLOAD_BYTES.
+        At minimum one document is always sent per call, regardless of size.
+        """
+        limit = self.QDRANT_MAX_PAYLOAD_BYTES
+        sub_batch: List[Any] = []
+        current_size = 0
+
+        for doc in batch:
+            doc_size = self._estimate_doc_size(doc)
+            # If adding this doc would exceed the limit AND we already have something,
+            # flush the current sub-batch first.
+            if sub_batch and (current_size + doc_size) > limit:
+                logger.debug(f"Qdrant sub-batch flush: {len(sub_batch)} docs, ~{current_size / 1e6:.1f} MB")
+                vector_store.add_documents(sub_batch)
+                sub_batch = []
+                current_size = 0
+            sub_batch.append(doc)
+            current_size += doc_size
+
+        # Flush any remaining documents
+        if sub_batch:
+            logger.debug(f"Qdrant sub-batch flush: {len(sub_batch)} docs, ~{current_size / 1e6:.1f} MB")
+            vector_store.add_documents(sub_batch)
+
     def _create_or_add_qdrant(self, db_name: str, embedding_function: Any, batch: List[Any]) -> Any:
         from langchain_qdrant import QdrantVectorStore
         
@@ -102,7 +150,7 @@ class VectorManager:
                 collection_name=params["collection_name"],
                 embedding=embedding_function
             )
-            vector_store.add_documents(batch)
+            self._qdrant_add_documents(vector_store, batch)
             return vector_store
         else:
             # Determine vector size from embedding
@@ -123,7 +171,7 @@ class VectorManager:
                 collection_name=params["collection_name"],
                 embedding=embedding_function
             )
-            vector_store.add_documents(batch)
+            self._qdrant_add_documents(vector_store, batch)
             return vector_store
 
     def _get_embedding_function(self, provider: str, model_name: str) -> Any:
@@ -173,6 +221,9 @@ class VectorManager:
     def _is_retryable_error(error: Exception) -> bool:
         """Check if an error is a transient/rate-limit error worth retrying."""
         error_str = str(error).lower()
+        # Payload too large is a configuration error, not a transient one — do NOT retry
+        if "larger than allowed" in error_str or "payload" in error_str and "limit" in error_str:
+            return False
         retryable_keywords = [
             "429", "resource_exhausted", "rate limit", "quota",
             "too many requests", "overloaded", "503", "service unavailable",
@@ -232,10 +283,9 @@ class VectorManager:
             if progress_callback:
                 progress_callback(batch_idx + 1, total_batches, f"⏳ Embedding {batch_label}...")
 
-            success = False
-            for attempt in range(1, MAX_RETRIES + 1):
+            attempt = 1
+            while True:
                 try:
-
                     if vector_store is None:
                         if vectordb_type == "qdrant":
                             db_name = os.path.basename(db_path)
@@ -423,7 +473,7 @@ class VectorManager:
         df.reset_index(drop=True, inplace=True)
         return df
 
-    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None, scientific_mode: bool = False, scientific_config: Dict[str, Any] = None) -> Dict[str, Any]:
+    def create_database(self, db_name: str, file_paths: List[str], provider: str, model_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, batch_size: int = DEFAULT_BATCH_SIZE, progress_callback: Optional[Callable] = None, scientific_mode: bool = False, scientific_config: Dict[str, Any] = None, use_intelligent_chunking: bool = True) -> Dict[str, Any]:
         if scientific_config is None:
             scientific_config = {}
         """
@@ -458,7 +508,8 @@ class VectorManager:
                     "model_name": model_name,
                     "vectordb": scientific_config.get("vectordb", "chroma"),
                     "scientific_mode": scientific_mode,
-                    "scientific_config": scientific_config
+                    "scientific_config": scientific_config,
+                    "use_intelligent_chunking": use_intelligent_chunking
                 }, f, indent=4)
         except Exception as e:
             logging.error(f"Could not save config.json to {db_path}: {e}")
@@ -540,8 +591,8 @@ class VectorManager:
         if progress_callback:
             progress_callback(0, 0, f"✂️ Splitting {len(documents)} document(s) into chunks...")
 
-        if scientific_mode:
-            # MarkdownTextSplitter is smarter for scientific mode since output is rich markdown
+        if use_intelligent_chunking:
+            # MarkdownTextSplitter is smarter since output from OCR is rich markdown or native .md files
             # It splits at markdown headers, code blocks, tables before splitting paragraphs
             text_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         else:
@@ -695,18 +746,18 @@ class VectorManager:
                 # Setup client
                 client = self._get_qdrant_client(params)
                 
-                # Fetch distinct sources efficiently by only requesting the source field
+                # Fetch distinct sources efficiently by only requesting the metadata field
                 try:
-                    from qdrant_client.http import models
                     res, _ = client.scroll(
                         collection_name=db_name, 
                         limit=10000, 
-                        with_payload=models.PayloadSelectorInclude(include=["metadata.source"]), 
+                        with_payload=["metadata"], 
                         with_vectors=False
                     )
                 except Exception as ex:
-                    # Fallback if PayloadSelectorInclude is unsupported
-                    res, _ = client.scroll(collection_name=db_name, limit=10000, with_payload=True, with_vectors=False)
+                    # Fallback if specific payload selection fails, limit to 50 to prevent GIL blocking
+                    logging.error(f"Payload selector failed: {ex}. Falling back to limited query.")
+                    res, _ = client.scroll(collection_name=db_name, limit=50, with_payload=True, with_vectors=False)
                 sources = set()
                 for record in res:
                     if record.payload and "metadata" in record.payload and "source" in record.payload["metadata"]:
@@ -870,7 +921,8 @@ class VectorManager:
             
             if documents:
                 config = self.get_database_config(db_path)
-                if config.get("parser", "pdfplumber") in ["marker", "marker_vlm"]:
+                use_intelligent_chunking = config.get("use_intelligent_chunking", True)
+                if use_intelligent_chunking:
                     text_splitter = MarkdownTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
                 else:
                     text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)

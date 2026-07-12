@@ -56,3 +56,4 @@ services:
       - ./db:/app/db
       - ./workspace:/app/workspace
     restart: unless-stopped
+

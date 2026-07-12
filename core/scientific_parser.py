@@ -99,19 +99,39 @@ class ScientificParser:
             }
         ]
 
-        try:
-            # LiteLLM automatically routes to the right provider based on the model name prefix
-            api_base = os.getenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
-            response = completion(
-                model=model,
-                messages=messages,
-                temperature=0.0,
-                api_base=api_base
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Error calling VLM '{model}' for role '{role}': {e}")
-            return f"[Error extracting {role} with {model}: {e}]"
+        base_delay = 5.0
+        attempt = 1
+        
+        while True:
+            try:
+                # LiteLLM automatically routes to the right provider based on the model name prefix
+                api_base = os.getenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
+                response = completion(
+                    model=model,
+                    messages=messages,
+                    temperature=0.0,
+                    api_base=api_base
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_str = str(e).lower()
+                retryable_keywords = [
+                    "429", "resource_exhausted", "rate limit", "quota",
+                    "too many requests", "overloaded", "503", "service unavailable",
+                    "timeout", "timed out", "connection", "connect", "temporarily unavailable"
+                ]
+                is_retryable = any(kw in error_str for kw in retryable_keywords)
+                
+                if is_retryable:
+                    # Exponential backoff capped at 120 seconds
+                    wait_time = min(base_delay * (2 ** (attempt - 1)), 120.0)
+                    logger.warning(f"VLM error '{e}'. System paused. Retrying in {wait_time}s (Attempt {attempt})...")
+                    import time
+                    time.sleep(wait_time)
+                    attempt += 1
+                else:
+                    logger.error(f"Non-retryable error calling VLM '{model}' for role '{role}': {e}")
+                    return f"[Error extracting {role} with {model}: {e}]"
 
     def _process_graph(self, image: Image.Image, page_num: int, obj_index: int) -> str:
         # Preprocess graph for better line visibility
@@ -134,8 +154,13 @@ class ScientificParser:
     def _process_table(self, image: Image.Image, page_num: int, obj_index: int) -> str:
         prompt = (
             "You are an expert data analyst. Please convert this image of a table "
-            "into a clean, well-formatted Markdown table. Ensure all headers and data cells are accurate. "
-            "Do not include any extra conversational text, just the Markdown table."
+            "into a clean, well-formatted Markdown table. "
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. Extract ONLY the essential information and data cells.\n"
+            "2. DO NOT include any filler spaces, invisible characters, or ambiguous noise used for visual alignment.\n"
+            "3. Ensure all headers and data cells are accurate and concise.\n"
+            "4. Ignore watermarks, page numbers, or any text outside the actual table.\n"
+            "5. Do not include any extra conversational text, output JUST the Markdown table."
         )
         result = self._call_vlm(image, prompt, "tables")
         
@@ -290,6 +315,20 @@ class ScientificParser:
         
         documents = []
         
+        if self.parser_type == "mistral_ocr":
+            try:
+                from core.mistral_parser import MistralOCRParser
+                mistral_parser = MistralOCRParser()
+                docs = mistral_parser.parse_pdf(file_path)
+                if docs:
+                    base_name = os.path.splitext(os.path.basename(file_path))[0]
+                    self._extract_markdown_tables(docs[0].page_content, base_name)
+                    return docs
+                else:
+                    logger.warning(f"Mistral OCR returned no documents for {file_path}. Falling back to pdfplumber.")
+            except Exception as e:
+                logger.error(f"Mistral OCR parser failed: {e}. Falling back to pdfplumber.")
+
         if self.parser_type in ["marker", "marker_vlm"]:
             try:
                 from core.marker_parser import MarkerParser
