@@ -1,16 +1,16 @@
 # Alfredo: AI OS Multi-Agent Orchestrator
 
-## 🎯 La Visione: Un "Sistema Operativo" Olistico per l'Intelligenza Artificiale
-Il panorama dell'Intelligenza Artificiale è frammentato tra decine di tool, librerie e provider isolati. L'obiettivo di **Alfredo** è unificare questo ecosistema fornendo un'interfaccia olistica, modulare e potente. 
+## 🎯 The Vision: A Holistic "Operating System" for AI
+The Artificial Intelligence landscape is currently fragmented across dozens of isolated tools, libraries, and providers. The goal of **Alfredo** is to unify this ecosystem by providing a holistic, modular, and powerful interface.
 
-Alfredo nasce per essere un vero e proprio **AI OS (Operating System)** con una UI completa, progettata per coprire l'intero ciclo di vita dell'Intelligenza Artificiale: dalla gestione fluida di modelli locali (Ollama) e cloud (Gemini, OpenAI), fino alla creazione di database vettoriali complessi, coordinamento multi-agente e skill avanzate. 
+Alfredo was born to be a true **AI OS (Operating System)** with a comprehensive UI, designed to cover the entire AI lifecycle: from the seamless management of local models (Ollama) and cloud models (Gemini, OpenAI), to the creation of complex vector databases, multi-agent coordination, and advanced skills.
 
-Non è solo un chatbot: è una piattaforma progettata per darti il pieno controllo sui tuoi dati e sui tuoi agenti.
+It's not just a chatbot: it's a platform designed to give you full control over your data and your agents.
 
-## 🤖 Cosa Rende Alfredo Unico?
-Alfredo agisce come ponte centrale tra una **Master AI** conversazionale, un team di agenti specializzati, una **Web UI** user-friendly (Streamlit) e interfacce remote asincrone (**Telegram Bot**).
+## 🤖 What Makes Alfredo Unique?
+Alfredo acts as the central bridge between a conversational **Master AI**, a team of specialized agents, a user-friendly **Web UI** (Streamlit), and asynchronous remote interfaces (**Telegram Bot**).
 
-Con Alfredo hai a disposizione un ambiente di lavoro unificato dove puoi costruire, gestire e far evolvere i tuoi flussi AI in assoluta flessibilità.
+With Alfredo, you have a unified workspace where you can build, manage, and evolve your AI workflows with absolute flexibility.
 
 ### ✨ Core Capabilities
 - **RAG Creation (Vectorial & Non-Vectorial):** Ground your AI with your actual data. Build robust Retrieval-Augmented Generation systems using local databases or advanced vector stores to completely eliminate hallucinations.
@@ -102,3 +102,10 @@ Alfredo uses a `.env` file for configuration. Here are the core variables:
 ## ⚖️ License
 
 This project is licensed under the **PolyForm Non-Commercial License 1.0.0**. You are free to view, modify, and distribute this software for personal and non-commercial purposes. Commercial use or exploitation of this software requires prior written permission from the author.
+
+---
+
+## 📬 Contact
+For inquiries, collaborations, or feedback, please reach out to:
+**Pietro Sidoli**  
+📧 Email: [pietrosidoli@gmail.com](mailto:pietrosidoli@gmail.com)
