@@ -33,6 +33,7 @@ import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
 import tools.email_tool as email_tool
+import tools.thermo_excel_writer as thermo_excel_writer
 from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryTool
 
 # Setup logging
@@ -108,6 +109,8 @@ ALLOWED_TOOLS = {
     "calculator": local_tools.calculate,
     # Code tools (read + execute only — writing is handled by Master AI exports)
     "python_repl_tool": local_tools.python_repl,
+    # Thermodynamic tools
+    "merge_and_save_data": thermo_excel_writer.merge_and_save_data,
     # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
     "read_atomic_memory": None,   # Sentinel
     "write_atomic_memory": None,  # Sentinel

@@ -30,6 +30,16 @@ provider_map:
       - claude-3-5-sonnet-20240620
       - claude-3-opus-20240229
       - claude-3-haiku-20240307
+  MISTRAL_API_KEY:
+    provider: Mistral
+    models:
+      - mistral-large-latest
+      - mistral-small-latest
+      - pixtral-12b-2409
+      - pixtral-large-latest
+      - codestral-latest
+      - ministral-8b-latest
+      - ministral-3b-latest
 
 local_models:
   - llama3

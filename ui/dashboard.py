@@ -188,7 +188,10 @@ def render_knowledge_base():
                         
                         if folder_exists:
                             db_config = vm.get_database_config(vdb['path'])
-                            st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
+                            if db_config.get('use_intelligent_chunking', False):
+                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\n🧠 **Intelligent Markdown Chunking** Enabled")
+                            else:
+                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
                         else:
                             st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
                             
@@ -428,7 +431,10 @@ def render_knowledge_base():
             # Form to add files to this database
             st.markdown("### ➕ Add Files to this Database")
             db_config = vm.get_database_config(vdb['path'])
-            st.caption(f"Files will be vectorized using **{vdb['provider']} / {vdb['model_name']}** with Chunk Size: **{db_config['chunk_size']}** and Overlap: **{db_config['chunk_overlap']}**.")
+            if db_config.get('use_intelligent_chunking', False):
+                st.caption(f"Files will be vectorized using **{vdb['provider']} / {vdb['model_name']}** with **🧠 Intelligent Markdown Chunking**.")
+            else:
+                st.caption(f"Files will be vectorized using **{vdb['provider']} / {vdb['model_name']}** with Chunk Size: **{db_config.get('chunk_size', 'N/A')}** and Overlap: **{db_config.get('chunk_overlap', 'N/A')}**.")
             
             with st.form("add_files_to_db_form"):
                 new_files = st.file_uploader(
@@ -745,6 +751,8 @@ def render_knowledge_base():
                     "openai/gpt-4o",                # Excellent coordinate estimation
                     "openai/gpt-4o-mini",           # Lighter but capable
                     "anthropic/claude-3-5-sonnet-20240620",
+                    "mistral/pixtral-large-latest",
+                    "mistral/pixtral-12b-2409",
                     # Local (16GB friendly)
                     "ollama/qwen3-vl:8b",           # SOTA local VLM, best for charts
                     "ollama/gemma3:12b",            # Strong chart/document analysis
@@ -762,6 +770,8 @@ def render_knowledge_base():
                     "google/gemini-2.5-pro",        # Best accuracy
                     "openai/gpt-4o",
                     "anthropic/claude-3-5-sonnet-20240620",  # Excellent Markdown output
+                    "mistral/pixtral-large-latest",
+                    "mistral/pixtral-12b-2409",
                     # Local (16GB friendly — specialized)
                     "ollama/glm-ocr",               # 0.9B, SOTA table/OCR specialist
                     "ollama/granite3.2-vision",     # IBM, surgical on table extraction
@@ -778,6 +788,8 @@ def render_knowledge_base():
                     "google/gemini-2.0-flash",
                     "openai/gpt-4o",                # Strong engineering understanding
                     "anthropic/claude-3-5-sonnet-20240620",
+                    "mistral/pixtral-large-latest",
+                    "mistral/pixtral-12b-2409",
                     # Local (16GB friendly)
                     "ollama/qwen3-vl:8b",           # Best local for complex images
                     "ollama/pixtral:12b",           # Mistral, native resolution captures tiny P&ID text
@@ -796,6 +808,8 @@ def render_knowledge_base():
                         elif m.startswith("openai/") and current_env.get("OPENAI_API_KEY"):
                             result.append(m)
                         elif m.startswith("anthropic/") and current_env.get("ANTHROPIC_API_KEY"):
+                            result.append(m)
+                        elif m.startswith("mistral/") and current_env.get("MISTRAL_API_KEY"):
                             result.append(m)
                         elif m.startswith("ollama/"):
                             result.append(m)  # Local models are always available
@@ -958,7 +972,8 @@ def render_api_vault():
         "GROQ_API_KEY", 
         "ANTHROPIC_API_KEY", 
         "GEMINI_API_KEY",
-        "OLLAMA_API_KEY"
+        "OLLAMA_API_KEY",
+        "MISTRAL_API_KEY"
     ]
     
     # To prevent displaying internal Docker OS variables in the UI, we only list keys from the file + suggestions
@@ -969,7 +984,7 @@ def render_api_vault():
     ])
     
     # Categorize keys dynamically
-    llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA"]
+    llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA", "MISTRAL"]
     llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords) and k != "OLLAMA_API_BASE"]
     
     connection_suffixes = ["_API_KEY", "_DB_URL", "_TOKEN", "_PASSWORD"]
@@ -1101,6 +1116,7 @@ def render_api_vault():
                             elif "ANTHROPIC" in final_key_name: prov_name = "Anthropic"
                             elif "GEMINI" in final_key_name or "GOOGLE" in final_key_name: prov_name = "Google"
                             elif "OLLAMA" in final_key_name: prov_name = "Ollama"
+                            elif "MISTRAL" in final_key_name: prov_name = "Mistral"
                             
                             provider_map[final_key_name] = {"provider": prov_name, "models": [], "embed_models": []}
                             

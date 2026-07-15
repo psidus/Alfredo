@@ -102,6 +102,36 @@ def whitelist_check(func):
 
 # --- Shared Helpers ---
 
+async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, parse_mode=None, reply_markup=None):
+    """Sends a message, splitting it into chunks if it exceeds Telegram's limit."""
+    MAX_LEN = 3900
+    if len(text) <= MAX_LEN:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return
+
+    chunks = []
+    current_chunk = ""
+    for line in text.split('\n'):
+        if len(current_chunk) + len(line) + 1 > MAX_LEN:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = line + "\n"
+            while len(current_chunk) > MAX_LEN:
+                chunks.append(current_chunk[:MAX_LEN])
+                current_chunk = current_chunk[MAX_LEN:]
+        else:
+            current_chunk += line + "\n"
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    for i, chunk in enumerate(chunks):
+        markup = reply_markup if i == len(chunks) - 1 else None
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode=parse_mode, reply_markup=markup)
+        except Exception as e:
+            logger.warning(f"Failed to send chunk with parse_mode {parse_mode}. Falling back to plain text. Error: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=chunk.strip(), reply_markup=markup)
+
 async def _send_workflow_list(chat_id: int, bot) -> None:
     """Sends the workflow selection menu to the given chat_id."""
     workflows = db.read_all_workflows()
@@ -557,14 +587,12 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 final_summary = format_plan_summary(plan)
                 full_text = f"✅ <b>Plan Expanded!</b>\n\n{final_summary}"
-                # Truncate if it exceeds Telegram's 4096 char limit
-                if len(full_text) > 4000:
-                    full_text = full_text[:3950] + "\n\n<i>... (plan truncated for display)</i>"
                 
                 keyboard = [[InlineKeyboardButton("✅ Confirm & Proceed", callback_data="confirm_plan")]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                await context.bot.send_message(
+                await send_long_message(
+                    context=context,
                     chat_id=chat_id,
                     text=full_text,
                     parse_mode=ParseMode.HTML,
@@ -619,10 +647,8 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         if draft_plan:
             try:
                 draft_summary = format_plan_summary(draft_plan)
-                if len(draft_summary) > 4000:
-                    draft_summary = draft_summary[:3950] + "\n\n<i>... (truncated)</i>"
-                await context.bot.send_message(
-                    chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
+                await send_long_message(
+                    context=context, chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
                 )
             except Exception as draft_err:
                 logger.error(f"Failed to send draft summary: {draft_err}")
@@ -1102,15 +1128,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             pass
 
         # Send the refined report — use Markdown for better formatting
-        # Truncate if needed (Telegram max message length is 4096 chars)
+        # Send using chunked messages to avoid Telegram limit
         report_text = refined_result
-        if len(report_text) > 3800:
-            report_text = report_text[:3800] + "\n\n... _(truncated — full report saved in history)_"
-
         final_caption = f"✅ *Execution Complete!*\n\n{report_text}\n\n_Choose how to proceed:_"
 
         try:
-            await context.bot.send_message(
+            await send_long_message(
+                context=context,
                 chat_id=chat_id,
                 text=final_caption,
                 parse_mode=ParseMode.MARKDOWN,

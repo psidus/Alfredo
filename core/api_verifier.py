@@ -17,6 +17,8 @@ def verify_and_fetch_models(env_key: str, api_key: str) -> dict:
         return _fetch_anthropic(api_key)
     elif "OLLAMA" in env_key:
         return _fetch_ollama(api_key)
+    elif "MISTRAL" in env_key:
+        return _fetch_mistral(api_key)
     
     return {"success": False, "error": "Unsupported provider key format."}
 
@@ -185,3 +187,29 @@ def get_ollama_model_info(model_name: str, api_key: str = ""):
         return {"success": True, "max_context": max_context}
     except Exception as e:
         return {"success": False, "error": str(e), "max_context": 8192}
+
+def _fetch_mistral(api_key: str):
+    url = "https://api.mistral.ai/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 401:
+            return {"success": False, "error": "Invalid API Key"}
+        response.raise_for_status()
+        
+        data = response.json().get("data", [])
+        chat_models = []
+        embed_models = []
+        
+        for m in data:
+            model_id = m.get("id", "")
+            if "embed" in model_id:
+                embed_models.append(model_id)
+            elif "moderation" not in model_id:
+                chat_models.append(model_id)
+                
+        chat_models.sort()
+        embed_models.sort()
+        return {"success": True, "chat_models": chat_models, "embed_models": embed_models}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
