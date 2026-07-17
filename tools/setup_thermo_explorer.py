@@ -121,8 +121,8 @@ Output the success message from the tool.""",
 
     db.create_workflow(
         name="Thermo Explorer (Autonomous)",
-        description="A completely autonomous workflow that linearly reads a RAG document chunk by chunk, filters out known chemicals, deeply extracts properties for new ones, and automatically triggers its next iteration until the book is finished.",
-        task_ids_json=task_ids_json
+        task_ids=[task_1_id, batch_node, task_3_id],
+        requires_human_check=False
     )
     print("✅ Successfully set up the Thermo Explorer (Autonomous) workflow!")
     print("It uses a 3-level architecture: Linear Paginator -> Map/Reduce Extractor -> Auto-Trigger.")

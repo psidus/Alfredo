@@ -80,7 +80,8 @@ def generate_tool_code(prompt: str, model_id: int) -> str:
     completion_kwargs = {
         "model": model_string,
         "messages": messages,
-        "temperature": 0.2
+        "temperature": 0.2,
+        "timeout": 30
     }
     
     if provider in ["ollama", "lmstudio", "vllm"] or model_record.get('is_local'):
@@ -140,7 +141,8 @@ def generate_tool_code_stream(prompt: str, model_id: int):
         "messages": messages,
         "temperature": 0.2,
         "stream": True,
-        "max_tokens": 2000
+        "max_tokens": 2000,
+        "timeout": 30
     }
     
     # Load API keys fresh from file in case they were updated in UI

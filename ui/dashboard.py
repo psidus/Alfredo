@@ -2548,11 +2548,14 @@ def render_workflow_assembler():
         raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
         default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
 
+        default_export_instructions = (editing_workflow.get("export_instructions", "") or "") if editing_workflow else ""
+
         if "last_editing_workflow_id" not in st.session_state or st.session_state.last_editing_workflow_id != current_editing_wf_id:
             st.session_state.last_editing_workflow_id = current_editing_wf_id
             st.session_state.wf_name_input = default_wf_name
             st.session_state.wf_human_check = default_wf_human_check
             st.session_state.wf_expected_exports = default_wf_expected_exports
+            st.session_state.wf_export_instructions = default_export_instructions
             st.session_state.wf_selected_task_ids = default_wf_task_ids
             for k in list(st.session_state.keys()):
                 if k.startswith("wf_check_"):
@@ -2608,23 +2611,13 @@ def render_workflow_assembler():
             # Keep session state updated with the selected list so if validation fails it persists
             st.session_state.wf_expected_exports = parsed_exports
 
-            # --- Export Instructions (optional guidance for the Master AI) ---
-            default_export_instructions = ""
-            if editing_workflow:
-                default_export_instructions = editing_workflow.get("export_instructions", "") or ""
-        
-            if "wf_export_instructions" not in st.session_state or st.session_state.get("last_editing_workflow_id") != current_editing_wf_id:
-                st.session_state.wf_export_instructions = default_export_instructions
-
             export_instructions = st.text_area(
                 "📝 Export Instructions (Optional)",
-                key="wf_export_instructions_input",
-                value=st.session_state.wf_export_instructions,
+                key="wf_export_instructions",
                 placeholder="e.g., For Python: extract the simulation model from the Developer agent. For Excel: use the metrics from the Analyst agent. For Word: write a full report.",
                 help="Guide the Master AI on what to extract from each agent's output for each file format. Leave empty to let the AI decide automatically.",
                 height=100
             )
-            st.session_state.wf_export_instructions = export_instructions
 
         
             st.markdown("---")

@@ -52,6 +52,7 @@ class PostgresManager:
     def _connect(self):
         try:
             self.conn = psycopg2.connect(self.db_url)
+            self.conn.autocommit = True
             self.cursor = self.conn.cursor(cursor_factory=RealDictCursor)
         except psycopg2.Error as e:
             print(f"Database connection error: {e}")

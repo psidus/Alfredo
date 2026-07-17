@@ -1038,7 +1038,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the agent's prompts."}
             ],
             temperature=0.3,
-            stream=True
+            stream=True,
+            timeout=30
         )
         
         # Explicitly pass api_key in case it was updated in UI without restart
@@ -1191,7 +1192,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the task's fields."}
             ],
             temperature=0.3,
-            stream=True
+            stream=True,
+            timeout=30
         )
         
         # Explicitly pass api_key in case it was updated in UI without restart
