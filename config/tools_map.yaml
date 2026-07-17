@@ -4,6 +4,32 @@ tools_registry:
     description: "Allows agents to read files inside the agent's workspace/ folder."
     required_secrets: []
 
+  write_file:
+    display_name: "Local: Write File (Workspace)"
+    description: "Allows agents to write files inside the agent's workspace/ folder. Overwrites existing files."
+    required_secrets: []
+
+  write_python_file:
+    display_name: "Code: Write Python File (Project)"
+    description: "Allows agents to write .py scripts to the project. Use with caution."
+    required_secrets: []
+
+  create_word_document:
+    display_name: "Office: Create Word Document"
+    description: "Creates a new Word (.docx) document in the workspace. Requires human confirmation."
+    required_secrets: []
+
+  edit_word_document:
+    display_name: "Office: Edit Word Document"
+    description: "Edits an existing Word (.docx) document in the workspace. Requires human confirmation."
+    required_secrets: []
+
+  create_excel_document:
+    display_name: "Office: Create Excel Document"
+    description: "Creates a new Excel (.xlsx) document in the workspace. Requires human confirmation."
+    required_secrets: []
+
+
   read_file_anywhere:
     display_name: "Local: Read Any File (Full PC)"
     description: "Reads any text file at any location on the computer. Read-only — no modifications allowed."
@@ -63,3 +89,8 @@ tools_registry:
     required_secrets: []
     category: "app_integration"
 
+
+  merge_and_save_data:
+    display_name: "Local: Thermo Excel DB Writer"
+    description: "Merges thermodynamic property data and saves it to an Excel database."
+    required_secrets: []

@@ -2,7 +2,7 @@ import os
 import pandas as pd
 from pydantic import BaseModel
 from typing import Optional
-from core.thermo_schemas import ExtractionOutput
+from core.schemas.thermo_schemas import ExtractionOutput
 from crewai.tools import tool
 
 DB_PATH = "storage/thermo_database.xlsx"

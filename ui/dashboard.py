@@ -18,6 +18,7 @@ from dotenv import dotenv_values, set_key, find_dotenv
 from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
+from core.schema_loader import get_available_schemas, get_schema_class
 
 def safe_set_key(env_path, key_to_set, value_to_set):
     """
@@ -29,6 +30,7 @@ def safe_set_key(env_path, key_to_set, value_to_set):
     if not os.path.exists(env_path):
         with open(env_path, 'w', encoding='utf-8') as f:
             f.write(f'{key_to_set}="{value_to_set}"\n')
+        os.environ[key_to_set] = str(value_to_set)
         return
 
     with open(env_path, 'r', encoding='utf-8') as f:
@@ -48,6 +50,8 @@ def safe_set_key(env_path, key_to_set, value_to_set):
         
     with open(env_path, 'w', encoding='utf-8') as f:
         f.writelines(lines)
+        
+    os.environ[key_to_set] = str(value_to_set)
 
 @st.cache_resource
 def get_db_manager():
@@ -990,7 +994,7 @@ def render_api_vault():
     connection_suffixes = ["_API_KEY", "_DB_URL", "_TOKEN", "_PASSWORD"]
     conn_keys = [k for k in all_env_keys if k not in llm_keys and any(k.endswith(s) for s in connection_suffixes)]
     
-    agent_keys = ["MASTER_AI_MODEL_ID", "DEFAULT_AGENT_MODEL_ID"]
+    agent_keys = ["MASTER_AI_MODEL_NAME", "DEFAULT_AGENT_MODEL_NAME"]
     headroom_keys = ["HEADROOM_ENABLED", "HEADROOM_PROXY_URL"]
     system_keys = [k for k in all_env_keys if k not in llm_keys and k not in conn_keys and k not in agent_keys and k not in headroom_keys]
     
@@ -998,7 +1002,7 @@ def render_api_vault():
     key_tooltips = {
         "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
         "ERP_DB_URL": "Address to access the external app database (e.g. Biomass DB).",
-        "MASTER_AI_MODEL_ID": "The main AI brain Alfredo uses for everyday tasks.",
+        "MASTER_AI_MODEL_NAME": "The main AI brain Alfredo uses for everyday tasks.",
         "OLLAMA_API_BASE": "The URL of the local or remote Ollama server (e.g. http://192.168.178.105:11434)."
     }
     
@@ -1045,7 +1049,92 @@ def render_api_vault():
                 with (col3 if i % 2 == 0 else col4):
                     # Using HTML title attribute to create a native tooltip
                     st.markdown(f'<span title="{tooltip}" style="cursor: help;">{status_icon} <b>{key}</b></span>', unsafe_allow_html=True)
+                    
+        st.divider()
+        
+        # --- Main Agent (Master AI) Configuration Row ---
+        st.markdown("### 🧠 Global Default Models")
+        
+        models = db.read_all_models()
+        model_names = []
+        model_ids = []
+        model_options = {}
+        if models:
+            model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
+            model_names = list(model_options.keys())
+            model_ids = list(model_options.values())
+        
+        agent_tooltips = {
+            "MASTER_AI_MODEL_NAME": "Routes incoming requests and acts as the main system orchestrator.",
+            "DEFAULT_AGENT_MODEL_NAME": "Automatically used by any agent if you don't explicitly assign a model for a specific task."
+        }
+        
+        st.markdown("**Configured AI Default Variables**")
+        col_env1, col_env2 = st.columns(2)
+        for idx, env_var in enumerate(["MASTER_AI_MODEL_NAME", "DEFAULT_AGENT_MODEL_NAME"]):
+            is_set = env_var in current_env and bool(str(current_env.get(env_var, "")).strip())
+            icon = "🟢" if is_set else "🔴"
+            tooltip = agent_tooltips.get(env_var, "")
+            with [col_env1, col_env2][idx]:
+                st.markdown(f'<span title="{tooltip}" style="cursor: help;">{icon} <b>{env_var}</b></span>', unsafe_allow_html=True)
+        st.write("") # Spacer
 
+        current_master_model_name = current_env.get("MASTER_AI_MODEL_NAME", "")
+        
+        default_master_index = 0
+        if current_master_model_name:
+            for idx, name_str in enumerate(model_names):
+                if current_master_model_name in name_str:
+                    default_master_index = idx
+                    break
+            
+        col_master_model, col_master_save = st.columns([4, 1])
+        with col_master_model:
+            selected_master_model_str = st.selectbox(
+                "Select Model for Master AI (System Orchestrator)", 
+                options=model_names, 
+                index=default_master_index,
+                key="master_ai_model_select",
+                help="Select the model that Master AI will use for routing intents and refining agent output."
+            )
+        with col_master_save:
+            st.write("") # Spacer
+            st.write("") # Spacer
+            if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
+                if selected_master_model_str:
+                    chosen_model_name = selected_master_model_str.split(" / ", 1)[-1]
+                    safe_set_key(env_path, "MASTER_AI_MODEL_NAME", chosen_model_name)
+                    st.toast("Master AI Model saved successfully!", icon="✅")
+                    st.rerun()
+                
+        # Read current Default Agent model selection from .env
+        current_default_agent_model_name = current_env.get("DEFAULT_AGENT_MODEL_NAME", "")
+        default_agent_index = 0
+        if current_default_agent_model_name:
+            for idx, name_str in enumerate(model_names):
+                if current_default_agent_model_name in name_str:
+                    default_agent_index = idx
+                    break
+            
+        col_agent_model, col_agent_save = st.columns([4, 1])
+        with col_agent_model:
+            selected_default_agent_model_str = st.selectbox(
+                "Select Default Model for Agents", 
+                options=model_names, 
+                index=default_agent_index,
+                key="default_agent_model_select",
+                help="Select the default model that all agents will use if a task doesn't override it."
+            )
+        with col_agent_save:
+            st.write("") # Spacer
+            st.write("") # Spacer
+            if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
+                if selected_default_agent_model_str:
+                    chosen_agent_model_name = selected_default_agent_model_str.split(" / ", 1)[-1]
+                    safe_set_key(env_path, "DEFAULT_AGENT_MODEL_NAME", chosen_agent_model_name)
+                    st.toast("Default Agent Model saved successfully!", icon="✅")
+                    st.rerun()
+                
         st.divider()
         st.subheader("Global Resource Settings")
         st.markdown("Configure limits for parallel agent execution based on your hardware.")
@@ -1158,6 +1247,28 @@ def render_api_vault():
 
         st.subheader("Local Model registry")
         
+        # --- Configure Local Provider ---
+        with st.expander("🔌 Configure Local Provider (Ollama)", expanded=False):
+            env_path = os.path.join(os.getcwd(), '.env')
+            current_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+            current_key = os.getenv("OLLAMA_API_KEY", "")
+            
+            new_url = st.text_input("Ollama Base URL", value=current_url, help="The IP and port of your Ollama server (e.g., http://192.168.178.105:11434/).")
+            new_key = st.text_input("Ollama API Key (Optional)", value=current_key, type="password")
+            
+            if st.button("Connect & Refresh Models"):
+                safe_set_key(env_path, "OLLAMA_API_BASE", new_url)
+                safe_set_key(env_path, "OLLAMA_API_KEY", new_key)
+                from core.api_verifier import _fetch_ollama
+                res = _fetch_ollama(api_key=new_key, base_url_override=new_url)
+                if res.get("success"):
+                    st.success(f"Connected successfully! Found {len(res.get('chat_models', []))} models.")
+                    import time
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"Connection failed: {res.get('error')}")
+        
         # Load model config
         model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
         model_config = DataManager.load_yaml(model_map_path)
@@ -1168,9 +1279,11 @@ def render_api_vault():
         from core.api_verifier import _fetch_ollama, get_ollama_model_info
         ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
         ollama_models = _fetch_ollama(ollama_api_key)
+        LOCAL_MODELS_DETAILED = []
         if ollama_models.get("success"):
             # If API succeeds, only show the actually pulled models
             LOCAL_MODELS = ollama_models.get("chat_models", [])
+            LOCAL_MODELS_DETAILED = ollama_models.get("chat_models_detailed", [])
         # else it falls back to the hardcoded list from models_map.yaml
         
         st.markdown("Add or update a model available for agents.")
@@ -1182,13 +1295,26 @@ def render_api_vault():
         
         local_col1, local_col2 = st.columns(2)
         with local_col1:
-            selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."])
+            def format_model(name):
+                if name == "Other (Manual)...": return name
+                for m in LOCAL_MODELS_DETAILED:
+                    if m["name"] == name:
+                        return f"{name} ({m['size_gb']} GB VRAM)"
+                return name
+
+            selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."], format_func=format_model)
             if selected_local == "Other (Manual)...":
                 model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
             else:
                 model_name = selected_local
         with local_col2:
-            vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=4.0, step=0.5, help="Estimated memory used by this model.")
+            default_vram = 4.0
+            if selected_local != "Other (Manual)...":
+                for m in LOCAL_MODELS_DETAILED:
+                    if m["name"] == selected_local:
+                        default_vram = float(m["size_gb"])
+                        break
+            vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=default_vram, step=0.5, help="Estimated memory used by this model.")
 
         submitted = st.button("Add Local Model", type="primary")
         if submitted and provider and model_name:
@@ -1253,93 +1379,6 @@ def render_agent_caserma():
         return
 
     model_options = {f"{m['provider']} / {m['model_name']}": m['id'] for m in models}
-    
-    # --- Main Agent (Master AI) Configuration Row ---
-    st.markdown("### 🧠 Global Default Models")
-    
-    # Read current Master AI model selection from .env
-    from dotenv import set_key
-    env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
-    current_env = dotenv_values(env_path)
-    
-    agent_tooltips = {
-        "MASTER_AI_MODEL_ID": "Routes incoming requests and acts as the main system orchestrator.",
-        "DEFAULT_AGENT_MODEL_ID": "Automatically used by any agent if you don't explicitly assign a model for a specific task."
-    }
-    
-    st.markdown("**Configured AI Default Variables**")
-    col_env1, col_env2 = st.columns(2)
-    for idx, env_var in enumerate(["MASTER_AI_MODEL_ID", "DEFAULT_AGENT_MODEL_ID"]):
-        is_set = env_var in current_env and bool(str(current_env.get(env_var, "")).strip())
-        icon = "🟢" if is_set else "🔴"
-        tooltip = agent_tooltips.get(env_var, "")
-        with [col_env1, col_env2][idx]:
-            st.markdown(f'<span title="{tooltip}" style="cursor: help;">{icon} <b>{env_var}</b></span>', unsafe_allow_html=True)
-    st.write("") # Spacer
-
-    current_master_model_id = current_env.get("MASTER_AI_MODEL_ID", "")
-    
-    # Find matching model index
-    model_names = list(model_options.keys())
-    model_ids = list(model_options.values())
-    
-    default_master_index = 0
-    try:
-        if current_master_model_id:
-            master_model_id_int = int(current_master_model_id)
-            if master_model_id_int in model_ids:
-                default_master_index = model_ids.index(master_model_id_int)
-    except ValueError:
-        pass
-        
-    col_master_model, col_master_save = st.columns([4, 1])
-    with col_master_model:
-        selected_master_model_str = st.selectbox(
-            "Select Model for Master AI (System Orchestrator)", 
-            options=model_names, 
-            index=default_master_index,
-            key="master_ai_model_select",
-            help="Select the model that Master AI will use for routing intents and refining agent output."
-        )
-    with col_master_save:
-        st.write("") # Spacer
-        st.write("") # Spacer
-        if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
-            chosen_model_id = model_options[selected_master_model_str]
-            safe_set_key(env_path, "MASTER_AI_MODEL_ID", str(chosen_model_id))
-            st.toast("Master AI Model saved successfully!", icon="✅")
-            st.rerun()
-            
-    # Read current Default Agent model selection from .env
-    current_default_agent_model_id = current_env.get("DEFAULT_AGENT_MODEL_ID", "")
-    default_agent_index = 0
-    try:
-        if current_default_agent_model_id:
-            agent_model_id_int = int(current_default_agent_model_id)
-            if agent_model_id_int in model_ids:
-                default_agent_index = model_ids.index(agent_model_id_int)
-    except ValueError:
-        pass
-        
-    col_agent_model, col_agent_save = st.columns([4, 1])
-    with col_agent_model:
-        selected_default_agent_model_str = st.selectbox(
-            "Select Default Model for Agents", 
-            options=model_names, 
-            index=default_agent_index,
-            key="default_agent_model_select",
-            help="Select the default model that all agents will use if a task doesn't override it."
-        )
-    with col_agent_save:
-        st.write("") # Spacer
-        st.write("") # Spacer
-        if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
-            chosen_model_id = model_options[selected_default_agent_model_str]
-            safe_set_key(env_path, "DEFAULT_AGENT_MODEL_ID", str(chosen_model_id))
-            st.toast("Default Agent Model saved successfully!", icon="✅")
-            st.rerun()
-            
-    st.divider()
     
     agents = db.read_all_agents()
     
@@ -1417,22 +1456,42 @@ def render_agent_caserma():
                 if not current_role and not current_goal and not current_backstory:
                     st.warning("Please fill in at least one field (Role, Goal, or Backstory) to optimize.")
                 else:
-                    with st.spinner("Optimizing prompts..."):
+                    st.markdown("**✨ Optimizing Agent...**")
+                    try:
+                        master_ai = MasterAI()
+                        ph = st.empty()
+                        full_text = ""
+                        import time
+                        last_update = 0
+                        for chunk in master_ai.optimize_agent_fields_stream(
+                            role=current_role,
+                            goal=current_goal,
+                            backstory=current_backstory
+                        ):
+                            full_text += chunk
+                            if time.time() - last_update > 0.1:
+                                ph.code(full_text, language="json")
+                                last_update = time.time()
+                        ph.code(full_text, language="json")
+                        
+                        import json, re
+                        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL | re.IGNORECASE)
+                        if match:
+                            full_text = match.group(1).strip()
+                            
                         try:
-                            master_ai = MasterAI()
-                            optimized = master_ai.optimize_agent_fields(
-                                role=current_role,
-                                goal=current_goal,
-                                backstory=current_backstory
-                            )
+                            optimized = json.loads(full_text)
                             st.session_state.optimized_agent_data = {
-                                "role": optimized["role"],
-                                "goal": optimized["goal"],
-                                "backstory": optimized["backstory"]
+                                "role": optimized.get("role", current_role),
+                                "goal": optimized.get("goal", current_goal),
+                                "backstory": optimized.get("backstory", current_backstory)
                             }
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error during optimization: {e}")
+                        except json.JSONDecodeError:
+                            st.error("AI returned invalid JSON format. Optimization failed.")
+                            
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error during optimization: {e}")
                             
         with col_sub:
             submitted = st.button(submit_label, type="primary", use_container_width=True, key="save_agent_btn")
@@ -1557,6 +1616,7 @@ def render_task_builder():
         "calculator": "🧮",
         "file_read_tool": "📖",
         "file_write_tool": "💾",
+        "write_python_file": "📝",
         "python_repl_tool": "🐍"
     }
 
@@ -1743,6 +1803,88 @@ def render_task_builder():
         expected_output = st.text_area("Expected Output", height=150, key="task_output_area",
                                        help="You can also use `{variable_name}` placeholders here.")
 
+        # --- Write Tool Instruction Injection ---
+        WRITE_TOOLS_MAP = {
+            "write_file": "Save the final text output to a file using the 'write_file' tool. Specify a filename in the workspace.",
+            "write_python_file": "Save the generated python code to a .py file using the 'write_python_file' tool.",
+            "create_word_document": "Generate a well-formatted Word document using the 'create_word_document' tool.",
+            "edit_word_document": "Append or edit an existing Word document using the 'edit_word_document' tool.",
+            "create_excel_document": "Generate an Excel spreadsheet with the data using the 'create_excel_document' tool."
+        }
+        
+        def on_write_tool_select():
+            selected = st.session_state.get("task_write_tool_sel", "None")
+            if selected != "None":
+                current_out = st.session_state.get("task_output_area", "")
+                instruction = WRITE_TOOLS_MAP[selected]
+                if instruction not in current_out:
+                    append_str = f"\n\n[TOOL INSTRUCTION]: {instruction}"
+                    if current_out.strip():
+                        st.session_state.task_output_area = current_out.rstrip() + append_str
+                    else:
+                        st.session_state.task_output_area = instruction
+                
+                # Auto-enable the tool checkbox
+                st.session_state[f"cb_task_{selected}"] = True
+                
+                # Reset selectbox
+                st.session_state.task_write_tool_sel = "None"
+                
+        st.selectbox(
+            "🪄 Quick Action: Assign Write Tool & Inject Instructions", 
+            options=["None"] + list(WRITE_TOOLS_MAP.keys()),
+            format_func=lambda x: "Select a tool to inject..." if x == "None" else f"{TOOL_EMOJIS.get(x, '🛠️')} {x.replace('_', ' ').title()}",
+            key="task_write_tool_sel",
+            on_change=on_write_tool_select,
+            help="Select a write tool to automatically add its usage instructions to the Expected Output and enable it for this task."
+        )
+
+        # --- Pydantic Schema Injection ---
+        available_schemas = list(get_available_schemas().keys())
+        
+        default_pydantic_str = editing_task.get('output_pydantic') if editing_task else ""
+        default_pydantic_list = [s.strip() for s in default_pydantic_str.split(',')] if default_pydantic_str else []
+        default_pydantic_list = [s for s in default_pydantic_list if s in available_schemas]
+
+        def on_schema_select():
+            sels = st.session_state.task_pydantic_sel
+            if sels:
+                import json
+                if len(sels) == 1:
+                    cls = get_schema_class(sels[0])
+                    if cls:
+                        schema_json = json.dumps(cls.model_json_schema(), indent=2)
+                else:
+                    from pydantic import create_model
+                    fields = {}
+                    for s in sels:
+                        cls = get_schema_class(s)
+                        if cls:
+                            fields[s.lower()] = (cls, ...)
+                    if fields:
+                        DynamicModel = create_model('DynamicOutputSchema', **fields)
+                        schema_json = json.dumps(DynamicModel.model_json_schema(), indent=2)
+                    else:
+                        schema_json = ""
+                        
+                if schema_json:
+                    current_out = st.session_state.get("task_output_area", "")
+                    import re
+                    current_out = re.sub(r'\n\nMust conform to this JSON schema:\n```json\n.*?\n```', '', current_out, flags=re.DOTALL)
+                    append_str = f"\n\nMust conform to this JSON schema:\n```json\n{schema_json}\n```"
+                    st.session_state.task_output_area = f"{current_out}{append_str}".strip()
+
+        selected_pydantic = st.multiselect(
+            "Enforce Pydantic Schema (Optional)",
+            options=available_schemas,
+            default=default_pydantic_list,
+            key="task_pydantic_sel",
+            on_change=on_schema_select,
+            help="Select one or more Pydantic schemas to strictly validate the JSON output. Alfredo will inject a combined schema into the Expected Output box."
+        )
+        selected_pydantic_str = ",".join(selected_pydantic) if selected_pydantic else None
+
+
         # --- Task AI Optimizer Button ---
         if st.button("✨ Optimize Description & Output with AI", key="opt_task_prompts_btn", use_container_width=True):
             current_desc = st.session_state.get("task_desc_area", "").strip()
@@ -1751,20 +1893,40 @@ def render_task_builder():
             if not current_desc and not current_out:
                 st.warning("Please fill in at least one field (Description or Expected Output) to optimize.")
             else:
-                with st.spinner("Optimizing task..."):
+                st.markdown("**✨ Optimizing Task...**")
+                try:
+                    master_ai = MasterAI()
+                    ph = st.empty()
+                    full_text = ""
+                    import time
+                    last_update = 0
+                    for chunk in master_ai.optimize_task_fields_stream(
+                        description=current_desc,
+                        expected_output=current_out
+                    ):
+                        full_text += chunk
+                        if time.time() - last_update > 0.1:
+                            ph.code(full_text, language="json")
+                            last_update = time.time()
+                    ph.code(full_text, language="json")
+                    
+                    import json, re
+                    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL | re.IGNORECASE)
+                    if match:
+                        full_text = match.group(1).strip()
+                    
                     try:
-                        master_ai = MasterAI()
-                        optimized = master_ai.optimize_task_fields(
-                            description=current_desc,
-                            expected_output=current_out
-                        )
+                        optimized = json.loads(full_text)
                         st.session_state.optimized_task_data = {
-                            "description": optimized["description"],
-                            "expected_output": optimized["expected_output"]
+                            "description": optimized.get("description", current_desc),
+                            "expected_output": optimized.get("expected_output", current_out)
                         }
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error during optimization: {e}")
+                    except json.JSONDecodeError:
+                        st.error("AI returned invalid JSON format. Optimization failed.")
+                        
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error during optimization: {e}")
         
         # --- Agent Selection with Avatar Preview ---
         # We need to peek at the session state to know which agent is selected for the preview
@@ -2089,7 +2251,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     task_model_id = model_options.get(selected_model_str)
                 
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0))
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -2101,7 +2263,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0))
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -2468,7 +2630,27 @@ def render_workflow_assembler():
             st.markdown("---")
             st.markdown("**📋 Add Workflow Blocks**")
         
-            block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], horizontal=True)
+            default_block_type_idx = 0
+            default_b_size = 5
+            default_b_source = "{previous_result}"
+            default_inner_tasks = []
+
+            all_task_options = {}
+            if tasks:
+                all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
+                for step in st.session_state.wf_selected_task_ids:
+                    if isinstance(step, dict) and step.get("type") == "batch_loop":
+                        default_block_type_idx = 1
+                        default_b_size = int(step.get("batch_size", 5))
+                        default_b_source = step.get("source_variable", "{previous_result}")
+                        for tid in step.get("task_ids", []):
+                            for k, v in all_task_options.items():
+                                if v == tid:
+                                    default_inner_tasks.append(k)
+                                    break
+                        break
+
+            block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], index=default_block_type_idx, horizontal=True)
 
             if block_type == "Single Task":
                 if not agents:
@@ -2497,13 +2679,13 @@ def render_workflow_assembler():
             elif block_type == "Batch Loop":
                 with st.container(border=True):
                     st.markdown("**Batch Loop Properties**")
-                    b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=5)
-                    b_source = st.text_input("Source Variable", value="{previous_result}", help="The variable or output holding the JSON array to iterate over.")
+                    b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=default_b_size)
+                    b_source = st.text_input("Source Variable", value=default_b_source, help="The variable or output holding the JSON array to iterate over.")
                 
                     st.markdown("**Select inner loop tasks (in order):**")
                     if tasks:
-                        all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
-                        sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()))
+                        valid_defaults = [x for x in default_inner_tasks if x in all_task_options]
+                        sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()), default=valid_defaults)
                         if st.button("➕ Add Batch Loop"):
                             inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
                             if inner_ids:
@@ -2542,11 +2724,17 @@ def render_workflow_assembler():
 
                 def get_node_label(step):
                     is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
+                    is_seq = isinstance(step, dict) and step.get("type") == "sequential"
                     if is_batch:
                         return f"🔄 Batch Loop ({step['id']})"
-                    task = task_id_map.get(int(step.get("task_id", -1)))
-                    t_name = task.get('name') or f"Task #{task['id']}" if task else "Unknown"
-                    return f"{t_name} ({step['id']})"
+                    if is_seq:
+                        return f"▶️ Sequential ({step['id']})"
+                    
+                    task_id = step if isinstance(step, int) else step.get("task_id", -1)
+                    task = task_id_map.get(int(task_id))
+                    t_name = task.get('name') or f"Task #{task_id}" if task else "Unknown"
+                    step_id_str = step['id'] if isinstance(step, dict) else str(step)
+                    return f"{t_name} ({step_id_str})"
 
                 levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
                 if not levels:
@@ -2580,9 +2768,14 @@ def render_workflow_assembler():
                                 col_main = st.container()
                             
                                 is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                                if not is_batch:
+                                is_seq = isinstance(step, dict) and step.get("type") == "sequential"
+                                
+                                if not is_batch and not is_seq:
                                     task_id = step if isinstance(step, int) else step.get("task_id")
-                                    task = task_id_map.get(int(task_id))
+                                    if task_id is not None:
+                                        task = task_id_map.get(int(task_id))
+                                    else:
+                                        task = None
                                     if task:
                                         agent = agent_id_map.get(task['agent_id'])
                                         a_name = agent['name'] if agent else "Unknown Agent"
@@ -2593,16 +2786,35 @@ def render_workflow_assembler():
                                         col_main.markdown(f"❌ Unknown Task ID: {task_id}")
                                 else:
                                     inner_ids = step.get("task_ids", [])
-                                    b_size = step.get("batch_size")
                                     tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
-                                    col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
+                                    
+                                    if is_batch:
+                                        b_size = step.get("batch_size", 1)
+                                        col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
+                                    else:
+                                        col_main.markdown(f"▶️ **Sequential Tasks** {tooltip_html}", unsafe_allow_html=True)
+                                        
                                     for inner_id in inner_ids:
-                                        itask = task_id_map.get(int(inner_id))
+                                        if inner_id is not None:
+                                            itask = task_id_map.get(int(inner_id))
+                                        else:
+                                            itask = None
                                         if itask:
                                             iagent = agent_id_map.get(itask['agent_id'])
                                             i_aname = iagent['name'] if iagent else "Unknown Agent"
                                             i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                            col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                            tooltip_inner = f"<span title='Inner Task ID: {inner_id}' style='cursor:help;'>ℹ️</span>"
+                                            i_col_indent, i_col_card = col_main.columns([0.5, 7.5])
+                                            with i_col_card:
+                                                with st.container(border=True):
+                                                    i_col_avatar, i_col_text = st.columns([1, 8])
+                                                    with i_col_avatar:
+                                                        if iagent:
+                                                            st.image(get_agent_avatar_url(iagent), width=70)
+                                                        else:
+                                                            st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                                                    with i_col_text:
+                                                        st.markdown(f"🚀 **{i_tname}** {tooltip_inner}<br><sub>{itask.get('description', '')[:100]}...</sub>", unsafe_allow_html=True)
                                         else:
                                             col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
                             
@@ -2747,9 +2959,13 @@ def render_workflow_assembler():
                                 
                                 with st.container(border=True):
                                     is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                                    if not is_batch:
+                                    is_seq = isinstance(step, dict) and step.get("type") == "sequential"
+                                    if not is_batch and not is_seq:
                                         task_id = step if isinstance(step, int) else step.get("task_id")
-                                        task = task_id_map.get(int(task_id))
+                                        if task_id is not None:
+                                            task = task_id_map.get(int(task_id))
+                                        else:
+                                            task = None
                                         if task:
                                             agent = agent_id_map.get(task['agent_id'])
                                             col_avatar, col_text = st.columns([1, 6])
@@ -2771,17 +2987,34 @@ def render_workflow_assembler():
                                             st.error(f"Step {i+1}: Task ID {task_id} not found")
                                     else:
                                         inner_ids = step.get("task_ids", [])
-                                        b_size = step.get("batch_size")
                                         node_id = step.get('id', 'N/A')
                                         tooltip_html = f"<span title='Node ID: {node_id}' style='cursor:help;'>ℹ️</span>"
-                                        st.markdown(f"**Step {i+1}** | 🔄 **Batch Loop** {tooltip_html} | Chunk Size: {b_size}, Source: `{step.get('source_variable')}`", unsafe_allow_html=True)
+                                        if is_batch:
+                                            b_size = step.get("batch_size")
+                                            st.markdown(f"**Step {i+1}** | 🔄 **Batch Loop** {tooltip_html} | Chunk Size: {b_size}, Source: `{step.get('source_variable')}`", unsafe_allow_html=True)
+                                        else:
+                                            st.markdown(f"**Step {i+1}** | ▶️ **Sequential Tasks** {tooltip_html}", unsafe_allow_html=True)
                                         for inner_id in inner_ids:
-                                            itask = task_id_map.get(int(inner_id))
+                                            if inner_id is not None:
+                                                itask = task_id_map.get(int(inner_id))
+                                            else:
+                                                itask = None
                                             if itask:
                                                 iagent = agent_id_map.get(itask['agent_id'])
                                                 i_aname = iagent['name'] if iagent else "Unknown Agent"
                                                 i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ 👤 **{i_aname}** ➔ **{i_tname}**")
+                                                tooltip_inner = f"<span title='Inner Task ID: {inner_id}' style='cursor:help;'>ℹ️</span>"
+                                                i_col_indent, i_col_card = st.columns([0.5, 7.5])
+                                                with i_col_card:
+                                                    with st.container(border=True):
+                                                        i_col_avatar, i_col_text = st.columns([1, 8])
+                                                        with i_col_avatar:
+                                                            if iagent:
+                                                                st.image(get_agent_avatar_url(iagent), width=70)
+                                                            else:
+                                                                st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
+                                                        with i_col_text:
+                                                            st.markdown(f"🚀 **{i_tname}** {tooltip_inner}<br><sub>{itask.get('description', '')[:100]}...</sub>", unsafe_allow_html=True)
                                             else:
                                                 st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
                 
@@ -2790,9 +3023,13 @@ def render_workflow_assembler():
                     export_data = {'workflow': {'name': workflow['name'], 'tasks': []}}
                     for step in task_ids:
                         is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                        if not is_batch:
+                        is_seq = isinstance(step, dict) and step.get("type") == "sequential"
+                        if not is_batch and not is_seq:
                             task_id = step if isinstance(step, int) else step.get("task_id")
-                            task = task_id_map.get(int(task_id))
+                            if task_id is not None:
+                                task = task_id_map.get(int(task_id))
+                            else:
+                                task = None
                             if task:
                                 agent = agent_id_map.get(task['agent_id'])
                                 task_data = {
@@ -2803,14 +3040,18 @@ def render_workflow_assembler():
                                 }
                                 export_data['workflow']['tasks'].append(task_data)
                         else:
-                            batch_info = {
-                                'type': 'batch_loop',
-                                'batch_size': step.get('batch_size'),
-                                'source_variable': step.get('source_variable'),
+                            group_info = {
+                                'type': step.get('type'),
                                 'tasks': []
                             }
+                            if is_batch:
+                                group_info['batch_size'] = step.get('batch_size')
+                                group_info['source_variable'] = step.get('source_variable')
                             for inner_id in step.get("task_ids", []):
-                                itask = task_id_map.get(int(inner_id))
+                                if inner_id is not None:
+                                    itask = task_id_map.get(int(inner_id))
+                                else:
+                                    itask = None
                                 if itask:
                                     iagent = agent_id_map.get(itask['agent_id'])
                                     task_data = {
@@ -2819,8 +3060,8 @@ def render_workflow_assembler():
                                         'expected_output': itask['expected_output'],
                                         'agent': iagent['name'] if iagent else 'Unknown Agent'
                                     }
-                                    batch_info['tasks'].append(task_data)
-                            export_data['workflow']['tasks'].append(batch_info)
+                                    group_info['tasks'].append(task_data)
+                            export_data['workflow']['tasks'].append(group_info)
                     # 2. Generate YAML string in-memory. NOTE: yaml.dump is safe for exporting.
                     yaml_string = yaml.dump(export_data, sort_keys=False, indent=2)
                 
@@ -2921,6 +3162,147 @@ def render_workflow_assembler():
                         status.update(label="Test Failed", state="error")
 
 
+def render_tool_factory():
+    """Renders the Tool Factory tab."""
+    db = get_db_manager()
+    st.header("Tool Factory 2.0 🏭")
+    st.markdown("Use AI to generate and deploy custom tools for your agents.")
+    
+    tools_map_path = os.path.join(os.getcwd(), 'config', 'tools_map.yaml')
+    custom_tools_path = os.path.join(os.getcwd(), 'tools', 'custom_tools.py')
+    
+    if "tf_step" not in st.session_state:
+        st.session_state.tf_step = 1
+        st.session_state.tf_generated_code = ""
+        st.session_state.tf_tool_id = ""
+
+    # --- STEP 1: GENERATE ---
+    if st.session_state.tf_step == 1:
+        st.subheader("Step 1: Describe the Tool")
+        
+        # Model Selection
+        models = db.read_all_models()
+        model_options = {m['id']: f"{m['provider'].upper()} - {m['model_name']} ({m.get('description', '')})" for m in models}
+        if not model_options:
+            st.error("No LLM models found. Please configure a model in Settings.")
+            return
+            
+        selected_model_id = st.selectbox("Select LLM for Code Generation", options=list(model_options.keys()), format_func=lambda x: model_options[x])
+        
+        tool_prompt = st.text_area("What should this tool do?", placeholder="e.g. A tool that fetches the latest news about a company from a public API.", height=150)
+        
+        if st.button("Generate Code ⚡", type="primary"):
+            if tool_prompt:
+                st.markdown("**Generating code...**")
+                try:
+                    from core.tool_generator import generate_tool_code_stream
+                    code_placeholder = st.empty()
+                    
+                    full_text = ""
+                    import time
+                    last_update = 0
+                    for chunk in generate_tool_code_stream(tool_prompt, selected_model_id):
+                        full_text += chunk
+                        if time.time() - last_update > 0.1:
+                            code_placeholder.code(full_text, language="python")
+                            last_update = time.time()
+                    code_placeholder.code(full_text, language="python")
+                        
+                    # Extract code from markdown block if present
+                    import re
+                    match = re.search(r"```python\s*(.*?)\s*```", full_text, re.DOTALL)
+                    if match:
+                        full_text = match.group(1).strip()
+                    else:
+                        match_generic = re.search(r"```\s*(.*?)\s*```", full_text, re.DOTALL)
+                        if match_generic:
+                            full_text = match_generic.group(1).strip()
+                            
+                    st.session_state.tf_generated_code = full_text
+                    
+                    # Try to extract function name
+                    match_func = re.search(r'def\s+([a-zA-Z0-9_]+)\s*\(', full_text)
+                    if match_func:
+                        st.session_state.tf_tool_id = match_func.group(1)
+                        
+                    st.session_state.tf_step = 2
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error generating code: {e}")
+            else:
+                st.warning("Please provide a description.")
+                
+    # --- STEP 2: REVIEW & SAVE ---
+    elif st.session_state.tf_step == 2:
+        st.subheader("Step 2: Review and Deploy")
+        
+        edited_code = st.text_area("Review / Edit Python Code", value=st.session_state.tf_generated_code, height=400)
+        
+        st.markdown("---")
+        st.markdown("**Tool Metadata**")
+        col1, col2 = st.columns(2)
+        with col1:
+            tool_id = st.text_input("Tool ID (Function Name)", value=st.session_state.tf_tool_id)
+        with col2:
+            tool_name = st.text_input("Display Name", placeholder="e.g. Custom News Fetcher")
+            
+        tool_desc = st.text_input("Short Description (for the UI)", placeholder="What does this tool do?")
+        tool_secrets = st.text_input("Required Secrets (comma separated)", placeholder="e.g. NEWS_API_KEY")
+        
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            if st.button("Deploy Tool 🚀", type="primary"):
+                if not tool_id or not tool_name or not tool_desc:
+                    st.error("Please fill in Tool ID, Display Name, and Description.")
+                elif not edited_code:
+                    st.error("Code cannot be empty.")
+                else:
+                    try:
+                        # 1. Append to custom_tools.py
+                        with open(custom_tools_path, 'a', encoding='utf-8') as f:
+                            f.write(f"\n\n{edited_code}\n")
+                            
+                        # 2. Update YAML
+                        tools_config = DataManager.load_yaml(tools_map_path) if os.path.exists(tools_map_path) else {}
+                        if 'tools_registry' not in tools_config:
+                            tools_config['tools_registry'] = {}
+                            
+                        secrets_list = [s.strip() for s in tool_secrets.split(",")] if tool_secrets else []
+                        tools_config['tools_registry'][tool_id] = {
+                            'display_name': tool_name,
+                            'description': tool_desc,
+                            'required_secrets': secrets_list
+                        }
+                        
+                        with open(tools_map_path, 'w', encoding='utf-8') as f:
+                            import yaml
+                            yaml.dump(tools_config, f, sort_keys=False, indent=2)
+                            
+                        st.success(f"Tool '{tool_name}' deployed successfully!")
+                        st.session_state.tf_step = 1
+                        st.session_state.tf_generated_code = ""
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving tool: {e}")
+        with col_s2:
+            if st.button("Cancel / Start Over"):
+                st.session_state.tf_step = 1
+                st.session_state.tf_generated_code = ""
+                st.rerun()
+
+    # --- LIST EXISTING TOOLS ---
+    try:
+        tools_config = DataManager.load_yaml(tools_map_path)
+        registry = tools_config.get('tools_registry', {})
+        if registry:
+            st.divider()
+            st.markdown("**Registered Tools:**")
+            for t_id, t_data in registry.items():
+                secrets_str = ", ".join(t_data.get('required_secrets', [])) or "None"
+                st.caption(f"**{t_data.get('display_name')}** (`{t_id}`) | Secrets: {secrets_str}")
+    except Exception:
+        pass
+
 
 
 def render_history_monitoring():
@@ -3009,6 +3391,108 @@ def render_history_monitoring():
                     db.delete_run(run['id'])
                     st.toast(f"Run {run['id']} deleted")
                     st.rerun()
+
+
+def render_local_training():
+    """Renders Tab: Local Model Training."""
+    st.header("Local Model Training 🪖")
+    st.markdown("Fine-tune open-source models using Unsloth. The process runs in an isolated backend for maximum stability.")
+
+    tab_data, tab_tune, tab_eval, tab_chat, tab_deploy = st.tabs([
+        "1. Data Prep 🗃️", 
+        "2. Fine-Tuning ⚙️", 
+        "3. Monitoring & Eval 📊", 
+        "4. Inference Test 💬", 
+        "5. Export & Deployment 📦"
+    ])
+
+    with tab_data:
+        st.subheader("Prepare Dataset")
+        uploaded_files = st.file_uploader("Upload raw files (CSV, TXT, PDF)", accept_multiple_files=True)
+        if st.button("Generate ChatML Dataset with AI"):
+            if uploaded_files:
+                import core.fine_tuner as ft
+                st.info("Processing files and converting to ChatML format...")
+                dataset_path = ft.prepare_chatml_dataset([f.name for f in uploaded_files])
+                st.success(f"Dataset generated at {dataset_path}")
+            else:
+                st.warning("Please upload files first.")
+        st.markdown("---")
+        st.caption("Dataset Preview (ChatML)")
+        st.dataframe([{"role": "user", "content": "Sample prompt"}, {"role": "assistant", "content": "Sample completion"}])
+
+    with tab_tune:
+        st.subheader("Configure Training")
+        col1, col2 = st.columns(2)
+        with col1:
+            base_model = st.selectbox("Base Model", ["unsloth/llama-3-8b-Instruct-bnb-4bit", "unsloth/mistral-7b-instruct-v0.3-bnb-4bit", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"])
+            preset = st.radio("Training Preset", ["🚀 Fast (Prototype)", "⚖️ Balanced (Recommended)", "🧠 Deep (High Quality)"])
+        
+        with col2:
+            st.markdown("### Hardware Estimation")
+            import core.fine_tuner as ft
+            vram_est = ft.estimate_vram_usage(base_model, batch_size=2)
+            safe_text = "Safe" if vram_est["is_safe"] else "Warning: May OOM"
+            color = "normal" if vram_est["is_safe"] else "inverse"
+            st.metric("Estimated VRAM Required", f"{vram_est['required_gb']:.1f} GB", delta=safe_text, delta_color=color)
+            st.metric("Estimated Time", "~ 45 mins")
+            
+        st.markdown("---")
+        if st.button("Avvia Addestramento 🚀", type="primary", use_container_width=True):
+            ft.start_training_process({"model": base_model, "preset": preset})
+            st.success("Training subprocess started in background!")
+
+    with tab_eval:
+        st.subheader("Live Monitoring")
+        import os
+        import json
+        status_file = "training_status.json"
+        
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r") as f:
+                    status = json.load(f)
+                
+                step = status.get("step", 0)
+                total = status.get("total_steps", 1)
+                loss = status.get("loss", 0.0)
+                
+                pct = min(100, int((step / total) * 100))
+                st.progress(pct, text=f"Step {step}/{total} - Loss: {loss:.4f}")
+                
+            except Exception:
+                st.progress(0, text="Reading status...")
+        else:
+            st.progress(0, text="Waiting for training to start...")
+            
+        import pandas as pd
+        import numpy as np
+        # Dummy loss chart for visual feedback
+        chart_data = pd.DataFrame(np.exp(-np.linspace(0, 5, 20)) + np.random.normal(0, 0.05, 20), columns=["Loss"])
+        st.line_chart(chart_data)
+        with st.expander("Training Logs", expanded=True):
+            st.code("Logs will be streamed here...")
+
+    with tab_chat:
+        st.subheader("Inference Test")
+        st.markdown("Test the newly generated LoRA adapters before merging.")
+        prompt = st.chat_input("Say something to the fine-tuned model...")
+        if prompt:
+            import core.fine_tuner as ft
+            st.chat_message("user").write(prompt)
+            resp = ft.run_inference(prompt, "storage/adapters/temp")
+            st.chat_message("assistant").write(resp)
+
+    with tab_deploy:
+        st.subheader("Export to Ollama")
+        final_name = st.text_input("Final Model Name", placeholder="e.g. Alfredo-Support-Bot-8B")
+        if st.button("Export to .gguf and Deploy 📦", type="primary"):
+            if final_name:
+                import core.fine_tuner as ft
+                ft.export_to_ollama("storage/adapters/temp", final_name)
+                st.success(f"Model exported successfully as {final_name}!")
+            else:
+                st.error("Please provide a name for the model.")
 
 
 def render_my_apps():
@@ -3447,59 +3931,6 @@ def main():
         st.write("") # Spacer
         st.write("") # Spacer
         
-        # --- Popover 1: Manage Tools ---
-        with st.popover("🛠️ Manage Tools Registry", use_container_width=True):
-            st.markdown("### Tool Registry")
-            st.markdown("Add new tools so they can be assigned to tasks.")
-            
-            tools_map_path = os.path.join(os.getcwd(), 'config', 'tools_map.yaml')
-            
-            with st.form("add_tool_form"):
-                new_tool_id = st.text_input("Tool ID (Function Name)", placeholder="e.g. read_pdf")
-                new_tool_name = st.text_input("Display Name", placeholder="e.g. PDF Reader")
-                new_tool_desc = st.text_input("Description")
-                new_tool_secrets = st.text_input("Required Secrets (comma separated)", placeholder="e.g. API_KEY, OTHER_KEY")
-                
-                if st.form_submit_button("Add Tool"):
-                    if new_tool_id and new_tool_name:
-                        try:
-                            # Load existing
-                            tools_config = DataManager.load_yaml(tools_map_path) if os.path.exists(tools_map_path) else {}
-                            if 'tools_registry' not in tools_config:
-                                tools_config['tools_registry'] = {}
-                            
-                            secrets_list = [s.strip() for s in new_tool_secrets.split(",")] if new_tool_secrets else []
-                            
-                            # Add new
-                            tools_config['tools_registry'][new_tool_id] = {
-                                'display_name': new_tool_name,
-                                'description': new_tool_desc,
-                                'required_secrets': secrets_list
-                            }
-                            
-                            # Save
-                            with open(tools_map_path, 'w', encoding='utf-8') as f:
-                                yaml.dump(tools_config, f, sort_keys=False, indent=2)
-                            
-                            st.success(f"Tool {new_tool_name} added!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error saving tool: {e}")
-                    else:
-                        st.error("Tool ID and Display Name are required.")
-            
-            # Show existing
-            try:
-                tools_config = DataManager.load_yaml(tools_map_path)
-                registry = tools_config.get('tools_registry', {})
-                if registry:
-                    st.divider()
-                    st.markdown("**Registered Tools:**")
-                    for t_id, t_data in registry.items():
-                        secrets_str = ", ".join(t_data.get('required_secrets', [])) or "None"
-                        st.caption(f"**{t_data.get('display_name')}** (`{t_id}`) | Secrets: {secrets_str}")
-            except Exception:
-                pass
 
         # --- Popover 2: Telegram Config ---
         with st.popover("🤖 Telegram Bot Config", use_container_width=True):
@@ -3553,29 +3984,36 @@ def main():
             st.error(f"Errore nel caricamento di API Vault & Model Registry: {e}")
             st.exception(e)
 
-    def page_agent_caserma():
-        try:
-            render_agent_caserma()
-        except Exception as e:
-            st.error(f"Errore nel caricamento di Agent Caserma: {e}")
-            st.exception(e)
-
-    def page_task_builder():
-        tab_kb, tab_builder = st.tabs(["Knowledge Base", "Task Builder"])
+    def page_asset_builder():
+        tab_db, tab_agents, tab_tools = st.tabs(["Knowledge Base", "Agent Caserma", "Tool Factory"])
         
-        with tab_kb:
+        with tab_db:
             try:
                 render_knowledge_base()
             except Exception as e:
                 st.error(f"Errore nel caricamento del Database: {e}")
                 st.exception(e)
                 
-        with tab_builder:
+        with tab_agents:
             try:
-                render_task_builder()
+                render_agent_caserma()
             except Exception as e:
-                st.error(f"Errore nel caricamento di Task Builder: {e}")
+                st.error(f"Errore nel caricamento di Agent Caserma: {e}")
                 st.exception(e)
+
+        with tab_tools:
+            try:
+                render_tool_factory()
+            except Exception as e:
+                st.error(f"Errore nel caricamento di Tool Factory: {e}")
+                st.exception(e)
+
+    def page_task_builder():
+        try:
+            render_task_builder()
+        except Exception as e:
+            st.error(f"Errore nel caricamento di Task Builder: {e}")
+            st.exception(e)
 
     def page_workflow_assembler():
         try:
@@ -3598,12 +4036,20 @@ def main():
             st.error(f"Error loading My Apps: {e}")
             st.exception(e)
 
+    def page_local_training():
+        try:
+            render_local_training()
+        except Exception as e:
+            st.error(f"Error loading Local Training: {e}")
+            st.exception(e)
+
     pages = [
         st.Page(page_api_vault, title="API Vault", icon="🔐"),
-        st.Page(page_agent_caserma, title="Agent Caserma", icon="🎖️"),
+        st.Page(page_asset_builder, title="Asset Builder", icon="🧱"),
         st.Page(page_task_builder, title="Task Builder", icon="📋"),
         st.Page(page_workflow_assembler, title="Workflow Assembler", icon="🧩"),
         st.Page(page_history_monitoring, title="History & Monitoring", icon="📊"),
+        st.Page(page_local_training, title="Local Model Training", icon="🪖"),
         st.Page(page_my_apps, title="My Apps", icon="🔗")
     ]
     

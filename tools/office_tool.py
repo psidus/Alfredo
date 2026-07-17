@@ -98,6 +98,9 @@ def create_word_document(file_path: str, title: str, content: str) -> str:
         return "Error: 'python-docx' library not installed. Run: pip install python-docx"
 
     abs_path = os.path.abspath(file_path)
+    workspace_dir = os.path.abspath("workspace")
+    if not abs_path.startswith(workspace_dir):
+        return f"Error: Security violation. Path '{file_path}' is outside the designated workspace/ directory."
 
     # Build preview
     content_preview = content[:500] + ("..." if len(content) > 500 else "")
@@ -158,6 +161,9 @@ def edit_word_document(file_path: str, new_content: str, append: bool = False) -
         return "Error: 'python-docx' library not installed. Run: pip install python-docx"
 
     abs_path = os.path.abspath(file_path)
+    workspace_dir = os.path.abspath("workspace")
+    if not abs_path.startswith(workspace_dir):
+        return f"Error: Security violation. Path '{file_path}' is outside the designated workspace/ directory."
     if not os.path.isfile(abs_path):
         return f"Error: File not found at '{abs_path}'."
 
@@ -222,6 +228,9 @@ def create_excel_document(file_path: str, sheet_name: str, headers: str, rows: s
         return "Error: 'openpyxl' library not installed. Run: pip install openpyxl"
 
     abs_path = os.path.abspath(file_path)
+    workspace_dir = os.path.abspath("workspace")
+    if not abs_path.startswith(workspace_dir):
+        return f"Error: Security violation. Path '{file_path}' is outside the designated workspace/ directory."
 
     # Parse headers and rows for preview
     header_list = [h.strip() for h in headers.split(',')]

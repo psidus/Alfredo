@@ -43,16 +43,16 @@ class DataManager:
         Returns:
             str | None: The value of the API key or None if not found.
         """
-        # --- Architect's Note ---
         # Using find_dotenv() makes the location of the .env file independent of the
-        # script's working directory. This is robust. `load_dotenv` will only load
-        # variables that are not already present in the environment, which is safe.
+        # script's working directory.
         env_path = find_dotenv()
         if not env_path:
             logging.warning(".env file not found. API keys will not be loaded.")
             return None
             
-        load_dotenv(dotenv_path=env_path)
+        # ALWAYS use override=True so that UI updates to the .env file are immediately
+        # reflected in the running os.environ without requiring a Docker restart.
+        load_dotenv(dotenv_path=env_path, override=True)
         
         api_key = os.getenv(api_name)
         if not api_key:

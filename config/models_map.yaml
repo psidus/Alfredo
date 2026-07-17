@@ -1,49 +1,62 @@
-provider_map:
-  OPENAI_API_KEY:
-    provider: OpenAI
-    models:
-      - gpt-4o
-      - gpt-4-turbo
-      - gpt-3.5-turbo
-      - gpt-4o-mini
-  GEMINI_API_KEY:
-    provider: Google
-    models:
-      - gemini-3.5-flash
-      - gemini-3.1-pro
-      - gemini-2.5-pro
-      - gemini-2.5-flash
-      - gemini-2.5-flash-lite
-      - gemini-2.0-flash
-      - gemini-1.5-pro
-      - gemini-1.5-flash
-      - gemini-1.5-flash-8b
-  GROQ_API_KEY:
-    provider: Groq
-    models:
-      - llama3-70b-8192
-      - llama3-8b-8192
-      - mixtral-8x7b-32768
-  ANTHROPIC_API_KEY:
-    provider: Anthropic
-    models:
-      - claude-3-5-sonnet-20240620
-      - claude-3-opus-20240229
-      - claude-3-haiku-20240307
-  MISTRAL_API_KEY:
-    provider: Mistral
-    models:
-      - mistral-large-latest
-      - mistral-small-latest
-      - pixtral-12b-2409
-      - pixtral-large-latest
-      - codestral-latest
-      - ministral-8b-latest
-      - ministral-3b-latest
-
 local_models:
-  - llama3
-  - mistral
-  - phi3
-  - qwen
-  - gemma
+- llama3
+- mistral
+- phi3
+- qwen
+- gemma
+provider_map:
+  ANTHROPIC_API_KEY:
+    models:
+    - claude-3-5-sonnet-20240620
+    - claude-3-opus-20240229
+    - claude-3-haiku-20240307
+    provider: Anthropic
+  GEMINI_API_KEY:
+    models:
+    - gemini-3.5-flash
+    - gemini-3.1-pro
+    - gemini-2.5-pro
+    - gemini-2.5-flash
+    - gemini-2.5-flash-lite
+    - gemini-2.0-flash
+    - gemini-1.5-pro
+    - gemini-1.5-flash
+    - gemini-1.5-flash-8b
+    provider: Google
+  GROQ_API_KEY:
+    models:
+    - llama3-70b-8192
+    - llama3-8b-8192
+    - mixtral-8x7b-32768
+    provider: Groq
+  MISTRAL_API_KEY:
+    models:
+    - mistral-large-latest
+    - mistral-small-latest
+    - pixtral-12b-2409
+    - pixtral-large-latest
+    - codestral-latest
+    - ministral-8b-latest
+    - ministral-3b-latest
+    provider: Mistral
+  OLLAMA_API_KEY:
+    embed_models:
+    - nomic-embed-text:latest
+    models:
+    - deepseek-r1:14b
+    - gemma3:12b
+    - glm-ocr:latest
+    - gpt-oss:20b
+    - granite3.2-vision:latest
+    - llama3.1:latest
+    - qwen2.5:14b
+    - qwen3-vl:8b
+    - qwen3:14b
+    provider: Ollama
+  OPENAI_API_KEY:
+    models:
+    - gpt-4o
+    - gpt-4-turbo
+    - gpt-3.5-turbo
+    - gpt-4o-mini
+    provider: OpenAI

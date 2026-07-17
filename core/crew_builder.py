@@ -34,7 +34,11 @@ import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
 import tools.email_tool as email_tool
 import tools.thermo_excel_writer as thermo_excel_writer
+import tools.vector_pagination_tool as vector_pagination_tool
+import tools.thermo_excel_reader as thermo_excel_reader
+import tools.workflow_trigger_tool as workflow_trigger_tool
 from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryTool
+from core.schema_loader import get_schema_class
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -81,12 +85,12 @@ OUTPUT RULES (OPTIMIZED FOR VECTOR RETRIEVAL):
 
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
-# NOTE: Document-creation tools (Word, Excel, file_write, etc.) are intentionally
-# EXCLUDED.  They live in core/export_tools.py and are called deterministically
-# by the Master AI at the end of a workflow — never by individual agents.
+# Write tools are strictly sandboxed into the workspace/ folder.
 ALLOWED_TOOLS = {
-    # Workspace (sandboxed, read-only)
+    # Workspace (sandboxed read & write)
     "read_file": local_tools.read_file,
+    "write_file": local_tools.write_file,
+    "write_python_file": local_tools.write_python_file,
     # Full PC (read-only)
     "read_file_anywhere": local_tools.read_file_anywhere,
     "search_files": local_tools.search_files,
@@ -95,8 +99,11 @@ ALLOWED_TOOLS = {
     "ask_operator": local_tools.ask_operator,
     # Terminal
     "execute_shell_command": terminal_executor.execute_shell_command,
-    # Screenshot
+    # Office & Screenshot (Word/Excel generation requires human confirmation & sandboxing)
     "take_screenshot": office_tool.take_screenshot,
+    "create_word_document": office_tool.create_word_document,
+    "edit_word_document": office_tool.edit_word_document,
+    "create_excel_document": office_tool.create_excel_document,
     # Email (READ/SEARCH only — send_email is reserved for Master AI exports)
     "manage_email": None,  # Sentinel — expanded at task build time into read + search only
     "read_emails": email_tool.read_emails,
@@ -107,17 +114,34 @@ ALLOWED_TOOLS = {
     "tabular_query": None,  # Sentinel
     # Calculator
     "calculator": local_tools.calculate,
-    # Code tools (read + execute only — writing is handled by Master AI exports)
+    # Code tools (read + execute)
     "python_repl_tool": local_tools.python_repl,
     # Thermodynamic tools
     "merge_and_save_data": thermo_excel_writer.merge_and_save_data,
+    "read_rag_chunks": vector_pagination_tool.read_rag_chunks,
+    "check_excel_db": thermo_excel_reader.check_excel_db,
+    "trigger_next_batch": workflow_trigger_tool.trigger_next_batch,
     # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
     "read_atomic_memory": None,   # Sentinel
     "write_atomic_memory": None,  # Sentinel
     # App-specific tools — sentinels, instantiated at runtime with app credentials
+    # App-specific tools — sentinels, instantiated at runtime with app credentials
     "app_database_query": None,  # Sentinel
     "app_api_caller": None,      # Sentinel
 }
+
+# --- Load Custom Tools ---
+import inspect
+try:
+    import tools.custom_tools as custom_tools
+    for name, obj in inspect.getmembers(custom_tools):
+        # CrewAI tools have name, description and run method
+        if hasattr(obj, 'name') and hasattr(obj, 'description') and hasattr(obj, 'run') and not name.startswith('_'):
+            if name not in ALLOWED_TOOLS:
+                ALLOWED_TOOLS[name] = obj
+                logging.info(f"Loaded custom tool: {name}")
+except Exception as e:
+    logging.error(f"Error loading custom tools: {e}")
 
 def _instantiate_llm(model_id, task_record=None):
     """
@@ -254,13 +278,16 @@ def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
     task_tools = _map_tools(tool_names) or []
     
     if 'vector_search' in tool_names:
+        if not vector_dbs:
+            logging.warning("⚠️ CRITICAL: 'vector_search' tool was requested for a task, but NO Vector DBs were assigned to the task (vector_dbs list is empty). The agent will NOT have access to the RAG database!")
+            
         # Lazy imports: these pull optional LangChain/Chroma dependencies.
         from tools.vector_search_tool import VectorSearchTool
         from tools.tabular_query_tool import TabularQueryTool
         for db_id in vector_dbs:
             try:
                 db_id_int = int(db_id)
-                vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = ?", (db_id_int,)).fetchone()
+                vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = %s", (db_id_int,)).fetchone()
                 if vdb_record:
                     tool_instance = VectorSearchTool(
                         name=f"search_db_{vdb_record['name']}",
@@ -513,7 +540,7 @@ def _build_task(task_id, agents_cache):
         expected_output=base_expected,
         agent=agent_instance,
         tools=task_tools,
-        async_execution=False
+        async_execution=('[ASYNC]' in task_record.get('name', ''))
     )
     logging.info(f"Built CrewAI Task: {task_record['description'][:50]}... (ID: {task_id}) for Agent ID: {agent_id}")
     return task
@@ -1202,12 +1229,32 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
             base_expected += vector_format_directive
 
+        kwargs = {}
+        if task_data.get('output_pydantic'):
+            pydantic_str = task_data.get('output_pydantic')
+            schemas = [s.strip() for s in pydantic_str.split(',') if s.strip()]
+            if len(schemas) == 1:
+                cls = get_schema_class(schemas[0])
+                if cls:
+                    kwargs['output_pydantic'] = cls
+            elif len(schemas) > 1:
+                from pydantic import create_model
+                fields = {}
+                for s in schemas:
+                    cls = get_schema_class(s)
+                    if cls:
+                        fields[s.lower()] = (cls, ...)
+                if fields:
+                    DynamicModel = create_model('DynamicOutputSchema', **fields)
+                    kwargs['output_pydantic'] = DynamicModel
+
         task = Task(
             description=task_description,
             expected_output=base_expected,
             agent=agent_instance,
             tools=task_tools,
-            async_execution=False
+            async_execution=('[ASYNC]' in task_data.get('name', '')),
+            **kwargs
         )
         crew_tasks.append(task)
         logging.info(f"Built Dynamic Task for Agent: {agent_role} (specialization={specialization})")
@@ -1475,12 +1522,32 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             task_description = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', task_description)
             base_expected = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', base_expected)
 
+            kwargs = {}
+            if task_data.get('output_pydantic'):
+                pydantic_str = task_data.get('output_pydantic')
+                schemas = [s.strip() for s in pydantic_str.split(',') if s.strip()]
+                if len(schemas) == 1:
+                    cls = get_schema_class(schemas[0])
+                    if cls:
+                        kwargs['output_pydantic'] = cls
+                elif len(schemas) > 1:
+                    from pydantic import create_model
+                    fields = {}
+                    for s in schemas:
+                        cls = get_schema_class(s)
+                        if cls:
+                            fields[s.lower()] = (cls, ...)
+                    if fields:
+                        DynamicModel = create_model('DynamicOutputSchema', **fields)
+                        kwargs['output_pydantic'] = DynamicModel
+
             task_obj = Task(
                 description=task_description,
                 expected_output=base_expected,
                 agent=agent_instance,
                 tools=task_tools,
-                async_execution=False
+                async_execution=('[ASYNC]' in task_data.get('name', '')),
+                **kwargs
             )
 
             _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)

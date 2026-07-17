@@ -1,4 +1,29 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: alfredo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: alfredo_user
+      POSTGRES_PASSWORD: alfredo_password
+      POSTGRES_DB: alfredo_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: alfredo_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@alfredo.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
   dashboard:
     build: .
     container_name: alfredo_dashboard
@@ -12,6 +37,7 @@ services:
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
       - PYTHONPATH=/app
       - HEADROOM_PROXY_URL=http://headroom_proxy:8787/v1
+      - DATABASE_URL=postgresql://alfredo_user:alfredo_password@postgres:5432/alfredo_db
     volumes:
       - ./db:/app/db
       - ./workspace:/app/workspace
@@ -22,6 +48,15 @@ services:
       - ./config:/app/config
       - ./.env:/app/.env
     restart: unless-stopped
+    depends_on:
+      - postgres
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   api:
     build: .
@@ -34,6 +69,7 @@ services:
     environment:
       - PYTHONPATH=/app
       - HEADROOM_PROXY_URL=http://headroom_proxy:8787/v1
+      - DATABASE_URL=postgresql://alfredo_user:alfredo_password@postgres:5432/alfredo_db
     volumes:
       - ./db:/app/db
       - ./workspace:/app/workspace
@@ -45,6 +81,8 @@ services:
       - ./sdk:/app/sdk
       - ./.env:/app/.env
     restart: unless-stopped
+    depends_on:
+      - postgres
 
   headroom_proxy:
     build: .
@@ -59,3 +97,5 @@ services:
       - ./workspace:/app/workspace
     restart: unless-stopped
 
+volumes:
+  postgres_data:

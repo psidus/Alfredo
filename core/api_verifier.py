@@ -16,7 +16,10 @@ def verify_and_fetch_models(env_key: str, api_key: str) -> dict:
     elif "ANTHROPIC" in env_key:
         return _fetch_anthropic(api_key)
     elif "OLLAMA" in env_key:
-        return _fetch_ollama(api_key)
+        if env_key == "OLLAMA_API_BASE":
+            return _fetch_ollama(api_key="", base_url_override=api_key)
+        else:
+            return _fetch_ollama(api_key=api_key)
     elif "MISTRAL" in env_key:
         return _fetch_mistral(api_key)
     
@@ -136,9 +139,9 @@ def _fetch_anthropic(api_key: str):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def _fetch_ollama(api_key: str):
+def _fetch_ollama(api_key: str = "", base_url_override: str = None):
     import os
-    base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+    base_url = base_url_override if base_url_override else os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
     url = f"{base_url.rstrip('/')}/api/tags"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
@@ -150,17 +153,21 @@ def _fetch_ollama(api_key: str):
         data = response.json().get("models", [])
         chat_models = []
         embed_models = []
+        chat_models_detailed = []
         
         for m in data:
             model_id = m.get("name", "")
+            size_gb = round(m.get("size", 0) / (1024**3), 1)
             if "embed" in model_id.lower() or "nomic" in model_id.lower() or "mxbai" in model_id.lower():
                 embed_models.append(model_id)
             else:
                 chat_models.append(model_id)
+                chat_models_detailed.append({"name": model_id, "size_gb": size_gb})
                 
         chat_models.sort()
         embed_models.sort()
-        return {"success": True, "chat_models": chat_models, "embed_models": embed_models}
+        chat_models_detailed.sort(key=lambda x: x["name"])
+        return {"success": True, "chat_models": chat_models, "embed_models": embed_models, "chat_models_detailed": chat_models_detailed}
     except Exception as e:
         return {"success": False, "error": f"Failed to fetch Ollama models from {url}: {e}"}
 

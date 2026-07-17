@@ -475,11 +475,13 @@ class MasterAI:
                 from dotenv import dotenv_values, find_dotenv
                 env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
                 current_env = dotenv_values(env_path)
-                env_model_id = current_env.get("MASTER_AI_MODEL_ID")
-                if env_model_id:
-                    model_id = int(env_model_id)
+                env_model_name = current_env.get("MASTER_AI_MODEL_NAME")
+                if env_model_name:
+                    model_data = self.db_manager.read_model_by_name(env_model_name)
+                    if model_data:
+                        model_id = model_data['id']
             except Exception as e:
-                logger.warning(f"Error loading MASTER_AI_MODEL_ID from environment: {e}")
+                logger.warning(f"Error loading MASTER_AI_MODEL_NAME from environment: {e}")
         
         # Default Robust Configuration (Simple vs Complex)
         # Source: https://ai.google.dev/gemini-api/docs/models (May 2026)
@@ -518,10 +520,14 @@ class MasterAI:
                 # Clean 'models/' prefix common in Google/Gemini models
                 if self.model_provider == 'gemini' and self.model_name.startswith('models/'):
                     self.model_name = self.model_name.replace('models/', '')
+                
+                self.is_local = model_data.get('is_local', False)
             else:
                 logger.warning(f"Model ID {model_id} not found in DB. Using default model {self.model_name}.")
+                self.is_local = False
         else:
             logger.info(f"No model_id provided for MasterAI. Using default model {self.model_name}.")
+            self.is_local = False
 
         # Securely retrieve API key via DataManager
         self.api_key = self.data_manager.load_api_key(f"{self.model_provider.upper()}_API_KEY")
@@ -529,23 +535,24 @@ class MasterAI:
             # Fallback to general GEMINI_API_KEY if specific one fails
             self.api_key = self.data_manager.load_api_key("GEMINI_API_KEY")
             
-        if not self.api_key:
+        is_local_provider = self.model_provider in ['ollama', 'lmstudio', 'vllm', 'llama.cpp'] or getattr(self, 'is_local', False)
+
+        if not self.api_key and not is_local_provider:
             logger.error(f"API key for {self.model_provider} not found in DataManager. Check 'ui/dashboard.py' API Vault.")
             raise ValueError(f"API key for {self.model_provider} is required but not found.")
 
         # --- CRITICAL: Inject the key into os.environ so LiteLLM can find it ---
-        # LiteLLM reads keys from environment variables, not from our internal self.api_key.
-        # We must set the correct env var name for each provider.
-        provider_key_env_map = {
-            "gemini": "GEMINI_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "mistral": "MISTRAL_API_KEY",
-        }
-        env_var_name = provider_key_env_map.get(self.model_provider, f"{self.model_provider.upper()}_API_KEY")
-        os.environ[env_var_name] = self.api_key
-        logger.info(f"API key for provider '{self.model_provider}' injected into environment as '{env_var_name}'.")
+        if self.api_key:
+            provider_key_env_map = {
+                "gemini": "GEMINI_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "anthropic": "ANTHROPIC_API_KEY",
+                "groq": "GROQ_API_KEY",
+                "mistral": "MISTRAL_API_KEY",
+            }
+            env_var_name = provider_key_env_map.get(self.model_provider, f"{self.model_provider.upper()}_API_KEY")
+            os.environ[env_var_name] = self.api_key
+            logger.info(f"API key for provider '{self.model_provider}' injected into environment as '{env_var_name}'.")
 
         # Initialize LLM routing via LiteLLM
         if not litellm:
@@ -556,11 +563,12 @@ class MasterAI:
 
     def _get_model_string(self) -> str:
         """Returns the correctly formatted model string for LiteLLM calls."""
-        if self.model_provider == "openai":
+        provider = self.model_provider.lower()
+        if provider == "openai":
             return self.model_name
-        elif self.model_provider == "gemini" and "/" in self.model_name:
-            return self.model_name
-        return f"{self.model_provider}/{self.model_name}"
+        elif provider == "gemini" or provider == "google":
+            return f"gemini/{self.model_name.split('/')[-1]}" if "/" in self.model_name else f"gemini/{self.model_name}"
+        return f"{provider}/{self.model_name}"
 
     def _fetch_workflows_context(self):
         """
@@ -653,6 +661,12 @@ class MasterAI:
                         temperature=temperature,
                         timeout=45, # Prevent hanging indefinitely
                     )
+                    
+                    provider_prefix = m.split('/')[0] if '/' in m else m
+                    if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
+                        api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
+                        if os.environ.get(api_base_env_var):
+                            call_kwargs["api_base"] = os.environ.get(api_base_env_var)
                     if use_json_mode:
                         call_kwargs["response_format"] = {"type": "json_object"}
                     # Compress messages before sending to the LLM
@@ -1010,6 +1024,62 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 "backstory": backstory
             }
 
+    def optimize_agent_fields_stream(self, role: str, goal: str, backstory: str):
+        """
+        Optimizes an agent's core prompts using the LLM and yields chunks (streaming).
+        """
+        system_prompt = AGENT_OPTIMIZER_PROMPT.format(role=role, goal=goal, backstory=backstory)
+        model_string = self._get_model_string()
+
+        logger.info(f"MasterAI Optimizing agent fields (stream) with: {model_string}")
+        call_kwargs = dict(
+            model=model_string,
+            messages=[
+                {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the agent's prompts."}
+            ],
+            temperature=0.3,
+            stream=True
+        )
+        
+        # Explicitly pass api_key in case it was updated in UI without restart
+        if hasattr(self, 'api_key') and self.api_key:
+            call_kwargs["api_key"] = self.api_key
+        provider_prefix = model_string.split('/')[0] if '/' in model_string else model_string
+        if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
+            api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
+            if os.environ.get(api_base_env_var):
+                call_kwargs["api_base"] = os.environ.get(api_base_env_var)
+                
+        import time
+        RETRY_WAITS = [5, 10, 15]
+        TRANSIENT_KEYWORDS = ("503", "429", "high demand", "unavailable", "rate limit", "overloaded")
+
+        def _is_transient(err: Exception) -> bool:
+            return any(kw in str(err).lower() for kw in TRANSIENT_KEYWORDS)
+
+        last_err = None
+        for attempt, wait in enumerate([0] + RETRY_WAITS):
+            if wait > 0:
+                logger.warning(f"MasterAI [Stream Agent] Retry {attempt}/{len(RETRY_WAITS)} — waiting {wait}s...")
+                time.sleep(wait)
+            try:
+                response = litellm.completion(**call_kwargs)
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+                return # Success, exit retry loop
+            except Exception as e:
+                last_err = e
+                if _is_transient(e) and attempt < len(RETRY_WAITS):
+                    logger.warning(f"MasterAI [Stream Agent] Transient error (attempt {attempt+1}): {str(e)[:80]}")
+                    continue
+                else:
+                    break
+                    
+        logger.error(f"Failed to stream agent optimization after retries: {last_err}")
+        raise last_err
+
     def format_validation_request(self, raw_output: str, task_description: str = "", expected_output: str = "") -> tuple[str, list]:
         """Translates raw agent output into a clear question for the user to validate, using context."""
         if not raw_output:
@@ -1106,6 +1176,63 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 "description": description,
                 "expected_output": expected_output
             }
+
+    def optimize_task_fields_stream(self, description: str, expected_output: str):
+        """
+        Optimizes a task's description and expected output prompts using the LLM and yields chunks.
+        """
+        system_prompt = TASK_OPTIMIZER_PROMPT.format(description=description, expected_output=expected_output)
+        model_string = self._get_model_string()
+
+        logger.info(f"MasterAI Optimizing task fields (stream) with: {model_string}")
+        call_kwargs = dict(
+            model=model_string,
+            messages=[
+                {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\nOptimize the task's fields."}
+            ],
+            temperature=0.3,
+            stream=True
+        )
+        
+        # Explicitly pass api_key in case it was updated in UI without restart
+        if hasattr(self, 'api_key') and self.api_key:
+            call_kwargs["api_key"] = self.api_key
+
+        provider_prefix = model_string.split('/')[0] if '/' in model_string else model_string
+        if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
+            api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
+            if os.environ.get(api_base_env_var):
+                call_kwargs["api_base"] = os.environ.get(api_base_env_var)
+                
+        import time
+        RETRY_WAITS = [5, 10, 15]
+        TRANSIENT_KEYWORDS = ("503", "429", "high demand", "unavailable", "rate limit", "overloaded")
+
+        def _is_transient(err: Exception) -> bool:
+            return any(kw in str(err).lower() for kw in TRANSIENT_KEYWORDS)
+
+        last_err = None
+        for attempt, wait in enumerate([0] + RETRY_WAITS):
+            if wait > 0:
+                logger.warning(f"MasterAI [Stream Task] Retry {attempt}/{len(RETRY_WAITS)} — waiting {wait}s...")
+                time.sleep(wait)
+            try:
+                response = litellm.completion(**call_kwargs)
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+                return # Success, exit retry loop
+            except Exception as e:
+                last_err = e
+                if _is_transient(e) and attempt < len(RETRY_WAITS):
+                    logger.warning(f"MasterAI [Stream Task] Transient error (attempt {attempt+1}): {str(e)[:80]}")
+                    continue
+                else:
+                    break
+                    
+        logger.error(f"Failed to stream task optimization after retries: {last_err}")
+        raise last_err
 
     def generate_export_files(self, final_text: str, expected_exports: list, output_dir: str, global_context: str = None, export_instructions: str = None) -> list:
         """
