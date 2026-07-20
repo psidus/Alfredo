@@ -680,12 +680,19 @@ async def collect_required_inputs(update: Update, context: ContextTypes.DEFAULT_
         # AUTHORITATIVE SOURCE: Predefined workflow — always read from DB task records.
         # This guarantees correct preset prompts are shown regardless of what the LLM generated.
         task_ids = base_workflow.get('task_ids') or []
-        flat_tids = []
-        for step in task_ids:
-            if isinstance(step, dict) and step.get("type") == "batch_loop":
-                flat_tids.extend(step.get("task_ids", []))
-            else:
-                flat_tids.append(step if isinstance(step, int) else step.get("task_id"))
+        def _extract_tids(steps):
+            tids = []
+            for step in steps:
+                if isinstance(step, int):
+                    tids.append(step)
+                elif isinstance(step, dict):
+                    if step.get("type") == "batch_loop":
+                        tids.extend(_extract_tids(step.get("task_ids", [])))
+                    elif "task_id" in step:
+                        tids.append(step["task_id"])
+            return tids
+            
+        flat_tids = _extract_tids(task_ids)
                 
         logger.info(f"collect_required_inputs: Reading inputs from DB for {len(flat_tids)} tasks in workflow '{base_workflow.get('name')}'")
         for tid in flat_tids:

@@ -44,8 +44,9 @@ class eNRTLData(BaseModel):
     reference: Optional[str] = None
 
 class ExtractionOutput(BaseModel):
+    status: str = Field(default="PROCEED", description="Set to 'SKIP' if the instructions tell you to skip.")
     pure_components: List[PureComponentData] = Field(default_factory=list)
     bips: List[BIPData] = Field(default_factory=list)
     enrtl: List[eNRTLData] = Field(default_factory=list)
-    confidence_score: int = Field(..., ge=0, le=100)
+    confidence_score: int = Field(default=0, ge=0, le=100)
     validation_notes: str = ""

@@ -783,9 +783,15 @@ class SQLiteManager:
         self.conn.commit()
         return self.cursor.lastrowid
 
-    def update_run(self, run_id: int, status: str, result: str = "", current_task_idx: int = None, task_outputs: dict = None, in_flight_tasks: list = None) -> None:
-        updates = ["status = ?", "result = ?", "finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)"]
-        params = [status, result, status]
+    def update_run(self, run_id: int, status: str = None, result: str = "", current_task_idx: int = None, task_outputs: dict = None, in_flight_tasks: list = None) -> None:
+        updates = []
+        params = []
+        if status is not None:
+            updates.extend(["status = ?", "result = ?", "finished_at = (CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)"])
+            params.extend([status, result, status])
+        elif result:
+            updates.append("result = ?")
+            params.append(result)
 
         if current_task_idx is not None:
             updates.append("current_task_idx = ?")

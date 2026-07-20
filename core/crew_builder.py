@@ -3,6 +3,10 @@ import os
 import logging
 import re
 
+class PauseExecution(Exception):
+    """Exception raised when workflow execution should be gracefully paused."""
+    pass
+
 class RateLimitError(Exception):
     """Exception raised when an LLM returns a 503 or rate limit error."""
     def __init__(self, message, current_task_idx, task_outputs):
@@ -56,8 +60,21 @@ if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
         logging.info("Headroom AI inline compression enabled for CrewAI (note: inline compress is not currently wired up to CrewAI's internal LangChain LLMs, use proxy mode for full coverage).")
 
 
-# Initialize DB
-db = DBManager()
+# Initialize DB using a Thread-Local Proxy to ensure thread safety
+# Since psycopg2 cursors are not thread-safe, each thread must have its own DBManager instance.
+import threading
+_local_db = threading.local()
+
+class DBProxy:
+    def _get_db(self):
+        if not hasattr(_local_db, 'instance'):
+            _local_db.instance = DBManager()
+        return _local_db.instance
+
+    def __getattr__(self, name):
+        return getattr(self._get_db(), name)
+
+db = DBProxy()
 
 # --- GLOBAL INTER-AGENT COMMUNICATION DIRECTIVE ---
 # This is appended to EVERY task to enforce concise, structured outputs
@@ -78,9 +95,10 @@ OUTPUT RULES (OPTIMIZED FOR VECTOR RETRIEVAL):
 1. Start with a descriptive header: `# Topic: [Core Subject of your task]`.
 2. Provide a comma-separated keywords block: `[KEYWORDS: tag1, tag2, tag3]`.
 3. Provide a concise 1-2 sentence Context Summary.
-4. Output your key findings as a structured list (max 10 points).
-5. CRITICAL: Use explicit, descriptive nouns in every bullet point. NEVER use pronouns like "it", "they", or "this" because context is lost during vector chunking.
-6. NO preamble, NO "In conclusion...", NO filler phrases.
+4. If your task involves reasoning or summarizing, output your key findings as a structured list (max 10 points). 
+5. CRITICAL DATA EXCEPTION: If your task specifically requires extracting RAW TEXT, DATA, COEFFICIENTS, or strict JSON, you MUST output the raw data/JSON verbatim below your context summary. Do NOT summarize or truncate numerical data into bullet points.
+6. Use explicit, descriptive nouns. NEVER use pronouns like "it", "they", or "this" because context is lost during vector chunking.
+7. NO preamble, NO "In conclusion...", NO filler phrases.
 """
 
 # --- Security Helper: Hardcoded Tool Registry ---
@@ -217,8 +235,7 @@ def _instantiate_llm(model_id, task_record=None):
                     "model": f"ollama/{model_name}",
                     "base_url": os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
                 }
-                if max_input_context > 0:
-                    kwargs["num_ctx"] = max_input_context
+                # Removed num_ctx as it causes TypeError in recent litellm/openai wrappers
                 if max_output_tokens > 0:
                     kwargs["max_tokens"] = max_output_tokens
                 return LLM(**kwargs)
@@ -287,7 +304,8 @@ def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
         for db_id in vector_dbs:
             try:
                 db_id_int = int(db_id)
-                vdb_record = db.cursor.execute("SELECT * FROM vector_databases WHERE id = %s", (db_id_int,)).fetchone()
+                db.cursor.execute("SELECT * FROM vector_databases WHERE id = %s", (db_id_int,))
+                vdb_record = db.cursor.fetchone()
                 if vdb_record:
                     tool_instance = VectorSearchTool(
                         name=f"search_db_{vdb_record['name']}",
@@ -396,17 +414,16 @@ def _build_agent(agent_id, specialization=None, model_id_override=None, task_rec
     llm_instance = _instantiate_llm(model_id, task_record=task_record) if model_id else None
     
     # --- LOCAL MODEL CHECK ---
-    # Local models (Ollama, phi3, llama, etc.) do NOT support the tools/function-calling
-    # protocol. Passing tools to them causes a 400 BadRequestError.
-    # We detect this via the is_local flag OR the ollama provider name.
-    is_local_model = False
+    # We check if the model supports tools. Previously, all local models were assumed not to support tools.
+    # Now we respect the 'supports_tools' column in the database.
+    supports_tools = True
     if model_record:
-        is_local_model = bool(model_record.get('is_local')) or \
-                         model_record.get('provider', '').lower() == 'ollama'
+        # Default to True if not explicitly set to 0/False
+        supports_tools = bool(model_record.get('supports_tools', 1))
 
-    if is_local_model:
+    if not supports_tools:
         agent_tools = []
-        logging.info(f"Agent '{agent_record['name']}' uses a local model — tools disabled.")
+        logging.info(f"Agent '{agent_record['name']}' uses a model that doesn't support tools — tools disabled.")
     else:
         agent_tools = _map_tools(agent_record.get('tools', []))
 
@@ -471,7 +488,8 @@ def _build_agent(agent_id, specialization=None, model_id_override=None, task_rec
         max_iter=5,
         step_callback=check_abort
     )
-    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local_model}, specialization={specialization!r})")
+    is_local = bool(model_record.get('is_local')) if model_record else False
+    logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local}, specialization={specialization!r})")
     return agent
 
 def _build_task(task_id, agents_cache):
@@ -498,9 +516,22 @@ def _build_task(task_id, agents_cache):
             agents_cache[agent_id] = _build_agent(agent_id)
         agent_instance = agents_cache[agent_id]
     
-    # Check if the execution model is local — if so, strip task-level tools too
+    # Check if the execution model supports tools
     agent_record = db.read_agent(agent_id) if agent_id else None
     execution_model_id = task_model_id if task_model_id is not None else (agent_record.get('model_id') if agent_record else None)
+    
+    if not execution_model_id:
+        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+        if env_model_id:
+            try:
+                execution_model_id = int(env_model_id)
+            except ValueError:
+                pass
+    if not execution_model_id:
+        models = db.read_all_models()
+        if models:
+            execution_model_id = models[0]['id']
+
     model_record = db.read_model(execution_model_id) if execution_model_id else None
     supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
@@ -665,6 +696,8 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     import os
     import json
     import re
+    import traceback
+    import hashlib
     from dotenv import dotenv_values, find_dotenv
 
     if chat_id:
@@ -780,10 +813,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     node_outputs = {}
     for n_id, data in dag_nodes.items():
         if data["is_batch"]:
-            last_inner = data["batch_tasks"][-1] if data["batch_tasks"] else None
-            if last_inner and str(last_inner) in task_outputs:
+            if task_outputs.get(f"{n_id}_completed") == True:
                 completed_nodes.add(n_id)
-                node_outputs[n_id] = task_outputs[str(last_inner)]
+                node_outputs[n_id] = task_outputs.get(f"{n_id}_final_output", "")
         else:
             if str(data["task_id"]) in task_outputs:
                 completed_nodes.add(n_id)
@@ -1018,7 +1050,17 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     items = [{"raw_data": data_str}]
                 
                 batch_out = ""
-                for batch_start in range(0, len(items), batch_size):
+                start_chunk_idx = task_outputs.get(f"{n_id}_chunk_idx", 0)
+                total_chunks = (len(items) + batch_size - 1) // batch_size
+                
+                # Check if it was already completed (safety net)
+                if task_outputs.get(f"{n_id}_completed") == True:
+                    return task_outputs.get(f"{n_id}_final_output", "")
+                
+                for chunk_idx in range(start_chunk_idx, total_chunks):
+                    batch_start = chunk_idx * batch_size
+                    if batch_start >= len(items): break
+                    
                     batch_chunk = items[batch_start:batch_start+batch_size]
                     chunk_str = json.dumps(batch_chunk)
                     
@@ -1027,10 +1069,24 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     
                     memory_manager.clear_memory()
                     
-                    for b_idx, inner_task_id in enumerate(batch_tasks):
-                        log_msg = f"Executing Batch Loop (Node {n_id}) - Chunk {batch_start//batch_size + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
-                        batch_out = _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=data["original_index"], parent_output=batch_out)
+                    try:
+                        for b_idx, inner_task_id in enumerate(batch_tasks):
+                            log_msg = f"Executing Batch Loop (Node {n_id}) - Chunk {chunk_idx + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
+                            batch_out = _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=data["original_index"], parent_output=batch_out)
+                    except RateLimitError as e:
+                        logging.error(f"Batch Loop (Node {n_id}) paused at chunk {chunk_idx + 1} due to RateLimitError: {e}")
+                        db.update_run(run_id, status='paused')
+                        raise PauseExecution(str(e))
+                        
+                    with task_outputs_lock:
+                        task_outputs[f"{n_id}_chunk_idx"] = chunk_idx + 1
+                        db.update_run(run_id, task_outputs=task_outputs)
                 
+                with task_outputs_lock:
+                    task_outputs[f"{n_id}_completed"] = True
+                    task_outputs[f"{n_id}_final_output"] = batch_out
+                    db.update_run(run_id, task_outputs=task_outputs)
+                    
                 node_outputs[n_id] = batch_out
                 return batch_out
         finally:
@@ -1081,6 +1137,13 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     res = f.result()
                     if res:
                         last_output_overall = res
+                except RateLimitError as e:
+                    logging.warning(f"Node {n_id} hit rate limit. Pausing workflow: {e}")
+                    db.update_run(run_id, status='paused')
+                    break
+                except PauseExecution as e:
+                    logging.warning(f"Workflow execution paused: {e}")
+                    break
                 except Exception as e:
                     logging.error(f"Node {n_id} failed: {e}")
                     raise

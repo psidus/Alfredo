@@ -591,7 +591,23 @@ class MasterAI:
             wf_id = wf['id']
             # Aggregate all required inputs from tasks in this workflow
             all_reqs = []
-            for t_id in wf.get('task_ids', []):
+            
+            def _extract_tids(steps):
+                tids = []
+                for step in steps:
+                    if isinstance(step, int):
+                        tids.append(step)
+                    elif isinstance(step, dict):
+                        if step.get("type") == "batch_loop":
+                            tids.extend(_extract_tids(step.get("task_ids", [])))
+                        elif "task_id" in step:
+                            tids.append(step["task_id"])
+                return tids
+
+            flat_tids = _extract_tids(wf.get('task_ids', []))
+
+            for t_id in flat_tids:
+                if t_id is None: continue
                 task = task_map.get(int(t_id))
                 if task and task.get('required_inputs'):
                     all_reqs.extend(task['required_inputs'])

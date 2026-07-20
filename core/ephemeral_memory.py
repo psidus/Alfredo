@@ -251,6 +251,16 @@ class EphemeralMemoryManager:
     # Index table (injected into task prompts)
     # ------------------------------------------------------------------
 
+    def clear_memory(self) -> None:
+        """
+        Clears all records from the ephemeral memory.
+        """
+        keys_to_delete = [item["key"] for item in self._keys_index]
+        for key in keys_to_delete:
+            self.delete_record(key)
+        self._fallback_records.clear()
+        self._keys_index.clear()
+        
     def get_memory_index_table(self) -> str:
         """
         Returns a compact Markdown table summarising every record stored

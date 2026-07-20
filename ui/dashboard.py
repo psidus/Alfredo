@@ -1770,6 +1770,11 @@ def render_task_builder():
             for k in list(st.session_state.keys()):
                 if k.startswith("cb_task_"):
                     del st.session_state[k]
+            # Pre-check tools that are already assigned to this task
+            if default_tools:
+                for t in default_tools:
+                    st.session_state[f"cb_task_{t}"] = True
+
             # Set the new ones
             for idx, item in enumerate(st.session_state.temp_required_inputs):
                 st.session_state[f"ri_key_{idx}"] = item.get("key", "") or ""
@@ -2334,7 +2339,8 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                     st.markdown(f"**Task ID:** `{task['id']}`")
                                 st.markdown(f"**Description:** {task['description']}")
                                 st.markdown("**Expected Output:**")
-                                st.code(task['expected_output'], language=None)
+                                with st.container(height=150, border=False):
+                                    st.code(task['expected_output'], language=None)
                                 if task.get('tools'):
                                     pretty_tools = [f"{TOOL_EMOJIS.get(t, '🛠️')} {t.replace('_', ' ').title()}" for t in task['tools']]
                                     st.markdown(f"**Assigned Tools:** {', '.join(pretty_tools)}")
@@ -2385,7 +2391,8 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     with st.container(border=True):
                         st.markdown(f"**Description:** {task['description']}")
                         st.markdown("**Expected Output:**")
-                        st.code(task['expected_output'], language=None)
+                        with st.container(height=150, border=False):
+                            st.code(task['expected_output'], language=None)
                         
                         col1, col2 = st.columns([1, 1])
                         with col1:
@@ -3090,69 +3097,196 @@ def render_workflow_assembler():
                         )
 
     with tab_test:
-        st.subheader("🧪 Live System Test")
-        st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**.")
+        st.subheader("🧪 Run Workflows")
+        st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**, or directly run a specific workflow.")
     
-        test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
-    
-        if st.button("🚀 Execute Integration Test", type="primary"):
-            if not test_prompt:
-                st.error("Please enter a prompt.")
-            else:
-                with st.status("Running Integration Test...", expanded=True) as status:
-                    try:
-                        # 1. Master AI Routing
-                        st.write("🧠 **Master AI** is analyzing the intent...")
-                        master = MasterAI()
-                        routing = master.evaluate_intent(test_prompt)
-                        st.json(routing)
-                    
-                        if routing.get('status') == 'success' and routing.get('workflow_id'):
-                            wf_id = routing['workflow_id']
-                            st.write(f"✅ Route found: **Workflow ID {wf_id}**")
+        exec_mode = st.radio("Execution Mode", ["Direct Workflow Execution", "Natural Language Routing (Master AI)"], horizontal=True)
+        st.markdown("---")
+
+        if exec_mode == "Natural Language Routing (Master AI)":
+            test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
+        
+            if st.button("🚀 Execute Integration Test", type="primary"):
+                if not test_prompt:
+                    st.error("Please enter a prompt.")
+                else:
+                    with st.status("Running Integration Test...", expanded=True) as status:
+                        try:
+                            # 1. Master AI Routing
+                            st.write("🧠 **Master AI** is analyzing the intent...")
+                            master = MasterAI()
+                            routing = master.evaluate_intent(test_prompt)
+                            st.json(routing)
                         
-                            # 2. Crew Building
-                            st.write("🛠️ **Crew Builder** is assembling the agents...")
-                            crew = build_crew(wf_id)
-                        
-                            # 3. Execution
-                            st.write("⚡ **Executing Workflow...**")
-                            # Pass extracted params if available, otherwise raw prompt
-                            inputs = routing.get('extracted_params', {})
-                            # Create a run record with inputs
-                            run_id = db.create_run(wf_id, status='running', inputs=inputs)
-                        
-                            try:
-                                from core.crew_builder import execute_run_with_resume
-                                result = execute_run_with_resume(
-                                    run_id, 
-                                    status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
-                                )
+                            if routing.get('status') == 'success' and routing.get('workflow_id'):
+                                wf_id = routing['workflow_id']
+                                st.write(f"✅ Route found: **Workflow ID {wf_id}**")
                             
-                                # Update run record
-                                db.update_run(run_id, status='completed', result=str(result))
-
-                                # Send notification
-                                notifier = NotificationManager()
-                                workflow = db.read_workflow(wf_id)
-                                wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
-                                notifier.notify_workflow_completion(wf_name, result)
-
-                                st.success("✅ Execution Complete!")
-                                st.markdown("### Final Output")
-                                st.markdown(str(result))
-                            except Exception as e:
-                                db.update_run(run_id, status='failed', result=str(e))
-                                raise e
-                        else:
-                            st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
+                                # 2. Crew Building
+                                st.write("🛠️ **Crew Builder** is assembling the agents...")
+                                crew = build_crew(wf_id)
+                            
+                                # 3. Execution
+                                st.write("⚡ **Executing Workflow...**")
+                                inputs = routing.get('extracted_params', {})
+                                run_id = db.create_run(wf_id, status='running', inputs=inputs)
+                            
+                                try:
+                                    from core.crew_builder import execute_run_with_resume
+                                    result = execute_run_with_resume(
+                                        run_id, 
+                                        status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
+                                    )
+                                
+                                    db.update_run(run_id, status='completed', result=str(result))
+                                    notifier = NotificationManager()
+                                    workflow = db.read_workflow(wf_id)
+                                    wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
+                                    notifier.notify_workflow_completion(wf_name, result)
+                                    st.success("✅ Execution Complete!")
+                                    st.markdown("### Final Output")
+                                    st.markdown(str(result))
+                                except Exception as e:
+                                    db.update_run(run_id, status='failed', result=str(e))
+                                    raise e
+                            else:
+                                st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
+                        
+                            status.update(label="Test Finished", state="complete")
+                        except Exception as e:
+                            st.error(f"❌ Error during test: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                            status.update(label="Test Failed", state="error")
+        
+        else:
+            # Direct Workflow Execution
+            workflows = db.read_all_workflows()
+            if not workflows:
+                st.info("No workflows available.")
+            else:
+                wf_options = {w['id']: w['name'] for w in workflows}
+                selected_wf_id = st.selectbox("Select Workflow to Run", options=list(wf_options.keys()), format_func=lambda x: wf_options[x])
+                
+                if selected_wf_id:
+                    selected_wf = next((w for w in workflows if w['id'] == selected_wf_id), None)
+                    st.markdown(f"**Executing:** {selected_wf['name']}")
                     
-                        status.update(label="Test Finished", state="complete")
+                    # Parse required inputs from task descriptions
+                    tasks = db.read_all_tasks()
+                    task_map = {t['id']: t for t in tasks}
+                    
+                    # Extract all task IDs using the previously defined _extract_tids logic
+                    def _extract_tids_local(steps):
+                        tids = []
+                        for step in steps:
+                            if isinstance(step, int):
+                                tids.append(step)
+                            elif isinstance(step, dict):
+                                if step.get("type") == "batch_loop":
+                                    tids.extend(_extract_tids_local(step.get("task_ids", [])))
+                                elif "task_id" in step:
+                                    tids.append(step["task_id"])
+                        return tids
+                    
+                    try:
+                        t_ids_field = selected_wf.get('task_ids_json') or selected_wf.get('task_ids', '[]')
+                        raw_tids = t_ids_field if isinstance(t_ids_field, list) else json.loads(t_ids_field)
+                        flat_tids = _extract_tids_local(raw_tids)
                     except Exception as e:
-                        st.error(f"❌ Error during test: {e}")
-                        import traceback
-                        st.code(traceback.format_exc())
-                        status.update(label="Test Failed", state="error")
+                        flat_tids = []
+                        st.error(f"Error parsing workflow tasks: {e}")
+                        
+                    import re
+                    required_vars = set()
+                    for tid in flat_tids:
+                        t = task_map.get(tid)
+                        if t and t.get('description'):
+                            # Find all {var} patterns
+                            matches = re.findall(r'\{([a-zA-Z0-9_]+)\}', t['description'])
+                            for m in matches:
+                                if m not in ['previous_result']: # Ignore built-in crewai vars
+                                    required_vars.add(m)
+                                    
+                    st.markdown("### Required Inputs")
+                    user_inputs = {}
+                    if not required_vars:
+                        st.info("This workflow does not require any dynamic inputs.")
+                    else:
+                        for var in sorted(list(required_vars)):
+                            # Give a sensible default placeholder
+                            val = st.text_input(f"Value for `{var}`", key=f"input_{var}_{selected_wf_id}")
+                            user_inputs[var] = val
+                            
+                    st.markdown("### Paused Runs")
+                    from core.crew_builder import PauseExecution
+                    
+                    runs = db.read_all_runs()
+                    paused_runs = [r for r in runs if r.get('status') == 'paused' and r.get('workflow_id') == selected_wf_id]
+                    
+                    if paused_runs:
+                        for pr in paused_runs:
+                            st.warning(f"⚠️ Run #{pr['id']} was paused due to rate limits or errors. Progress has been saved.")
+                            if st.button(f"▶️ Resume Run #{pr['id']}", key=f"resume_{pr['id']}", type="primary"):
+                                with st.status(f"Resuming Run #{pr['id']}...", expanded=True) as status:
+                                    try:
+                                        from core.crew_builder import execute_run_with_resume
+                                        result = execute_run_with_resume(
+                                            pr['id'], 
+                                            status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
+                                        )
+                                        db.update_run(pr['id'], status='completed', result=str(result))
+                                        st.success("✅ Execution Complete!")
+                                        st.markdown(str(result))
+                                    except PauseExecution as e:
+                                        st.warning(f"⚠️ Workflow Paused: {e}")
+                                        st.info("You can resume this run later from the 'Paused Runs' section above.")
+                                        status.update(label="Execution Paused", state="complete")
+                                    except Exception as e:
+                                        db.update_run(pr['id'], status='failed', result=str(e))
+                                        st.error(f"❌ Error during execution: {e}")
+                                        import traceback
+                                        st.code(traceback.format_exc())
+                                        status.update(label="Execution Failed", state="error")
+                                    else:
+                                        status.update(label="Execution Finished", state="complete")
+                    
+                    st.markdown("### Start New Run")
+                    if st.button("🚀 Execute Workflow", type="primary"):
+                        # Validate inputs
+                        missing = [k for k in required_vars if not user_inputs.get(k)]
+                        if missing:
+                            st.error(f"Please provide values for: {', '.join(missing)}")
+                        else:
+                            with st.status("Executing Workflow...", expanded=True) as status:
+                                try:
+                                    # Create Run Record
+                                    run_id = db.create_run(selected_wf_id, status='running', inputs=user_inputs)
+                                    
+                                    from core.crew_builder import execute_run_with_resume
+                                    result = execute_run_with_resume(
+                                        run_id, 
+                                        status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
+                                    )
+                                    
+                                    db.update_run(run_id, status='completed', result=str(result))
+                                    notifier = NotificationManager()
+                                    notifier.notify_workflow_completion(selected_wf['name'], result)
+                                    st.success("✅ Execution Complete!")
+                                    st.markdown("### Final Output")
+                                    st.markdown(str(result))
+                                except PauseExecution as e:
+                                    st.warning(f"⚠️ Workflow Paused: {e}")
+                                    st.info("You can resume this run later from the 'Paused Runs' section above.")
+                                    status.update(label="Execution Paused", state="complete")
+                                except Exception as e:
+                                    db.update_run(run_id, status='failed', result=str(e))
+                                    st.error(f"❌ Error during execution: {e}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
+                                    status.update(label="Execution Failed", state="error")
+                                else:
+                                    status.update(label="Execution Finished", state="complete")
 
 
 def render_tool_factory():

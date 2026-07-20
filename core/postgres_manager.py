@@ -774,9 +774,15 @@ class PostgresManager:
         self.conn.commit()
         return self.cursor.fetchone()['id']
 
-    def update_run(self, run_id: int, status: str, result: str = "", current_task_idx: int = None, task_outputs: dict = None, in_flight_tasks: list = None) -> None:
-        updates = ["status = %s", "result = %s", "finished_at = (CASE WHEN %s IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)"]
-        params = [status, result, status]
+    def update_run(self, run_id: int, status: str = None, result: str = "", current_task_idx: int = None, task_outputs: dict = None, in_flight_tasks: list = None) -> None:
+        updates = []
+        params = []
+        if status is not None:
+            updates.extend(["status = %s", "result = %s", "finished_at = (CASE WHEN %s IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE finished_at END)"])
+            params.extend([status, result, status])
+        elif result:
+            updates.append("result = %s")
+            params.append(result)
 
         if current_task_idx is not None:
             updates.append("current_task_idx = %s")
@@ -818,12 +824,11 @@ class PostgresManager:
 
     def clear_all_runs(self) -> int:
         """Clears all history from the workflow_runs table."""
-        sql = "DELETE FROM workflow_runs"
-        self.cursor.execute(sql)
-        # Reset the autoincrement counter for this table
-        self.cursor.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'workflow_runs'")
+        self.cursor.execute("SELECT COUNT(*) FROM workflow_runs")
+        count = self.cursor.fetchone()[0]
+        self.cursor.execute("TRUNCATE TABLE workflow_runs RESTART IDENTITY CASCADE")
         self.conn.commit()
-        return self.cursor.rowcount
+        return count
 
     # --- HITL Requests CRUD ---
     def create_hitl_request(self, chat_id: str, question: str) -> None:
