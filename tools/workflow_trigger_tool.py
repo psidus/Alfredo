@@ -34,11 +34,13 @@ def _run_in_background(run_id: int):
             logging.error(f"Failed to update run status to failed: {inner_e}")
 
 @tool
-def trigger_next_batch(workflow_name: str, new_offset: int, context: Optional[str] = None, document_type: Optional[str] = None) -> str:
+def trigger_next_batch(workflow_name: str, db_name: str, limit: int, new_offset: int, context: Optional[str] = None, document_type: Optional[str] = None) -> str:
     """
     Self-triggers a new background execution of a workflow in Alfredo.
     Use this to continue reading a document from a new offset.
     - workflow_name: the exact name of the workflow (e.g., 'Thermo Data Explorer').
+    - db_name: the name of the Qdrant database to read from.
+    - limit: the number of chunks to read.
     - new_offset: the offset chunk to start from in the new execution.
     - context: optional string to pass memory/context to the next chunk (e.g. 'Currently reading Viscosity Liquid table').
     - document_type: optional string indicating the global target property type (e.g. 'BIPs', 'eNRTL', 'Pure Components').
@@ -61,7 +63,7 @@ def trigger_next_batch(workflow_name: str, new_offset: int, context: Optional[st
         workflow_id = target_workflow["id"]
         
         # Queue the new run with the new offset as an input
-        run_inputs = {'offset': new_offset}
+        run_inputs = {'db_name': db_name, 'limit': limit, 'offset': new_offset}
         if context:
             run_inputs['context'] = context
         if document_type:

@@ -94,3 +94,13 @@ tools_registry:
     display_name: "Local: Thermo Excel DB Writer"
     description: "Merges thermodynamic property data and saves it to an Excel database."
     required_secrets: []
+
+  read_rag_chunks:
+    display_name: "RAG: Read RAG Chunks (Paginated)"
+    description: "Reads RAG vector database chunks linearly with offset and limit pagination."
+    required_secrets: []
+
+  trigger_next_batch:
+    display_name: "Workflow: Trigger Next Batch"
+    description: "Triggers the next batch of an autonomous workflow with updated offset and context."
+    required_secrets: []

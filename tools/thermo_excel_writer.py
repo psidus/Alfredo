@@ -45,10 +45,32 @@ def merge_and_save_data(validated_data_json: str) -> str:
     resolves conflicts (T range, physical state, chemical structures), and saves.
     Input must be a JSON string matching ExtractionOutput schema.
     """
+    if validated_data_json.strip() in ["SKIP", "FINISHED"]:
+        return f"Tool bypassed gracefully because input was {validated_data_json.strip()}"
+
+    if validated_data_json.strip() in ["SKIP", "FINISHED"]:
+        return f"Tool bypassed gracefully because input was {validated_data_json.strip()}"
+
+    # Extract JSON if wrapped in markdown code blocks or has leading text
+    import re
+    json_str = validated_data_json.strip()
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', json_str, re.DOTALL)
+    if match:
+        json_str = match.group(1)
+    else:
+        # Fallback: try to find the first { and last }
+        start = json_str.find('{')
+        end = json_str.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            json_str = json_str[start:end+1]
+
     try:
-        validated_data = ExtractionOutput.parse_raw(validated_data_json)
+        validated_data = ExtractionOutput.parse_raw(json_str)
     except Exception as e:
         return f"Error parsing JSON against ExtractionOutput schema: {e}"
+
+    if validated_data.status in ["SKIP", "FINISHED"]:
+        return f"Tool bypassed gracefully because JSON status was {validated_data.status}"
 
     if not os.path.exists(DB_PATH):
         init_excel_db()
@@ -104,6 +126,8 @@ def merge_and_save_data(validated_data_json: str) -> str:
                 col_map = {
                     "id_no": "ID_No", "component_name": "Component Name", "cas": "CAS", "equation_form": "Equation Form",
                     "t_min": "T_min", "t_max": "T_max", "physical_state": "Physical State",
+                    "molwt": "MOLWT", "tfp": "TFP", "tbp": "TBP", "tc": "TC", "pc": "PC", "vc": "VC",
+                    "lden_coeffs": "LDEN", "tden_coeffs": "TDEN", "hvap_coeffs": "HVAP",
                     "HeatCapacityGas_coeffs": "HeatCapacityGas_coeffs", "HeatCapacityLiquid_coeffs": "HeatCapacityLiquid_coeffs",
                     "VaporPressure_coeffs": "VaporPressure_coeffs", "VolumeLiquid_coeffs": "VolumeLiquid_coeffs",
                     "ViscosityLiquid_coeffs": "ViscosityLiquid_coeffs", "ViscosityGas_coeffs": "ViscosityGas_coeffs",
@@ -157,6 +181,8 @@ def merge_and_save_data(validated_data_json: str) -> str:
                     new_row = pd.DataFrame([{
                         "ID_No": item.id_no, "Component Name": final_name, "CAS": item.cas, "Equation Form": item.equation_form,
                         "T_min": item.t_min, "T_max": item.t_max, "Physical State": item.physical_state,
+                        "MOLWT": item.molwt, "TFP": item.tfp, "TBP": item.tbp, "TC": item.tc, "PC": item.pc, "VC": item.vc,
+                        "LDEN": item.lden_coeffs, "TDEN": item.tden_coeffs, "HVAP": item.hvap_coeffs,
                         "HeatCapacityGas_coeffs": item.HeatCapacityGas_coeffs, "HeatCapacityLiquid_coeffs": item.HeatCapacityLiquid_coeffs,
                         "VaporPressure_coeffs": item.VaporPressure_coeffs, "VolumeLiquid_coeffs": item.VolumeLiquid_coeffs,
                         "ViscosityLiquid_coeffs": item.ViscosityLiquid_coeffs, "ViscosityGas_coeffs": item.ViscosityGas_coeffs,

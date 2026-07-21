@@ -43,9 +43,11 @@ Use the provided '{document_type}' to help identify the properties shown.
 Also consider the '{context}' which may contain the ID/Name of a component that was cut in half in the previous chunk.
 If it is a useful table/index, output a JSON string containing:
 {"status": "TABLE", "context": "Detailed instructions on what properties map to what fields. If a component was cut in half, include its ID/Name from the input {context} here so the extractor knows what component the dangling numbers belong to.", "raw_chunk": "The exact raw text you read"}
-If it is spare text without useful data, or if the tool returns END_OF_DOCUMENT, output strictly:
-{"status": "SKIP"}""",
-        expected_output="A strict JSON object with status, context, and raw_chunk.",
+If it is spare text without useful data, output strictly:
+{"status": "SKIP"}
+If the tool returns END_OF_DOCUMENT (meaning there is no more data to read), output strictly:
+{"status": "FINISHED"}""",
+        expected_output="A strict JSON object with status (TABLE, SKIP, or FINISHED).",
         agent_id=clausius_agent_id,
         tools=["read_rag_chunks"],
         required_inputs=[
@@ -55,7 +57,7 @@ If it is spare text without useful data, or if the tool returns END_OF_DOCUMENT,
             {"key": "document_type", "prompt": "Tipo di documento (es. Pure Components, BIPs, eNRTL)"},
             {"key": "context", "prompt": "Contesto (opzionale, default N/A)"}
         ],
-        agent_specialization="Context analyzer and chunk reader.",
+        agent_specialization="Context analyzer and chunk reader. You ONLY output JSON.",
         human_validation=False
     )
     
@@ -63,12 +65,13 @@ If it is spare text without useful data, or if the tool returns END_OF_DOCUMENT,
     task_2_id = db.create_task(
         name="Data Extractor",
         description="""Analyze the JSON output from the previous task: '{previous_result}'.
-If the status is 'SKIP', you MUST output 'SKIP'.
+If the status in the JSON is 'SKIP', you MUST output a valid JSON matching ExtractionOutput with status set to "SKIP" and all lists empty.
+If the status in the JSON is 'FINISHED', you MUST output a valid JSON matching ExtractionOutput with status set to "FINISHED" and all lists empty.
 Otherwise, use the 'raw_chunk' and the 'context' instructions provided in the JSON to extract the thermodynamic data row by row.
 CRITICAL: Prioritize extracting the numerical ID into the 'id_no' field if present (e.g., '1', '2'). Leave 'component_name' empty if only an ID is given.
 If the 'context' tells you that the first numbers belong to a component from the previous chunk, assign them to that component's ID/Name!
 Format all the extracted data STRICTLY according to the ExtractionOutput Pydantic schema.""",
-        expected_output="A valid JSON matching the ExtractionOutput schema, or 'SKIP'.",
+        expected_output="A valid JSON matching the ExtractionOutput schema.",
         agent_id=dora_agent_id,
         tools=[],
         agent_specialization="Data extractor for thermodynamic properties.",
@@ -79,29 +82,36 @@ Format all the extracted data STRICTLY according to the ExtractionOutput Pydanti
     # TASK 3: Writer & Merge Checker
     task_3_id = db.create_task(
         name="Write to Master Excel DB",
-        description="""If '{previous_result}' is 'SKIP', output 'Skipped'. 
-Otherwise, use the 'merge_and_save_data' tool to append the validated ExtractionOutput JSON (which is '{previous_result}') into the master Excel database.
-The merge_and_save_data tool will automatically check for identical IDs/names between lines and safely merge or split the rows.""",
+        description="""The '{previous_result}' is a JSON string containing thermodynamic data (with a 'status' field).
+If the JSON has "status": "SKIP" or "status": "FINISHED", YOU MUST STILL EXECUTE THE 'merge_and_save_data' TOOL! 
+Pass the exact string '{previous_result}' as the 'validated_data_json' argument to the tool.
+The tool will handle it gracefully.
+DO NOT explain the JSON. DO NOT rewrite the JSON. JUST CALL THE TOOL.
+Output the exact confirmation string returned by the tool.""",
         expected_output="Confirmation string from the merge_and_save_data tool.",
         agent_id=clausius_agent_id,
         tools=["merge_and_save_data"],
-        agent_specialization="Excel writer and merge conflict handler.",
+        agent_specialization="Excel writer. You MUST use the merge_and_save_data tool.",
         human_validation=False
     )
 
     # TASK 4: Auto-Trigger Next Chunk
     task_4_id = db.create_task(
         name="Trigger Next Batch",
-        description="""If the first task returned END_OF_DOCUMENT or we are done, output 'EXPLORATION FINISHED'.
-Otherwise, use the 'trigger_next_batch' tool. Pass 'Thermo Explorer (Autonomous)' as workflow_name. 
-Calculate new_offset as {offset} + {limit}.
-Pass '{document_type}' for document_type.
-For the 'context' variable, you MUST check the ephemeral memory (e.g. from Data Extractor) and extract the ID and Name of the LAST component that was processed. Pass this ID and Name as the context so the next batch knows what component was cut off!
-Output the success message from the tool.""",
+        description="""Analyze the result of the previous task: '{previous_result}'.
+If the previous tool output indicates that the JSON had status "FINISHED", you MUST output 'EXPLORATION FINISHED' and STOP. Do not call any tools.
+Otherwise (even if it was skipped or successfully written), you MUST use the 'trigger_next_batch' tool to continue the loop!
+CRITICAL RULE: You MUST pass exactly "Thermo Explorer (Autonomous)" as the workflow_name argument. Do not invent or pick other names!
+Pass exactly "{db_name}" as the db_name argument.
+Pass exactly {limit} as the limit argument.
+Calculate new_offset as {offset} + {limit} and pass it as the new_offset argument.
+Pass "{document_type}" for document_type.
+For the 'context' variable, if there was valid extracted data in this batch, pass the ID and Name of the LAST component processed. If none or skipped, pass "{context}" (the previous context) to carry it over.
+Output the exact success message from the trigger tool.""",
         expected_output="Trigger success message or EXPLORATION FINISHED.",
         agent_id=clausius_agent_id,
         tools=["trigger_next_batch"],
-        agent_specialization="System automation orchestrator.",
+        agent_specialization="System automation orchestrator. Your only job is to trigger the next batch.",
         human_validation=False
     )
 

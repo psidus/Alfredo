@@ -227,23 +227,21 @@ def _instantiate_llm(model_id, task_record=None):
             kwargs["max_tokens"] = max_output_tokens
         return ChatOpenAI(**kwargs)
     elif provider == 'ollama':
-        # If we have specific context sizes, we must instantiate via crewai.LLM
-        if max_input_context > 0 or max_output_tokens > 0:
-            try:
-                from crewai import LLM
-                kwargs = {
-                    "model": f"ollama/{model_name}",
-                    "base_url": os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
-                }
-                # Removed num_ctx as it causes TypeError in recent litellm/openai wrappers
-                if max_output_tokens > 0:
-                    kwargs["max_tokens"] = max_output_tokens
-                return LLM(**kwargs)
-            except ImportError:
-                pass # fallback to string if LLM class not available
-                
-        # Prefer LiteLLM-style string for compatibility with the CrewAI shim.
-        return f"ollama/{model_name}"
+        base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        ctx_limit = max_input_context if max_input_context > 0 else 8192
+        try:
+            from crewai import LLM
+            kwargs = {
+                "model": f"ollama/{model_name}",
+                "base_url": base_url,
+                "timeout": 180
+            }
+            if max_output_tokens > 0:
+                kwargs["max_tokens"] = max_output_tokens
+            return LLM(**kwargs)
+        except Exception as e:
+            logging.warning(f"Failed to instantiate LLM object for Ollama: {e}")
+            return f"ollama/{model_name}"
     else:
         # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
         model_string = f"{provider}/{model_name}"
@@ -541,7 +539,10 @@ def _build_task(task_id, agents_cache):
         task_tools = _get_task_tools(task_record.get('tools', []), task_record.get('vector_dbs', []), strip_tools=not supports_tools)
 
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
-    task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
+    if task_record.get('output_pydantic'):
+        task_description = task_record['description']
+    else:
+        task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
 
     # --- LEARNING MEMORY INJECTION ---
     try:
@@ -564,7 +565,8 @@ def _build_task(task_id, agents_cache):
     
     task_tools_list = task_record.get('tools', [])
     if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
-        base_expected += vector_format_directive
+        if not task_record.get('output_pydantic'):
+            base_expected += vector_format_directive
 
     task = Task(
         description=task_description,
@@ -946,13 +948,28 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 if fallback_model_id:
                     try:
                         fallback_llm = _instantiate_llm(int(fallback_model_id), task_record=None)
-                        # Swap the agent's LLM
-                        task_obj.agent.llm = fallback_llm
-                        # Clear old tools if the new model doesn't support them
                         m = db.read_model(int(fallback_model_id))
-                        if m and not bool(m.get('supports_tools', 1)):
-                            task_obj.agent.tools = []
+                        supports_tools = True
+                        if m:
+                            supports_tools = bool(m.get('supports_tools', 1))
+                            
+                        fallback_tools = task_obj.agent.tools if supports_tools else []
+                        if not supports_tools:
                             task_obj.tools = []
+                            
+                        # Re-instantiate the agent cleanly to avoid 'LLM must be resolved' error
+                        fallback_agent = Agent(
+                            role=task_obj.agent.role,
+                            backstory=task_obj.agent.backstory,
+                            goal=task_obj.agent.goal,
+                            llm=fallback_llm,
+                            tools=fallback_tools,
+                            verbose=task_obj.agent.verbose,
+                            allow_delegation=task_obj.agent.allow_delegation,
+                            max_iter=task_obj.agent.max_iter,
+                            step_callback=task_obj.agent.step_callback
+                        )
+                        task_obj.agent = fallback_agent
                         logging.info(f"Retrying task with fallback model {fallback_model_id}")
                         # Re-instantiate the crew with the updated agent
                         single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
@@ -1606,7 +1623,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
             base_expected = task_data.get('expected_output', 'Task Output')
             vector_format_directive = " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
-            if "write_atomic_memory" in combined_tools and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+            if "write_atomic_memory" in combined_tools and "vector" not in base_expected.lower() and "header" not in base_expected.lower() and not task_data.get('output_pydantic'):
                 base_expected += vector_format_directive
 
             for k, v in execution_context.items():

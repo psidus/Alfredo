@@ -12,6 +12,15 @@ class PureComponentData(BaseModel):
     t_min: Optional[float] = None
     t_max: Optional[float] = None
     physical_state: Optional[str] = None
+    molwt: Optional[str] = Field(None, description="Molecular weight. Can be a single number.")
+    tfp: Optional[str] = Field(None, description="Freezing point. Can be a single number.")
+    tbp: Optional[str] = Field(None, description="Boiling point. Can be a single number.")
+    tc: Optional[str] = Field(None, description="Critical temperature. Can be a single number.")
+    pc: Optional[str] = Field(None, description="Critical pressure. Can be a single number.")
+    vc: Optional[str] = Field(None, description="Critical volume. Can be a single number.")
+    lden_coeffs: Optional[str] = Field(None, description="Liquid density. Can be a single number or coefficients.")
+    tden_coeffs: Optional[str] = Field(None, description="Vapor density. Can be a single number or coefficients.")
+    hvap_coeffs: Optional[str] = Field(None, description="Heat of vaporization. Can be a single number or coefficients.")
     HeatCapacityGas_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
     HeatCapacityLiquid_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
     VaporPressure_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
@@ -27,6 +36,7 @@ class PureComponentData(BaseModel):
         'HeatCapacityGas_coeffs', 'HeatCapacityLiquid_coeffs', 'VaporPressure_coeffs',
         'VolumeLiquid_coeffs', 'ViscosityLiquid_coeffs', 'ViscosityGas_coeffs',
         'ThermalConductivityLiquid_coeffs', 'ThermalConductivityGas_coeffs', 'sigma_e_coeffs',
+        'molwt', 'tfp', 'tbp', 'tc', 'pc', 'vc', 'lden_coeffs', 'tden_coeffs', 'hvap_coeffs',
         mode='before'
     )
     @classmethod
@@ -63,9 +73,9 @@ class eNRTLData(BaseModel):
 
 class ExtractionOutput(BaseModel):
     status: str = Field(default="PROCEED", description="Set to 'SKIP' if the instructions tell you to skip.")
-    pure_components: List[PureComponentData] = Field(default_factory=list)
-    bips: List[BIPData] = Field(default_factory=list)
-    enrtl: List[eNRTLData] = Field(default_factory=list)
+    pure_components: List[PureComponentData] = Field(default_factory=list, description="List of pure components. MUST BE EMPTY [] if no pure components are explicitly found in the chunk.")
+    bips: List[BIPData] = Field(default_factory=list, description="List of binary interaction parameters. MUST BE EMPTY [] if no BIPs are explicitly found in the chunk. Keys MUST be component_1 and component_2.")
+    enrtl: List[eNRTLData] = Field(default_factory=list, description="List of eNRTL parameters. MUST BE EMPTY [] if no eNRTL parameters are explicitly found in the chunk.")
     confidence_score: int = Field(default=0, ge=0, le=100)
     validation_notes: str = ""
 
