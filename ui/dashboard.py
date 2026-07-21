@@ -3199,6 +3199,7 @@ def render_workflow_assembler():
                         
                     import re
                     required_vars = set()
+                    var_prompts = {}
                     for tid in flat_tids:
                         t = task_map.get(tid)
                         if t and t.get('description'):
@@ -3207,6 +3208,10 @@ def render_workflow_assembler():
                             for m in matches:
                                 if m not in ['previous_result']: # Ignore built-in crewai vars
                                     required_vars.add(m)
+                        if t and t.get('required_inputs'):
+                            for ri in t['required_inputs']:
+                                if isinstance(ri, dict) and 'key' in ri and 'prompt' in ri:
+                                    var_prompts[ri['key']] = ri['prompt']
                                     
                     st.markdown("### Required Inputs")
                     user_inputs = {}
@@ -3214,8 +3219,14 @@ def render_workflow_assembler():
                         st.info("This workflow does not require any dynamic inputs.")
                     else:
                         for var in sorted(list(required_vars)):
+                            placeholder = var_prompts.get(var, f"e.g. Enter value for {var}")
                             # Give a sensible default placeholder
-                            val = st.text_input(f"Value for `{var}`", key=f"input_{var}_{selected_wf_id}")
+                            if var == 'context':
+                                val = st.text_input(f"Value for `{var}` (Optional)", key=f"input_{var}_{selected_wf_id}", value="N/A", placeholder=placeholder)
+                            elif var == 'document_type':
+                                val = st.selectbox(f"Value for `{var}` (Optional)", ["Pure Components", "BIPs", "eNRTL", "Unknown/Mixed"], key=f"input_{var}_{selected_wf_id}")
+                            else:
+                                val = st.text_input(f"Value for `{var}`", key=f"input_{var}_{selected_wf_id}", placeholder=placeholder)
                             user_inputs[var] = val
                             
                     st.markdown("### Paused Runs")
@@ -3254,40 +3265,68 @@ def render_workflow_assembler():
                     st.markdown("### Start New Run")
                     if st.button("🚀 Execute Workflow", type="primary"):
                         # Validate inputs
-                        missing = [k for k in required_vars if not user_inputs.get(k)]
+                        missing = [k for k in required_vars if not user_inputs.get(k) and k not in ['context', 'document_type']]
                         if missing:
                             st.error(f"Please provide values for: {', '.join(missing)}")
                         else:
-                            with st.status("Executing Workflow...", expanded=True) as status:
+                            with st.status("Queuing Workflow...", expanded=True) as status:
                                 try:
                                     # Create Run Record
                                     run_id = db.create_run(selected_wf_id, status='running', inputs=user_inputs)
                                     
-                                    from core.crew_builder import execute_run_with_resume
-                                    result = execute_run_with_resume(
-                                        run_id, 
-                                        status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
-                                    )
+                                    import threading
+                                    def _run_workflow_bg(r_id, wf_name):
+                                        try:
+                                            from core.crew_builder import execute_run_with_resume
+                                            result = execute_run_with_resume(r_id)
+                                            db = DBManager()
+                                            db.update_run(r_id, status='completed', result=str(result))
+                                            from core.notification_manager import NotificationManager
+                                            notifier = NotificationManager()
+                                            notifier.notify_workflow_completion(wf_name, result)
+                                        except Exception as e:
+                                            try:
+                                                db = DBManager()
+                                                db.update_run(r_id, status='failed', result=str(e))
+                                            except Exception:
+                                                pass
+
+                                    thread = threading.Thread(target=_run_workflow_bg, args=(run_id, selected_wf['name']), daemon=True)
+                                    thread.start()
                                     
-                                    db.update_run(run_id, status='completed', result=str(result))
-                                    notifier = NotificationManager()
-                                    notifier.notify_workflow_completion(selected_wf['name'], result)
-                                    st.success("✅ Execution Complete!")
-                                    st.markdown("### Final Output")
-                                    st.markdown(str(result))
+                                    st.success(f"✅ Workflow queued successfully (Run ID: {run_id})!")
+                                    st.info("🔄 It is now running in the background. You can safely change tabs to 'History & Monitoring' to view its real-time progress without interrupting it.")
                                 except PauseExecution as e:
                                     st.warning(f"⚠️ Workflow Paused: {e}")
                                     st.info("You can resume this run later from the 'Paused Runs' section above.")
-                                    status.update(label="Execution Paused", state="complete")
                                 except Exception as e:
                                     db.update_run(run_id, status='failed', result=str(e))
-                                    st.error(f"❌ Error during execution: {e}")
-                                    import traceback
-                                    st.code(traceback.format_exc())
-                                    status.update(label="Execution Failed", state="error")
-                                else:
-                                    status.update(label="Execution Finished", state="complete")
-
+                                    st.error(f"Failed to queue workflow: {e}")
+                    
+                    # Check for active running instances of this workflow
+                    active_runs = [r for r in db.read_all_runs(limit=10) if r['workflow_id'] == selected_wf_id and r['status'] == 'running']
+                    if active_runs:
+                        ar = active_runs[0]
+                        st.markdown("---")
+                        
+                        # Extract in-flight tasks for better visibility
+                        in_flight = ar.get('in_flight_tasks', '[]')
+                        try:
+                            if isinstance(in_flight, str):
+                                in_flight_list = json.loads(in_flight)
+                            else:
+                                in_flight_list = in_flight
+                            in_flight_str = ", ".join(str(t) for t in in_flight_list if t)
+                            if not in_flight_str: in_flight_str = "Initializing..."
+                        except Exception:
+                            in_flight_str = "Unknown"
+                            
+                        st.info(f"🔄 **This workflow is currently running in the background** (Run ID: {ar['id']}).\n\n**Currently Executing:** {in_flight_str}")
+                        
+                        if st.button("🛑 Stop Active Run", type="secondary", key=f"stop_{ar['id']}"):
+                            db.update_run(active_runs[0]['id'], status='stopped')
+                            st.success("Run stopped successfully. It may take a few seconds to halt.")
+                            st.rerun()
 
 def render_tool_factory():
     """Renders the Tool Factory tab."""
@@ -3438,15 +3477,24 @@ def render_history_monitoring():
     st.header("History & Monitoring")
     st.markdown("Track the execution status and results of your workflows.")
 
-    col1, col2 = st.columns([1, 4])
+    col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
         if st.button("🗑️ Clear All History", type="primary", use_container_width=True):
             count = db.clear_all_runs()
             st.toast(f"History cleared! ({count} runs removed)", icon="🗑️")
             st.rerun()
     with col2:
+        if st.button("🧹 Clear Completed", type="secondary", use_container_width=True):
+            runs_to_del = [r for r in db.read_all_runs() if r['status'] == 'completed']
+            for r in runs_to_del:
+                db.delete_run(r['id'])
+            st.toast(f"Cleared {len(runs_to_del)} completed runs!", icon="🧹")
+            st.rerun()
+    with col3:
         if st.button("🔄 Refresh Live Status", type="secondary"):
             st.rerun()
+            
+    auto_delete = st.checkbox("🧹 Auto-delete completed runs (keeps only failed/running)", value=False)
 
     runs = db.read_all_runs(limit=50)
     workflows = db.read_all_workflows()
@@ -3457,6 +3505,10 @@ def render_history_monitoring():
         return
 
     for run in runs:
+        if auto_delete and run['status'] == 'completed':
+            db.delete_run(run['id'])
+            continue
+            
         wf_name = wf_map.get(run['workflow_id'], f"Workflow {run['workflow_id']}")
         status = run['status']
         
@@ -3513,7 +3565,12 @@ def render_history_monitoring():
                                 db.update_run(run['id'], status='failed', result=str(e))
                                 st.toast(f"Failed to resume run: {e}", icon="❌")
                                 st.rerun()
-                
+                if status == 'running':
+                    if st.button("🛑", key=f"stop_run_{run['id']}", help="Stop this run"):
+                        db.update_run(run['id'], status='stopped')
+                        st.toast("Run stopped", icon="🛑")
+                        st.rerun()
+                        
                 if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete this run"):
                     db.delete_run(run['id'])
                     st.toast(f"Run {run['id']} deleted")

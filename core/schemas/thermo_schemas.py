@@ -1,23 +1,41 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 
+COEFFS_REGEX = r'^[\d\.,\-\+eE\s\*/\(\)]+$'
+COEFFS_DESC = "Comma separated numerical coefficients ONLY (e.g. '1.5, -2.1e3'). DO NOT use text like 'Antoine constants'. If you only find the name of the equation but no numbers, leave this field empty/null and put the equation name in 'equation_form'."
+
 class PureComponentData(BaseModel):
-    component_name: str
+    component_name: Optional[str] = None
+    id_no: Optional[str] = None
     cas: Optional[str] = None
     equation_form: Optional[str] = None
     t_min: Optional[float] = None
     t_max: Optional[float] = None
     physical_state: Optional[str] = None
-    HeatCapacityGas_coeffs: Optional[str] = Field(None, description="Comma separated or math expression")
-    HeatCapacityLiquid_coeffs: Optional[str] = None
-    VaporPressure_coeffs: Optional[str] = None
-    VolumeLiquid_coeffs: Optional[str] = None
-    ViscosityLiquid_coeffs: Optional[str] = None
-    ViscosityGas_coeffs: Optional[str] = None
-    ThermalConductivityLiquid_coeffs: Optional[str] = None
-    ThermalConductivityGas_coeffs: Optional[str] = None
-    sigma_e_coeffs: Optional[str] = None
+    HeatCapacityGas_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    HeatCapacityLiquid_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    VaporPressure_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    VolumeLiquid_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    ViscosityLiquid_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    ViscosityGas_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    ThermalConductivityLiquid_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    ThermalConductivityGas_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
+    sigma_e_coeffs: Optional[str] = Field(None, description=COEFFS_DESC)
     reference: Optional[str] = None
+
+    @field_validator(
+        'HeatCapacityGas_coeffs', 'HeatCapacityLiquid_coeffs', 'VaporPressure_coeffs',
+        'VolumeLiquid_coeffs', 'ViscosityLiquid_coeffs', 'ViscosityGas_coeffs',
+        'ThermalConductivityLiquid_coeffs', 'ThermalConductivityGas_coeffs', 'sigma_e_coeffs',
+        mode='before'
+    )
+    @classmethod
+    def nullify_invalid_coeffs(cls, v: str | None) -> str | None:
+        if isinstance(v, str):
+            import re
+            if not re.match(COEFFS_REGEX, v):
+                return None
+        return v
 
 class BIPData(BaseModel):
     component_1: str
@@ -50,3 +68,7 @@ class ExtractionOutput(BaseModel):
     enrtl: List[eNRTLData] = Field(default_factory=list)
     confidence_score: int = Field(default=0, ge=0, le=100)
     validation_notes: str = ""
+
+class ChemicalList(BaseModel):
+    chemicals: List[str] = Field(default_factory=list, description="List of all chemical substances extracted from the text.")
+    end_reached: bool = Field(default=False, description="Set to true if the end of the document is reached.")

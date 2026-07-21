@@ -33,74 +33,70 @@ def setup_thermo_explorer():
 
     # 2. Create Tasks
     
-    # LEVEL 1: Paginator
+    # TASK 1: Context Analyzer (Paginator)
     task_1_id = db.create_task(
-        name="Generate Target List (Chunked)",
-        description="""Start by reading the RAG database linearly using 'read_rag_chunks'.
-You MUST use the db_name: '{db_name}', offset: {offset}, and limit: {limit}.
-After reading the chunks, extract a comprehensive list of all chemical components mentioned.
-Output a strictly formatted JSON containing: {"chemicals": ["Substance 1", "Substance 2", ...]}.
-If the tool returns 'END_OF_DOCUMENT', output {"chemicals": [], "end_reached": true}.""",
-        expected_output="A strict JSON object with the key 'chemicals'.",
+        name="Context Analyzer (Chunk Reader)",
+        description="""Read the RAG database linearly using the 'read_rag_chunks' tool. 
+You MUST use db_name: '{db_name}', offset: {offset}, and limit: {limit}.
+Analyze the returned chunk text to determine if it contains a table of thermodynamic properties, an index mapping, or just spare text. 
+Use the provided '{document_type}' to help identify the properties shown.
+Also consider the '{context}' which may contain the ID/Name of a component that was cut in half in the previous chunk.
+If it is a useful table/index, output a JSON string containing:
+{"status": "TABLE", "context": "Detailed instructions on what properties map to what fields. If a component was cut in half, include its ID/Name from the input {context} here so the extractor knows what component the dangling numbers belong to.", "raw_chunk": "The exact raw text you read"}
+If it is spare text without useful data, or if the tool returns END_OF_DOCUMENT, output strictly:
+{"status": "SKIP"}""",
+        expected_output="A strict JSON object with status, context, and raw_chunk.",
         agent_id=clausius_agent_id,
         tools=["read_rag_chunks"],
         required_inputs=[
-            {"key": "db_name", "prompt": "Nome del RAG (es. Electrolite, Perry, CR_chemical)"},
+            {"key": "db_name", "prompt": "Nome del RAG (es. Basic_properties, Perry_cap_2)"},
             {"key": "offset", "prompt": "Offset di partenza (default 0)"},
-            {"key": "limit", "prompt": "Numero di chunk da esplorare (default 50)"}
+            {"key": "limit", "prompt": "Numero di chunk da esplorare (default 50)"},
+            {"key": "document_type", "prompt": "Tipo di documento (es. Pure Components, BIPs, eNRTL)"},
+            {"key": "context", "prompt": "Contesto (opzionale, default N/A)"}
         ],
-        agent_specialization="You are a librarian. You must read linearly and extract all substances mentioned.",
+        agent_specialization="Context analyzer and chunk reader.",
         human_validation=False
     )
     
-    # LEVEL 2: Batch Loop Tasks
-    task_2a_id = db.create_task(
-        name="Filter Target in Excel",
-        description="Check if '{previous_result}' is already mapped in the master Excel database using 'check_excel_db'. If it returns SKIP, output 'SKIP'. If PROCEED, output 'PROCEED'.",
-        expected_output="Strictly 'SKIP' or 'PROCEED'.",
-        agent_id=clausius_agent_id,
-        tools=["check_excel_db"],
-        agent_specialization="Database fast checker.",
-        human_validation=False
-    )
-    
-    task_2b_id = db.create_task(
-        name="[ASYNC] Extract Properties Semantically",
-        description="If the previous result is 'SKIP', output 'SKIP'. Otherwise, deeply semantic-search your databases for T-dependent properties, BIPs, and eNRTL for the substance '{previous_result}'. Extract coefficients, references, and ranges.",
-        expected_output="Raw text/markdown with extracted values and references, or 'SKIP'.",
-        agent_id=dora_agent_id,
-        tools=["vector_search", "tabular_query"],
-        agent_specialization="Semantic researcher for thermodynamic properties.",
-        human_validation=False
-    )
-    
-    task_2c_id = db.create_task(
-        name="Reconcile & Validate Data",
-        description="If the previous result is 'SKIP', output 'SKIP'. Otherwise, review the raw markdown extracted for '{previous_result}', format it strictly according to the ExtractionOutput Pydantic schema.",
+    # TASK 2: Data Extractor
+    task_2_id = db.create_task(
+        name="Data Extractor",
+        description="""Analyze the JSON output from the previous task: '{previous_result}'.
+If the status is 'SKIP', you MUST output 'SKIP'.
+Otherwise, use the 'raw_chunk' and the 'context' instructions provided in the JSON to extract the thermodynamic data row by row.
+CRITICAL: Prioritize extracting the numerical ID into the 'id_no' field if present (e.g., '1', '2'). Leave 'component_name' empty if only an ID is given.
+If the 'context' tells you that the first numbers belong to a component from the previous chunk, assign them to that component's ID/Name!
+Format all the extracted data STRICTLY according to the ExtractionOutput Pydantic schema.""",
         expected_output="A valid JSON matching the ExtractionOutput schema, or 'SKIP'.",
-        agent_id=clausius_agent_id,
+        agent_id=dora_agent_id,
         tools=[],
-        agent_specialization="Strict Data Validator.",
+        agent_specialization="Data extractor for thermodynamic properties.",
         output_pydantic="ExtractionOutput",
         human_validation=False
     )
     
-    task_2d_id = db.create_task(
+    # TASK 3: Writer & Merge Checker
+    task_3_id = db.create_task(
         name="Write to Master Excel DB",
-        description="If '{previous_result}' is 'SKIP', output 'Skipped'. Otherwise, use 'merge_and_save_data' tool to append the validated ExtractionOutput JSON for '{previous_result}' into the master Excel database.",
-        expected_output="Confirmation string.",
+        description="""If '{previous_result}' is 'SKIP', output 'Skipped'. 
+Otherwise, use the 'merge_and_save_data' tool to append the validated ExtractionOutput JSON (which is '{previous_result}') into the master Excel database.
+The merge_and_save_data tool will automatically check for identical IDs/names between lines and safely merge or split the rows.""",
+        expected_output="Confirmation string from the merge_and_save_data tool.",
         agent_id=clausius_agent_id,
         tools=["merge_and_save_data"],
-        agent_specialization="Excel writer.",
+        agent_specialization="Excel writer and merge conflict handler.",
         human_validation=False
     )
 
-    # LEVEL 3: Auto-Trigger
-    task_3_id = db.create_task(
+    # TASK 4: Auto-Trigger Next Chunk
+    task_4_id = db.create_task(
         name="Trigger Next Batch",
-        description="""Review the result of the first task.
-If 'end_reached' is true or the document is finished, output 'EXPLORATION FINISHED'.
-Otherwise, use the 'trigger_next_batch' tool. Pass 'Thermo Explorer (Autonomous)' as workflow_name, and calculate new_offset as '{offset}' + '{limit}'.
+        description="""If the first task returned END_OF_DOCUMENT or we are done, output 'EXPLORATION FINISHED'.
+Otherwise, use the 'trigger_next_batch' tool. Pass 'Thermo Explorer (Autonomous)' as workflow_name. 
+Calculate new_offset as {offset} + {limit}.
+Pass '{document_type}' for document_type.
+For the 'context' variable, you MUST check the ephemeral memory (e.g. from Data Extractor) and extract the ID and Name of the LAST component that was processed. Pass this ID and Name as the context so the next batch knows what component was cut off!
 Output the success message from the tool.""",
         expected_output="Trigger success message or EXPLORATION FINISHED.",
         agent_id=clausius_agent_id,
@@ -110,22 +106,16 @@ Output the success message from the tool.""",
     )
 
     # 3. Create the Workflow
-    batch_node = {
-        "type": "batch_loop",
-        "batch_size": 2, # Process 2 chemicals at a time
-        "source_variable": "chemicals",
-        "task_ids": [task_2a_id, task_2b_id, task_2c_id, task_2d_id]
-    }
+    # Flat linear sequence of tasks (no batch loop)
+    task_ids = [task_1_id, task_2_id, task_3_id, task_4_id]
     
-    task_ids_json = json.dumps([task_1_id, batch_node, task_3_id])
-
     db.create_workflow(
         name="Thermo Explorer (Autonomous)",
-        task_ids=[task_1_id, batch_node, task_3_id],
+        task_ids=task_ids,
         requires_human_check=False
     )
     print("✅ Successfully set up the Thermo Explorer (Autonomous) workflow!")
-    print("It uses a 3-level architecture: Linear Paginator -> Map/Reduce Extractor -> Auto-Trigger.")
+    print("It uses a Direct Linear Extraction architecture: Context Analyzer -> Data Extractor -> Writer -> Auto-Trigger.")
 
 if __name__ == "__main__":
     setup_thermo_explorer()

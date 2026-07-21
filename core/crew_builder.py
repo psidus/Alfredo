@@ -910,8 +910,8 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             context_str = (
                 "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
                 "Results from previous steps are stored in the ephemeral in-memory database.\n"
-                "Use the 'read_atomic_memory' tool with the exact 'key' column value to retrieve data.\n"
-                "Use 'write_atomic_memory' to store YOUR output for downstream agents.\n\n"
+                "(OPTIONAL) You may use the 'read_atomic_memory' tool if you need past context.\n"
+                "(OPTIONAL) You may use 'write_atomic_memory' to store extra notes.\n\n"
                 f"{index_table}\n"
                 "--- [END MEMORY INDEX] ---\n"
             )
@@ -938,6 +938,29 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 raise RateLimitError(f"Model high demand error (503): {e}", 0, task_outputs)
             elif "none or empty" in err_str:
                 raise RuntimeError(f"Agent failed to generate a valid output: {e}")
+            elif "connect" in err_str or "network" in err_str or "timeout" in err_str:
+                logging.warning(f"Connection error with primary model: {e}. Attempting fallback to default model.")
+                # Load default model ID from .env
+                DataManager.load_env()
+                fallback_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+                if fallback_model_id:
+                    try:
+                        fallback_llm = _instantiate_llm(int(fallback_model_id), task_record=None)
+                        # Swap the agent's LLM
+                        task_obj.agent.llm = fallback_llm
+                        # Clear old tools if the new model doesn't support them
+                        m = db.read_model(int(fallback_model_id))
+                        if m and not bool(m.get('supports_tools', 1)):
+                            task_obj.agent.tools = []
+                            task_obj.tools = []
+                        logging.info(f"Retrying task with fallback model {fallback_model_id}")
+                        # Re-instantiate the crew with the updated agent
+                        single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
+                        result = single_task_crew.kickoff()
+                    except Exception as fallback_e:
+                        raise RuntimeError(f"Primary model connection failed: {e}. Fallback also failed: {fallback_e}")
+                else:
+                    raise e
             else:
                 raise e
         
@@ -1116,6 +1139,16 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 logging.error(f"Failed to update in_flight_tasks: {e}")
 
         while ready_queue or in_flight:
+            # Check for external cancellation/stop
+            if run_id:
+                try:
+                    c_run = db.read_run(run_id)
+                    if c_run and c_run.get('status') in ['stopped', 'failed', 'cancelled']:
+                        logging.warning(f"Run {run_id} was {c_run.get('status')} externally. Stopping execution.")
+                        break
+                except Exception:
+                    pass
+
             if ready_queue:
                 for n_id in ready_queue:
                     futures[executor.submit(execute_node, n_id)] = n_id

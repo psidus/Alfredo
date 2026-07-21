@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from crewai.tools import tool
 import core.vector_manager
@@ -15,46 +16,86 @@ def read_rag_chunks(db_name: str, offset: int = 0, limit: int = 50) -> str:
     """
     try:
         vm = core.vector_manager.VectorManager()
-        params = vm._get_qdrant_client_params(db_name)
-        client = vm._get_qdrant_client(params)
-        collection_name = params["collection_name"]
+        db_path = os.path.join(vm.storage_dir, db_name)
         
-        if not client.collection_exists(collection_name):
-            return f"Error: Database '{db_name}' does not exist or has no chunks."
-            
-        # Qdrant client scroll
-        records, next_page_offset = client.scroll(
-            collection_name=collection_name,
-            limit=limit,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        if not records:
-            return f"END_OF_DOCUMENT. No more chunks found at offset {offset}."
-            
-        texts = []
-        for i, record in enumerate(records):
-            # Langchain Qdrant stores the text usually in payload['page_content']
-            page_content = record.payload.get('page_content', '')
-            if not page_content and 'text' in record.payload:
-                page_content = record.payload['text']
+        # Check if it's a local ChromaDB
+        if os.path.exists(db_path) and os.path.exists(os.path.join(db_path, "chroma.sqlite3")):
+            from langchain_chroma import Chroma
+            # We need the embedding function to initialize Chroma, but we only want to fetch data.
+            # We can use a dummy embedding or try to fetch the correct one if we know the provider.
+            # However, chromadb client directly is easier for just fetching.
+            import chromadb
+            client = chromadb.PersistentClient(path=db_path)
+            try:
+                collection = client.get_collection(name=db_name)
+            except Exception:
+                # Fallback to the first collection if name mismatch
+                collections = client.list_collections()
+                if not collections:
+                    return f"Error: Database '{db_name}' has no collections in ChromaDB."
+                collection = collections[0]
                 
-            metadata = record.payload.get('metadata', {})
-            source = metadata.get('source', 'Unknown Source')
-            page = metadata.get('page', 'Unknown Page')
+            results = collection.get(limit=limit, offset=offset, include=["documents", "metadatas"])
             
-            chunk_header = f"--- Chunk {offset + i} (Source: {source}, Page: {page}) ---"
-            texts.append(f"{chunk_header}\n{page_content}")
+            if not results or not results['documents']:
+                return f"END_OF_DOCUMENT. No more chunks found at offset {offset}."
+                
+            texts = []
+            for i, (doc, meta) in enumerate(zip(results['documents'], results['metadatas'])):
+                source = meta.get('source', 'Unknown Source') if meta else 'Unknown Source'
+                page = meta.get('page', 'Unknown Page') if meta else 'Unknown Page'
+                chunk_header = f"--- Chunk {offset + i} (Source: {source}, Page: {page}) ---"
+                texts.append(f"{chunk_header}\n{doc}")
+                
+            result = "\n\n".join(texts)
+            if len(results['documents']) < limit:
+                result += "\n\n*** END_OF_DOCUMENT REACHED ***"
+            else:
+                result += f"\n\n*** NEXT_OFFSET_HINT: {offset + limit} ***"
+            return result
             
-        result = "\n\n".join(texts)
-        if next_page_offset is None:
-             result += "\n\n*** END_OF_DOCUMENT REACHED ***"
         else:
-             result += f"\n\n*** NEXT_OFFSET_HINT: {next_page_offset} ***"
-             
-        return result
+            # Qdrant path
+            params = vm._get_qdrant_client_params(db_name)
+            client = vm._get_qdrant_client(params)
+            collection_name = params["collection_name"]
+            
+            if not client.collection_exists(collection_name):
+                return f"Error: Database '{db_name}' does not exist or has no chunks in Qdrant."
+                
+            # Qdrant client scroll
+            records, next_page_offset = client.scroll(
+                collection_name=collection_name,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if not records:
+                return f"END_OF_DOCUMENT. No more chunks found at offset {offset}."
+                
+            texts = []
+            for i, record in enumerate(records):
+                # Langchain Qdrant stores the text usually in payload['page_content']
+                page_content = record.payload.get('page_content', '')
+                if not page_content and 'text' in record.payload:
+                    page_content = record.payload['text']
+                    
+                metadata = record.payload.get('metadata', {})
+                source = metadata.get('source', 'Unknown Source')
+                page = metadata.get('page', 'Unknown Page')
+                
+                chunk_header = f"--- Chunk {offset + i} (Source: {source}, Page: {page}) ---"
+                texts.append(f"{chunk_header}\n{page_content}")
+                
+            result = "\n\n".join(texts)
+            if next_page_offset is None:
+                 result += "\n\n*** END_OF_DOCUMENT REACHED ***"
+            else:
+                 result += f"\n\n*** NEXT_OFFSET_HINT: {next_page_offset} ***"
+                 
+            return result
         
     except Exception as e:
         logging.error(f"Error reading chunks from {db_name}: {e}")

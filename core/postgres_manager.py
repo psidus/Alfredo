@@ -799,9 +799,20 @@ class PostgresManager:
         sql = f"UPDATE workflow_runs SET {', '.join(updates)} WHERE id = %s"
         params.append(run_id)
         
+        safe_params = []
+        for p in params:
+            if isinstance(p, str):
+                safe_params.append(p.replace('\x00', ''))
+            else:
+                safe_params.append(p)
+        
         with self.lock:
-            self.cursor.execute(sql, tuple(params))
-            self.conn.commit()
+            try:
+                self.cursor.execute(sql, tuple(safe_params))
+                self.conn.commit()
+            except Exception as e:
+                self.conn.rollback()
+                raise e
 
     def read_run(self, run_id: int) -> Optional[Dict[str, Any]]:
         sql = "SELECT * FROM workflow_runs WHERE id = %s"
@@ -825,7 +836,8 @@ class PostgresManager:
     def clear_all_runs(self) -> int:
         """Clears all history from the workflow_runs table."""
         self.cursor.execute("SELECT COUNT(*) FROM workflow_runs")
-        count = self.cursor.fetchone()[0]
+        row = self.cursor.fetchone()
+        count = list(row.values())[0] if row else 0
         self.cursor.execute("TRUNCATE TABLE workflow_runs RESTART IDENTITY CASCADE")
         self.conn.commit()
         return count
