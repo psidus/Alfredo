@@ -3322,14 +3322,22 @@ def render_workflow_assembler():
                                             from core.crew_builder import execute_run_with_resume
                                             result = execute_run_with_resume(r_id)
                                             db = DBManager()
-                                            db.update_run(r_id, status='completed', result=str(result))
-                                            from core.notification_manager import NotificationManager
-                                            notifier = NotificationManager()
-                                            notifier.notify_workflow_completion(wf_name, result)
+                                            current_run = db.read_run(r_id)
+                                            if current_run and current_run.get('status') in ['stopped', 'failed', 'cancelled', 'paused']:
+                                                db.update_run(r_id, result=str(result))
+                                            else:
+                                                db.update_run(r_id, status='completed', result=str(result))
+                                                from core.notification_manager import NotificationManager
+                                                notifier = NotificationManager()
+                                                notifier.notify_workflow_completion(wf_name, result)
                                         except Exception as e:
                                             try:
                                                 db = DBManager()
-                                                db.update_run(r_id, status='failed', result=str(e))
+                                                current_run = db.read_run(r_id)
+                                                if current_run and current_run.get('status') in ['stopped', 'failed', 'cancelled', 'paused']:
+                                                    pass
+                                                else:
+                                                    db.update_run(r_id, status='failed', result=str(e))
                                             except Exception:
                                                 pass
 
