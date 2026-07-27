@@ -13,6 +13,7 @@ instance is garbage-collected — no files are left on disk.
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 try:
@@ -34,6 +35,8 @@ class EphemeralMemoryManager:
     Acts as the mediator for atomic, structured communication between agents:
     agents *write* their results as keyed records with metadata/embeddings,
     and downstream agents *read* from the store via exact key or semantic query.
+
+    Writes are guarded by a lock so parallel DAG nodes can share one manager safely.
     """
 
     def __init__(self, run_id: int):
@@ -43,6 +46,7 @@ class EphemeralMemoryManager:
         # key-based reads and a simple text search, keeping workflow execution alive.
         self._fallback_records: Dict[str, Dict[str, Any]] = {}
         self.vector_store = None
+        self._lock = threading.RLock()
 
         if chromadb is not None and Chroma is not None:
             self.chroma_client = chromadb.EphemeralClient()
@@ -120,37 +124,38 @@ class EphemeralMemoryManager:
             structured_data:  Arbitrary JSON-serialisable dict with the payload.
             agent_role:       The role of the agent that produced this record.
         """
-        # Remove any previous record with the same key to avoid duplicates
-        self.delete_record(key)
+        with self._lock:
+            # Remove any previous record with the same key to avoid duplicates
+            self.delete_record(key)
 
-        if self.vector_store is not None:
-            metadata = {
-                "key": key,
-                "agent_role": agent_role,
-                "run_id": self.run_id,
-                "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
-            }
-            self.vector_store.add_texts(
-                texts=[content_summary],
-                metadatas=[metadata],
-                ids=[key],
+            if self.vector_store is not None:
+                metadata = {
+                    "key": key,
+                    "agent_role": agent_role,
+                    "run_id": self.run_id,
+                    "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
+                }
+                self.vector_store.add_texts(
+                    texts=[content_summary],
+                    metadatas=[metadata],
+                    ids=[key],
+                )
+            else:
+                self._fallback_records[key] = {
+                    "key": key,
+                    "agent_role": agent_role,
+                    "summary": content_summary,
+                    "data": structured_data,
+                }
+
+            # Update the local key index
+            self._keys_index = [item for item in self._keys_index if item["key"] != key]
+            self._keys_index.append(
+                {"key": key, "agent_role": agent_role, "summary": content_summary}
             )
-        else:
-            self._fallback_records[key] = {
-                "key": key,
-                "agent_role": agent_role,
-                "summary": content_summary,
-                "data": structured_data,
-            }
-
-        # Update the local key index
-        self._keys_index = [item for item in self._keys_index if item["key"] != key]
-        self._keys_index.append(
-            {"key": key, "agent_role": agent_role, "summary": content_summary}
-        )
-        logger.info(
-            f"[EphemeralMemory] Written record key='{key}' by agent='{agent_role}'"
-        )
+            logger.info(
+                f"[EphemeralMemory] Written record key='{key}' by agent='{agent_role}'"
+            )
 
     # ------------------------------------------------------------------
     # Read (deterministic by key)
@@ -255,11 +260,12 @@ class EphemeralMemoryManager:
         """
         Clears all records from the ephemeral memory.
         """
-        keys_to_delete = [item["key"] for item in self._keys_index]
-        for key in keys_to_delete:
-            self.delete_record(key)
-        self._fallback_records.clear()
-        self._keys_index.clear()
+        with self._lock:
+            keys_to_delete = [item["key"] for item in self._keys_index]
+            for key in keys_to_delete:
+                self.delete_record(key)
+            self._fallback_records.clear()
+            self._keys_index.clear()
         
     def get_memory_index_table(self) -> str:
         """

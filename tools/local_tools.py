@@ -256,51 +256,28 @@ def calculate(expression: str) -> str:
 @tool
 def write_python_file(file_path: str, content: str) -> str:
     """
-    Permette all'agente di prendere il codice generato e salvarlo fisicamente nel tuo progetto come un vero e proprio file .py (es. modello_pirolisi.py).
-    Il percorso può essere relativo (es. 'modello_pirolisi.py') o assoluto all'interno del progetto.
-    Questo tool consente esclusivamente la scrittura di file Python con estensione '.py'.
+    Saves generated Python code as a .py file inside the sandboxed agent workspace.
+    Path is relative to workspace/ (e.g. 'scripts/modello_pirolisi.py').
+    Only '.py' files are allowed.
     """
-    # Force extension to be .py
     if not file_path.endswith('.py'):
         return "Error: FileWriteTool only allows writing Python files ending with '.py'."
-        
-    # Resolve absolute path relative to current working directory (project root)
-    project_root = os.path.abspath(os.getcwd())
-    
-    # If the path is relative, resolve it against the project root
-    if not os.path.isabs(file_path):
-        full_path = os.path.abspath(os.path.join(project_root, file_path))
-    else:
-        full_path = os.path.abspath(file_path)
-        
-    # Security checks
-    if not full_path.startswith(project_root):
-        return "Error: Security violation. Path is outside the designated project directory."
-        
-    # Block writing to sensitive directories (core, ui, db, venv, .git)
-    sensitive_dirs = [
-        os.path.join(project_root, "core"),
-        os.path.join(project_root, "ui"),
-        os.path.join(project_root, "db"),
-        os.path.join(project_root, "venv"),
-        os.path.join(project_root, ".git"),
-    ]
-    for s in sensitive_dirs:
-        if full_path.startswith(s):
-            return f"Error: Writing to sensitive directory '{os.path.basename(s)}' is restricted for stability reasons."
 
+    # Confine all python writes to workspace/ (same sandbox as write_file)
+    rel = file_path.lstrip("/\\")
+    if not _is_path_safe(rel):
+        return "Error: Security violation. Path is outside the designated workspace."
+
+    full_path = os.path.join(WORKSPACE_DIR, rel)
     try:
-        # Create directories if they don't exist
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        os.makedirs(os.path.dirname(full_path) or WORKSPACE_DIR, exist_ok=True)
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
-        # Return path relative to the project root for clean agent visibility
-        rel_path = os.path.relpath(full_path, project_root)
-        return f"Successfully saved Python code to '{rel_path}' in the project root."
+        return f"Python file successfully written to '{rel}' in the workspace."
     except IOError as e:
         return f"Error writing to file '{file_path}': {e}"
     except Exception as e:
-        return f"An unexpected error occurred while writing to '{file_path}': {e}"
+        return f"An unexpected error occurred while writing '{file_path}': {e}"
 
 
 @tool

@@ -1041,9 +1041,29 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
             refined_result = str(final_result)
 
-        # Update run record with the refined result
+        # Update run record with the refined result (keep structured meta if present)
         if run_id:
-            db.update_run(run_id, status='completed', result=refined_result)
+            try:
+                from core.workflow_contracts import parse_run_result_payload, serialize_run_result_payload, assemble_workflow_result
+                existing = db.read_run(run_id)
+                _, payload = parse_run_result_payload((existing or {}).get("result"))
+                if not payload:
+                    try:
+                        outs = (existing or {}).get("task_outputs")
+                        if isinstance(outs, str):
+                            outs = json.loads(outs)
+                        if isinstance(outs, dict):
+                            payload = outs.get("__workflow_meta__")
+                    except Exception:
+                        payload = None
+                if payload:
+                    payload = dict(payload)
+                    payload["final_result"] = refined_result
+                    db.update_run(run_id, status='completed', result=serialize_run_result_payload(payload))
+                else:
+                    db.update_run(run_id, status='completed', result=refined_result)
+            except Exception:
+                db.update_run(run_id, status='completed', result=refined_result)
 
         # Save refined output and summarize global context for conversational continuation
         try:

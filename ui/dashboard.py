@@ -2022,6 +2022,26 @@ def render_task_builder():
             key="task_human_validation_cb",
             help="If enabled, execution will pause after this task and ask the user via chat to review the agent's output and provide feedback to change/filter the output before proceeding."
         )
+
+        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+
+        # --- Tool profile (sandbox ACL) ---
+        profile_options = ["", "intermediate", "final_writer"]
+        default_profile = (editing_task.get("tool_profile") if editing_task else "") or ""
+        if default_profile not in profile_options:
+            default_profile = ""
+        tool_profile = st.selectbox(
+            "Tool Profile",
+            options=profile_options,
+            index=profile_options.index(default_profile),
+            format_func=lambda x: {
+                "": "Auto (infer from write tools)",
+                "intermediate": "Intermediate — no durable write tools",
+                "final_writer": "Final writer — write tools allowed",
+            }.get(x, x),
+            help="Intermediate agents can only use read/memory tools. Final writers may use sandboxed write tools.",
+            key="task_tool_profile_select",
+        )
         
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         
@@ -2256,7 +2276,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     task_model_id = model_options.get(selected_model_str)
                 
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str)
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "")
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -2268,7 +2288,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str)
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "")
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
@@ -2543,7 +2563,7 @@ def render_workflow_assembler():
         default_wf_task_ids = []
         for i, t in enumerate(raw_task_ids):
             if isinstance(t, int):
-                default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1})
+                default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1, "model_tier": "default"})
             elif isinstance(t, dict):
                 if "id" not in t:
                     t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
@@ -2551,6 +2571,11 @@ def render_workflow_assembler():
                     t["depends_on"] = []
                 if "execution_level" not in t:
                     t["execution_level"] = 1
+                # Legacy: per-node supervisor role removed — Master AI is sole orchestrator
+                if isinstance(t, dict):
+                    t.pop("role", None)
+                    if "model_tier" not in t:
+                        t["model_tier"] = "default"
                 default_wf_task_ids.append(t)
         raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
         default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
@@ -2669,7 +2694,8 @@ def render_workflow_assembler():
                                 "id": f"node_{uuid.uuid4().hex[:8]}",
                                 "task_id": task_options[sel_task_str],
                                 "depends_on": [],
-                                "execution_level": 1
+                                "execution_level": 1,
+                                "model_tier": "default",
                             }
                             st.session_state.wf_selected_task_ids.append(new_node)
                             st.rerun()
@@ -2697,7 +2723,8 @@ def render_workflow_assembler():
                                     "batch_size": b_size,
                                     "source_variable": b_source,
                                     "depends_on": [],
-                                    "execution_level": 1
+                                    "execution_level": 1,
+                                    "model_tier": "default",
                                 }
                                 st.session_state.wf_selected_task_ids.append(new_block)
                                 st.rerun()
@@ -2820,6 +2847,21 @@ def render_workflow_assembler():
                             
                                 # Execution Level Selection
                                 step["execution_level"] = col_main.number_input("Level (Parallelism)", min_value=1, value=lvl, key=f"lvl_{step['id']}")
+
+                                # Model tier for worker agents (Master AI remains the sole orchestrator)
+                                tier_opts = ["default", "simple"]
+                                cur_tier = step.get("model_tier", "default")
+                                if cur_tier not in tier_opts:
+                                    cur_tier = "default"
+                                step["model_tier"] = col_main.selectbox(
+                                    "Model Tier",
+                                    options=tier_opts,
+                                    index=tier_opts.index(cur_tier),
+                                    key=f"tier_{step['id']}",
+                                    help="All DAG agents are workers. simple uses SIMPLE_AGENT_MODEL_ID / DEFAULT_AGENT_MODEL_ID.",
+                                )
+                                # Drop legacy per-node supervisor role if present
+                                step.pop("role", None)
                             
                                 # Dependency Selection
                                 possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids if prev_step["id"] != step["id"]}

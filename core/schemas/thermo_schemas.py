@@ -82,3 +82,34 @@ class ExtractionOutput(BaseModel):
 class ChemicalList(BaseModel):
     chemicals: List[str] = Field(default_factory=list, description="List of all chemical substances extracted from the text.")
     end_reached: bool = Field(default=False, description="Set to true if the end of the document is reached.")
+
+class MarkdownThermalRow(BaseModel):
+    NO: Optional[int] = Field(None, description="Number in list / ID")
+    FORMULA: Optional[str] = Field(None, description="Chemical formula")
+    COMPOUND_NAME: Optional[str] = Field(None, description="Compound Name")
+    MOLWT: Optional[float] = Field(None, description="Molecular weight")
+    TFP: Optional[float] = Field(None, description="Normal freezing point, deg C")
+    TBP: Optional[float] = Field(None, description="Normal boiling point, deg C")
+    TC: Optional[float] = Field(None, description="Critical temperature, deg K")
+    PC: Optional[float] = Field(None, description="Critical pressure, bar")
+    VC: Optional[float] = Field(None, description="Critical volume, cubic metre/mol")
+    LDEN: Optional[float] = Field(None, description="Liquid density, kg/cubic metre")
+    TDEN: Optional[float] = Field(None, description="Reference temperature for liquid density, deg C")
+    HVAP: Optional[float] = Field(None, description="Heat of vaporisation at normal boiling point, J/mol")
+    VISA: Optional[float] = Field(None, description="Constant in the liquid viscosity equation")
+    VISB: Optional[float] = Field(None, description="Constant in the liquid viscosity equation")
+    DELHF: Optional[float] = Field(None, description="Standard enthalpy of formation of vapour at 298 K, kJ/mol")
+    DELGF: Optional[float] = Field(None, description="Standard Gibbs energy of formation of vapour at 298 K, kJ/mol")
+    CPVAPA: Optional[float] = Field(None, description="Constant A in the ideal gas heat capacity equation")
+    CPVAPB: Optional[float] = Field(None, description="Constant B in the ideal gas heat capacity equation")
+    CPVAPC: Optional[float] = Field(None, description="Constant C in the ideal gas heat capacity equation")
+    CPVAPD: Optional[float] = Field(None, description="Constant D in the ideal gas heat capacity equation")
+    ANTA: Optional[float] = Field(None, description="Constant A in the Antione equation")
+    ANTB: Optional[float] = Field(None, description="Constant B in the Antione equation")
+    ANTC: Optional[float] = Field(None, description="Constant C in the Antione equation")
+    TMN: Optional[float] = Field(None, description="Minimum temperature for Antoine constant, deg C")
+    TMX: Optional[float] = Field(None, description="Maximum temperature for Antoine constant, deg C")
+
+class MarkdownThermalExtraction(BaseModel):
+    rows: List[MarkdownThermalRow] = Field(default_factory=list, description="Extracted rows from the markdown table.")
+

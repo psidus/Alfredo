@@ -33,6 +33,18 @@ def check_abort(*args, **kwargs):
 from core.db_manager import DBManager
 from core.data_manager import DataManager
 from core.ephemeral_memory import EphemeralMemoryManager
+from core.workflow_contracts import (
+    WORKER_HANDOFF_DIRECTIVE,
+    MODEL_TIER_SIMPLE,
+    assemble_workflow_result,
+    build_procedure_summary,
+    enforce_node_handoff,
+    filter_tool_names_by_profile,
+    resolve_model_tier,
+    resolve_pydantic_kwargs,
+    resolve_tool_profile,
+    serialize_run_result_payload,
+)
 import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
@@ -490,10 +502,13 @@ def _build_agent(agent_id, specialization=None, model_id_override=None, task_rec
     logging.info(f"Built CrewAI Agent: {agent_record['name']} (ID: {agent_id}, local={is_local}, specialization={specialization!r})")
     return agent
 
-def _build_task(task_id, agents_cache):
+def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
     """
     Constructs a CrewAI Task object and ensures agents are reused via memory reference.
     Tool overrides at task level are also stripped for local model agents.
+
+    step_def / model_tier: optional DAG node metadata (tool_profile, model_tier).
+    All DAG agents are workers; Master AI is the sole orchestrator.
     """
     task_record = db.read_task(task_id)
     if not task_record:
@@ -502,12 +517,34 @@ def _build_task(task_id, agents_cache):
     agent_id = task_record['agent_id']
     task_model_id = task_record.get('model_id')  # Custom LLM model for this task
 
+    # Simple model tier: prefer SIMPLE_AGENT_MODEL_ID / DEFAULT_AGENT_MODEL_ID over task/agent model
+    effective_tier = model_tier or resolve_model_tier(step_def)
+    if effective_tier == MODEL_TIER_SIMPLE:
+        DataManager.load_env()
+        simple_id = os.getenv("SIMPLE_AGENT_MODEL_ID") or os.getenv("DEFAULT_AGENT_MODEL_ID")
+        if simple_id:
+            try:
+                task_model_id = int(simple_id)
+                logging.info(f"Task {task_id}: using simple model tier → model_id={task_model_id}")
+            except ValueError:
+                pass
+
+    tool_profile = resolve_tool_profile(task_record, step_def)
+
     # --- SPECIALIZATION / MODEL CACHE BYPASS ---
     # If this task defines an agent_specialization OR a specific model_id override,
     # we must build a fresh, task-specific agent clone rather than pulling from the shared cache.
     # This prevents the specialized role/backstory and model override from leaking into other tasks.
     specialization = task_record.get('agent_specialization')
-    if specialization or task_model_id is not None or task_record.get('max_input_context', 0) > 0 or task_record.get('max_output_tokens', 0) > 0:
+    bypass_cache = bool(
+        specialization
+        or task_model_id is not None
+        or task_record.get('max_input_context', 0) > 0
+        or task_record.get('max_output_tokens', 0) > 0
+        or effective_tier == MODEL_TIER_SIMPLE
+        or tool_profile
+    )
+    if bypass_cache:
         agent_instance = _build_agent(agent_id, specialization=specialization, model_id_override=task_model_id, task_record=task_record)
     else:
         if agent_id not in agents_cache:
@@ -533,16 +570,29 @@ def _build_task(task_id, agents_cache):
     model_record = db.read_model(execution_model_id) if execution_model_id else None
     supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
 
+    raw_tools = list(task_record.get('tools', []) or [])
+    raw_tools = filter_tool_names_by_profile(raw_tools, tool_profile)
+
     if not supports_tools:
         task_tools = None  # No tools for local models that don't support them
     else:
-        task_tools = _get_task_tools(task_record.get('tools', []), task_record.get('vector_dbs', []), strip_tools=not supports_tools)
+        task_tools = _get_task_tools(raw_tools, task_record.get('vector_dbs', []), strip_tools=not supports_tools)
+
+    # Also strip write tools from the agent instance when intermediate
+    if agent_instance and agent_instance.tools and tool_profile == "intermediate":
+        from core.workflow_contracts import WRITE_TOOLS
+        agent_instance.tools = [
+            t for t in agent_instance.tools
+            if getattr(t, "name", None) not in WRITE_TOOLS
+        ]
 
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     if task_record.get('output_pydantic'):
         task_description = task_record['description']
     else:
         task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
+
+    task_description += WORKER_HANDOFF_DIRECTIVE
 
     # --- LEARNING MEMORY INJECTION ---
     try:
@@ -563,19 +613,28 @@ def _build_task(task_id, agents_cache):
         "a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
     )
     
-    task_tools_list = task_record.get('tools', [])
+    task_tools_list = raw_tools
     if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
         if not task_record.get('output_pydantic'):
             base_expected += vector_format_directive
+
+    pydantic_kwargs = resolve_pydantic_kwargs(task_record.get('output_pydantic'))
 
     task = Task(
         description=task_description,
         expected_output=base_expected,
         agent=agent_instance,
         tools=task_tools,
-        async_execution=('[ASYNC]' in task_record.get('name', ''))
+        async_execution=('[ASYNC]' in task_record.get('name', '')),
+        **pydantic_kwargs,
     )
-    logging.info(f"Built CrewAI Task: {task_record['description'][:50]}... (ID: {task_id}) for Agent ID: {agent_id}")
+    # Attach runtime metadata for handoff enforcement (not part of CrewAI)
+    task._alfredo_tool_profile = tool_profile
+    task._alfredo_filtered_tools = raw_tools
+    logging.info(
+        f"Built CrewAI Task: {task_record['description'][:50]}... (ID: {task_id}) "
+        f"for Agent ID: {agent_id} profile={tool_profile} (worker)"
+    )
     return task
 
 def build_crew(workflow_id):
@@ -784,7 +843,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             "source_variable": source_variable,
             "depends_on": depends_on,
             "execution_level": execution_level,
-            "original_index": i
+            "original_index": i,
+            "model_tier": resolve_model_tier(step_def) if isinstance(step_def, dict) else "default",
+            "tool_profile": (step_def.get("tool_profile") if isinstance(step_def, dict) else None),
         }
 
     for node_id, data in dag_nodes.items():
@@ -839,9 +900,11 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
     agents_cache = {}
     task_outputs_lock = threading.Lock()
+    handoffs = []
+    completed_order = []
     
-    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output=""):
-        task_obj = _build_task(task_id, agents_cache)
+    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output="", step_def=None, node_id=""):
+        task_obj = _build_task(task_id, agents_cache, step_def=step_def)
         _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
 
         def normalize_name(s: str) -> str:
@@ -901,7 +964,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             text = text.replace("{context}", parent_output)
             text = text.replace("{flexible_input}", current_inputs.get('user_input', parent_output))
             text = pattern.sub(repl, text)
-            text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<>', text)
+            text = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', text)
             return text
 
         original_desc = apply_interpolation(task_obj.description)
@@ -912,8 +975,8 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             context_str = (
                 "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
                 "Results from previous steps are stored in the ephemeral in-memory database.\n"
-                "(OPTIONAL) You may use the 'read_atomic_memory' tool if you need past context.\n"
-                "(OPTIONAL) You may use 'write_atomic_memory' to store extra notes.\n\n"
+                "You MUST leave your final output in memory (auto-saved under task_<id>); "
+                "use 'read_atomic_memory' when you need past context.\n\n"
                 f"{index_table}\n"
                 "--- [END MEMORY INDEX] ---\n"
             )
@@ -985,6 +1048,22 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
+        filtered_tools = getattr(task_obj, "_alfredo_filtered_tools", None)
+        if filtered_tools is None:
+            t_rec_tools = db.read_task(task_id)
+            filtered_tools = (t_rec_tools.get("tools") if t_rec_tools else []) or []
+        handoff = enforce_node_handoff(
+            memory_manager,
+            run_id=run_id,
+            task_id=task_id,
+            task_out=task_out,
+            agent_role=agent_role,
+            task_tools=filtered_tools,
+            node_id=node_id,
+        )
+        with task_outputs_lock:
+            handoffs.append(handoff)
+
         t_rec = db.read_task(task_id)
         if t_rec and chat_id and t_rec.get('human_validation'):
             from core.master_ai import MasterAI
@@ -999,6 +1078,17 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             if user_feedback and user_feedback != "SYSTEM_ABORT":
                 task_out = master_ai.process_validation_feedback(task_out, user_feedback)
                 _auto_save_to_memory(memory_manager, task_id, task_out, f"{agent_role} (Human Edited)")
+                handoff = enforce_node_handoff(
+                    memory_manager,
+                    run_id=run_id,
+                    task_id=task_id,
+                    task_out=task_out,
+                    agent_role=f"{agent_role} (Human Edited)",
+                    task_tools=filtered_tools,
+                    node_id=node_id,
+                )
+                with task_outputs_lock:
+                    handoffs.append(handoff)
 
         with task_outputs_lock:
             task_outputs[str(task_id)] = task_out
@@ -1065,8 +1155,18 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 
             if not data["is_batch"]:
                 log_msg = f"Executing Node {n_id} (Task {data['task_id']})..."
-                out = _execute_task_instance(data["task_id"], inputs, log_msg, task_idx=data["original_index"], parent_output=parent_output)
+                out = _execute_task_instance(
+                    data["task_id"],
+                    inputs,
+                    log_msg,
+                    task_idx=data["original_index"],
+                    parent_output=parent_output,
+                    step_def=data.get("step_def"),
+                    node_id=n_id,
+                )
                 node_outputs[n_id] = out
+                with task_outputs_lock:
+                    completed_order.append(n_id)
                 return out
             else:
                 batch_tasks = data["batch_tasks"]
@@ -1112,7 +1212,15 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     try:
                         for b_idx, inner_task_id in enumerate(batch_tasks):
                             log_msg = f"Executing Batch Loop (Node {n_id}) - Chunk {chunk_idx + 1} - Inner Task {b_idx+1}/{len(batch_tasks)} (ID: {inner_task_id})"
-                            batch_out = _execute_task_instance(inner_task_id, batch_inputs, log_msg, task_idx=data["original_index"], parent_output=batch_out)
+                            batch_out = _execute_task_instance(
+                                inner_task_id,
+                                batch_inputs,
+                                log_msg,
+                                task_idx=data["original_index"],
+                                parent_output=batch_out,
+                                step_def=data.get("step_def"),
+                                node_id=f"{n_id}_inner_{inner_task_id}",
+                            )
                     except RateLimitError as e:
                         logging.error(f"Batch Loop (Node {n_id}) paused at chunk {chunk_idx + 1} due to RateLimitError: {e}")
                         db.update_run(run_id, status='paused')
@@ -1125,6 +1233,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 with task_outputs_lock:
                     task_outputs[f"{n_id}_completed"] = True
                     task_outputs[f"{n_id}_final_output"] = batch_out
+                    completed_order.append(n_id)
                     db.update_run(run_id, task_outputs=task_outputs)
                     
                 node_outputs[n_id] = batch_out
@@ -1206,6 +1315,49 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
     all_records = memory_manager.dump_all_records()
     global_context = json.dumps(all_records, indent=2, ensure_ascii=False)
+
+    procedure_summary = build_procedure_summary(
+        dag_nodes, node_outputs, handoffs, completed_order=completed_order
+    )
+
+    # Generate workflow-level exports when configured
+    export_paths = []
+    expected_exports = workflow_record.get("expected_exports") or []
+    if isinstance(expected_exports, str):
+        try:
+            expected_exports = json.loads(expected_exports)
+        except Exception:
+            expected_exports = [expected_exports] if expected_exports else []
+    if expected_exports:
+        try:
+            from core.master_ai import MasterAI
+            from tools.local_tools import WORKSPACE_DIR
+            export_dir = os.path.join(WORKSPACE_DIR, "runs", str(run_id), "exports")
+            export_paths = MasterAI().generate_export_files(
+                final_text=last_output_overall or "",
+                expected_exports=expected_exports,
+                output_dir=export_dir,
+                global_context=global_context,
+                export_instructions=workflow_record.get("export_instructions"),
+            )
+            logging.info(f"Run {run_id}: generated {len(export_paths)} export file(s)")
+        except Exception as export_err:
+            logging.error(f"Run {run_id}: export generation failed: {export_err}")
+
+    payload = assemble_workflow_result(
+        final_result=last_output_overall or "",
+        procedure_summary=procedure_summary,
+        exports=export_paths,
+        handoffs=handoffs,
+    )
+    with task_outputs_lock:
+        task_outputs["__workflow_meta__"] = payload
+        db.update_run(
+            run_id,
+            status="running",
+            result=serialize_run_result_payload(payload),
+            task_outputs=task_outputs,
+        )
 
     return last_output_overall, global_context
 
@@ -1342,24 +1494,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
             base_expected += vector_format_directive
 
-        kwargs = {}
-        if task_data.get('output_pydantic'):
-            pydantic_str = task_data.get('output_pydantic')
-            schemas = [s.strip() for s in pydantic_str.split(',') if s.strip()]
-            if len(schemas) == 1:
-                cls = get_schema_class(schemas[0])
-                if cls:
-                    kwargs['output_pydantic'] = cls
-            elif len(schemas) > 1:
-                from pydantic import create_model
-                fields = {}
-                for s in schemas:
-                    cls = get_schema_class(s)
-                    if cls:
-                        fields[s.lower()] = (cls, ...)
-                if fields:
-                    DynamicModel = create_model('DynamicOutputSchema', **fields)
-                    kwargs['output_pydantic'] = DynamicModel
+        kwargs = resolve_pydantic_kwargs(task_data.get('output_pydantic'))
 
         task = Task(
             description=task_description,

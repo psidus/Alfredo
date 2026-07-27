@@ -485,7 +485,8 @@ const AlfredoClient = (() => {
                         continue;
                     }
                     if (status === 'completed' || status === 'done') {
-                        if (callbacks.onComplete) callbacks.onComplete(data.result || data);
+                        // Pass full job payload so callers can use result + procedure_summary + exports
+                        if (callbacks.onComplete) callbacks.onComplete(data);
                         return;
                     }
                     if (status === 'failed' || status === 'error') {
@@ -1242,9 +1243,24 @@ const AlfredoClient = (() => {
                                 api._setStatus('loading', 'Workflow running…');
                             },
                             onComplete: (result) => {
-                                // 5. Write result to output element
+                                // 5. Write result to output element (prefer final text; append summary/exports)
                                 if (binding.output && binding.output.selector) {
-                                    const resultText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+                                    let resultText = '';
+                                    if (typeof result === 'string') {
+                                        resultText = result;
+                                    } else if (result && typeof result === 'object') {
+                                        const parts = [];
+                                        if (result.result) parts.push(result.result);
+                                        if (result.procedure_summary) {
+                                            parts.push('\n\n--- Procedure Summary ---\n' + result.procedure_summary);
+                                        }
+                                        if (result.exports && result.exports.length) {
+                                            parts.push('\n\n--- Exports ---\n' + result.exports.join('\n'));
+                                        }
+                                        resultText = parts.join('') || JSON.stringify(result, null, 2);
+                                    } else {
+                                        resultText = String(result ?? '');
+                                    }
                                     api._writeValueToElement(binding.output.selector, binding.output.writeMethod, resultText);
                                 }
                                 api._showToast('Workflow completed!', 'success');

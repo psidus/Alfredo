@@ -131,6 +131,7 @@ def _execute_workflow_background(run_id: int, workflow_id: int, inputs: dict):
     try:
         from core.crew_builder import execute_run_with_resume, RateLimitError
         from core.data_manager import DataManager
+        from core.workflow_contracts import parse_run_result_payload, serialize_run_result_payload
         DataManager.load_env()
 
         logger.info(f"API: Starting background execution of Run ID {run_id} (Workflow {workflow_id})")
@@ -143,7 +144,14 @@ def _execute_workflow_background(run_id: int, workflow_id: int, inputs: dict):
         else:
             final_result = str(result_tuple)
 
-        db.update_run(run_id, status="completed", result=final_result)
+        # Prefer structured payload already written by the executor
+        run = db.read_run(run_id)
+        stored = (run or {}).get("result") or ""
+        _, payload = parse_run_result_payload(stored)
+        if payload:
+            db.update_run(run_id, status="completed", result=serialize_run_result_payload(payload))
+        else:
+            db.update_run(run_id, status="completed", result=str(final_result))
         logger.info(f"API: Run ID {run_id} completed successfully.")
 
     except RateLimitError as rle:
@@ -187,12 +195,20 @@ async def list_app_workflows(app_name: str, app_record: dict = Depends(verify_ap
         for wf in workflows:
             req_inputs = _get_workflow_required_inputs(db, wf)
             description = _get_workflow_description(db, wf)
+            exports = wf.get("expected_exports") or []
+            if isinstance(exports, str):
+                try:
+                    import json as _json
+                    exports = _json.loads(exports)
+                except Exception:
+                    exports = [exports] if exports else []
             result.append(WorkflowInfo(
                 id=wf["id"],
                 name=wf["name"],
                 description=description,
                 required_inputs=req_inputs,
-                has_output=True  # Default: all workflows produce output
+                has_output=True,
+                expected_exports=list(exports) if isinstance(exports, list) else [],
             ))
         return result
     finally:
@@ -258,6 +274,9 @@ async def get_job_status(job_id: int):
     Polls the status of a running workflow job.
     The SDK calls this every 2 seconds until status is 'completed' or 'failed'.
     """
+    from core.workflow_contracts import parse_run_result_payload
+    import json as _json
+
     db = DBManager()
     try:
         run = db.read_run(job_id)
@@ -265,7 +284,7 @@ async def get_job_status(job_id: int):
             raise HTTPException(status_code=404, detail=f"Job ID {job_id} not found")
 
         status = run.get("status", "unknown")
-        result = run.get("result", "")
+        raw_result = run.get("result", "")
 
         # Build progress info
         progress = None
@@ -277,12 +296,37 @@ async def get_job_status(job_id: int):
                 total = len(workflow.get("task_ids", []))
                 progress = f"Step {current_idx}/{total}"
 
+        display_text, payload = parse_run_result_payload(raw_result)
+        # Also check task_outputs meta as fallback
+        if not payload:
+            try:
+                outs = run.get("task_outputs")
+                if isinstance(outs, str):
+                    outs = _json.loads(outs)
+                if isinstance(outs, dict) and outs.get("__workflow_meta__"):
+                    payload = outs["__workflow_meta__"]
+                    display_text = payload.get("final_result") or display_text
+            except Exception:
+                pass
+
+        if status == "failed":
+            return JobStatusResponse(
+                job_id=job_id,
+                status=status,
+                result=None,
+                progress=progress,
+                error=str(raw_result) if raw_result else "Unknown error",
+            )
+
         return JobStatusResponse(
             job_id=job_id,
             status=status,
-            result=result if status == "completed" else None,
+            result=display_text if status == "completed" else None,
+            procedure_summary=(payload or {}).get("procedure_summary") if status == "completed" else None,
+            exports=(payload or {}).get("exports") if status == "completed" else None,
+            handoffs=(payload or {}).get("handoffs") if status == "completed" else None,
             progress=progress,
-            error=result if status == "failed" else None
+            error=None,
         )
     finally:
         db.close()
