@@ -211,8 +211,7 @@ def format_plan_summary(plan: dict) -> str:
     if not tasks:
         summary += "<i>No tasks defined yet.</i>\n"
     for i, task in enumerate(tasks):
-        desc = task.get('description', '')
-        short_desc = (desc[:120] + '...') if len(desc) > 120 else desc
+        desc = task.get('description', '') or ''
         
         raw_role = task.get('agent_role', '')
         clean_role = raw_role.replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
@@ -223,7 +222,8 @@ def format_plan_summary(plan: dict) -> str:
         if specialization:
             assignee_text += f" <b>{{{esc(specialization)}}}</b>"
             
-        summary += f"{i+1}. {esc(short_desc)}\n   👤 <i>Assignee:</i> {assignee_text}\n"
+        # Full description (send_long_message splits across Telegram's 4096 limit)
+        summary += f"{i+1}. {esc(desc)}\n   👤 <i>Assignee:</i> {assignee_text}\n"
         # Show required inputs that will be collected before execution
         req_inputs = task.get('required_inputs') or []
         if req_inputs:
@@ -535,7 +535,10 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                     "expected_output": t_rec.get("expected_output"),
                     "agent_role": agent_role,
                     "agent_specialization": t_rec.get("agent_specialization"),
-                    "required_inputs": t_rec.get("required_inputs") or []
+                    "required_inputs": t_rec.get("required_inputs") or [],
+                    "tools": t_rec.get("tools") or [],
+                    "vector_dbs": t_rec.get("vector_dbs") or [],
+                    "human_validation": bool(t_rec.get("human_validation")),
                 }
 
             for step in task_ids:
@@ -1404,31 +1407,50 @@ async def hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     chat_id = update.effective_chat.id
     
-    # Resolve the full text of the chosen option from the button label
-    # because callback_data might have been truncated to 64 bytes.
-    chosen_option = "Unknown option"
-    if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
-        for row in query.message.reply_markup.inline_keyboard:
-            for btn in row:
-                if btn.callback_data == query.data:
-                    chosen_option = btn.text
-                    break
-    
-    if chosen_option == "Unknown option":
-        # Fallback if button not found for some reason
-        parts = query.data.split('_', 2)
-        if len(parts) >= 3:
-            chosen_option = parts[2]
-        else:
-            chosen_option = query.data[5:]
+    # Prefer index-based resolution (hitl_{idx}) using options stored on the HITL request.
+    chosen_option = None
+    parts = (query.data or "").split("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        idx = int(parts[1])
+        from core.human_in_the_loop import has_pending_request
+        from core.db_manager import DBManager
+        with DBManager() as _db:
+            req = _db.get_hitl_request(str(chat_id))
+            options = (req or {}).get("options") or []
+            if 0 <= idx < len(options):
+                chosen_option = options[idx]
+
+    # Legacy fallback: resolve from button label / truncated callback payload.
+    if not chosen_option:
+        chosen_option = "Unknown option"
+        if query.message.reply_markup and query.message.reply_markup.inline_keyboard:
+            for row in query.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    if btn.callback_data == query.data:
+                        chosen_option = btn.text
+                        break
+        if chosen_option == "Unknown option":
+            legacy_parts = query.data.split('_', 2)
+            if len(legacy_parts) >= 3:
+                chosen_option = legacy_parts[2]
+            else:
+                chosen_option = query.data[5:]
     
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), chosen_option)
         # Remove buttons and show what was selected
-        await query.edit_message_text(
-            text=f"{query.message.text}\n\n✅ <b>You chose:</b> {chosen_option}",
-            parse_mode=ParseMode.HTML
-        )
+        try:
+            await query.edit_message_text(
+                text=f"{query.message.text_html or query.message.text}\n\n✅ <b>You chose:</b> {chosen_option}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ <b>You chose:</b> {chosen_option}",
+                parse_mode=ParseMode.HTML,
+            )
     else:
         await query.edit_message_reply_markup(reply_markup=None)
 

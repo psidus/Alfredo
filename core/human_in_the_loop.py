@@ -22,8 +22,8 @@ def request_human_input(chat_id: str, question: str, options: list = None, task_
     and are presented to the user one at a time.
     
     1. Acquires the HITL lock (blocks if another task is already waiting).
-    2. Records the request in the shared database.
-    3. Sends a notification via Telegram.
+    2. Records the request in the shared database (question + options).
+    3. Sends a notification via Telegram (full options in body + short buttons).
     4. Polls the database until an answer is found.
     5. Releases the lock so the next waiting task can proceed.
     """
@@ -31,20 +31,26 @@ def request_human_input(chat_id: str, question: str, options: list = None, task_
     
     # Generate a unique request ID for logging/debugging
     request_id = task_id or str(uuid.uuid4())[:8]
+    options = [str(o) for o in (options or []) if str(o).strip()]
     
     logger.info(f"HITL [{request_id}] Waiting to acquire lock for chat {chat_id}...")
     
     with _hitl_lock:
         logger.info(f"HITL [{request_id}] Lock acquired. Sending question to user.")
         
-        # 1. Record the request in DB
+        # 1. Record the request in DB (including options for callback index resolution)
         with DBManager() as db:
-            db.create_hitl_request(chat_id, question)
+            db.create_hitl_request(chat_id, question, options=options)
         
-        # 2. Send notification
+        # 2. Send notification (message body includes full options; buttons are short labels)
         notifier = NotificationManager()
-        message = f"⚠️ <b>Agent Question:</b>\n{question}\n\n<i>Reply to this message to resume execution.</i>"
-        notifier.send_telegram_notification(message, chat_id=chat_id, options=options)
+        message = f"⚠️ <b>Human validation required</b>\n\n{question}\n\n<i>Tap a button or reply with the option number / your feedback.</i>"
+        sent = notifier.send_telegram_notification(message, chat_id=chat_id, options=options)
+        if not sent:
+            logger.error(
+                f"HITL [{request_id}] Failed to deliver Telegram notification to {chat_id}. "
+                "Will keep polling — user can still reply with free text if they see another prompt."
+            )
         
         logger.info(f"HITL [{request_id}] Blocking for human input from {chat_id}...")
         
@@ -68,7 +74,7 @@ def request_human_input(chat_id: str, question: str, options: list = None, task_
                         db.delete_hitl_request(chat_id)
                     return "SYSTEM_ABORT"
                 
-                # Re-open connection each poll to ensure we see the latest data on disk (SQLite)
+                # Re-open connection each poll to ensure we see the latest data
                 with DBManager() as db:
                     req = db.get_hitl_request(chat_id)
                     if req and req['status'] == 'replied':
@@ -86,11 +92,21 @@ def provide_human_input(chat_id: str, answer: str) -> bool:
     """
     Called by the Telegram bot when a user replies.
     Updates the database record to unblock the waiting agent.
+    Maps plain numeric replies (1..N) to stored option text when possible.
     """
     with DBManager() as db:
-        success = db.set_hitl_answer(chat_id, answer)
+        req = db.get_hitl_request(chat_id)
+        resolved = answer
+        if req:
+            options = req.get("options") or []
+            text = (answer or "").strip()
+            if text.isdigit() and options:
+                idx = int(text) - 1
+                if 0 <= idx < len(options):
+                    resolved = options[idx]
+        success = db.set_hitl_answer(chat_id, resolved)
         if success:
-            logger.info(f"Successfully provided human input to DB for {chat_id}.")
+            logger.info(f"Successfully provided human input to DB for {chat_id}: {resolved}")
         return success
 
 def has_pending_request(chat_id: str) -> bool:

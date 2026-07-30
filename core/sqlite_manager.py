@@ -318,6 +318,11 @@ class SQLiteManager:
             except sqlite3.OperationalError:
                 pass
             try:
+                self.cursor.execute("ALTER TABLE hitl_requests ADD COLUMN options_json TEXT DEFAULT '[]';")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+            try:
                 self.cursor.execute("ALTER TABLE workflow_runs ADD COLUMN task_outputs TEXT;")
                 self.conn.commit()
             except sqlite3.OperationalError:
@@ -857,17 +862,19 @@ class SQLiteManager:
         return self.cursor.rowcount
 
     # --- HITL Requests CRUD ---
-    def create_hitl_request(self, chat_id: str, question: str) -> None:
+    def create_hitl_request(self, chat_id: str, question: str, options: list = None) -> None:
+        options_json = json.dumps(options or [], ensure_ascii=False)
         sql = """
-        INSERT INTO hitl_requests (chat_id, question, status, answer, updated_at) 
-        VALUES (?, ?, 'pending', NULL, CURRENT_TIMESTAMP)
+        INSERT INTO hitl_requests (chat_id, question, status, answer, options_json, updated_at) 
+        VALUES (?, ?, 'pending', NULL, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(chat_id) DO UPDATE SET 
             question=excluded.question, 
             status='pending', 
             answer=NULL,
+            options_json=excluded.options_json,
             updated_at=CURRENT_TIMESTAMP
         """
-        self.cursor.execute(sql, (chat_id, question))
+        self.cursor.execute(sql, (chat_id, question, options_json))
         self.conn.commit()
 
     def set_hitl_answer(self, chat_id: str, answer: str) -> bool:
@@ -880,7 +887,15 @@ class SQLiteManager:
         sql = "SELECT * FROM hitl_requests WHERE chat_id = ?"
         self.cursor.execute(sql, (chat_id,))
         row = self.cursor.fetchone()
-        return self._to_dict(row)
+        data = self._to_dict(row)
+        if data and isinstance(data.get("options_json"), str):
+            try:
+                data["options"] = json.loads(data["options_json"] or "[]")
+            except Exception:
+                data["options"] = []
+        elif data:
+            data["options"] = data.get("options") or []
+        return data
 
     def delete_hitl_request(self, chat_id: str) -> None:
         sql = "DELETE FROM hitl_requests WHERE chat_id = ?"

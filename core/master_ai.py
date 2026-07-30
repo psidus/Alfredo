@@ -424,11 +424,13 @@ RAW OUTPUT:
 CRITICAL INSTRUCTIONS:
 1. You MUST output a valid JSON object strictly matching this schema:
 {{
-  "message": "A clear, natural language summary of what was achieved and what the user needs to decide. Do NOT include technical artifacts or terms like '\\n', 'user_messages'.",
-  "options": ["Option 1", "Option 2"] 
+  "message": "A clear summary of what was achieved PLUS the concrete choices the user must pick from (include the numbered list of themes/options in the message body). Do NOT include technical artifacts or terms like '\\n', 'user_messages'.",
+  "options": ["Short Option 1 label", "Short Option 2 label"]
 }}
-2. If the RAW OUTPUT contains a list of choices (e.g., languages, paths, options), extract them as a list of strings in the `options` array. If there are no options, leave the array empty `[]`.
-3. Do NOT wrap the JSON in Markdown code blocks like ```json. Output ONLY the raw JSON object.
+2. If the RAW OUTPUT contains a list of choices (e.g., themes, languages, paths), extract them as `options`. Each option string MUST be under 60 characters (short title only). Put the full detailed list inside `message`.
+3. Always include at least the choices in `message` even if `options` is also filled (users must see the full text if buttons fail).
+4. If there are no options, leave the array empty `[]`.
+5. Do NOT wrap the JSON in Markdown code blocks like ```json. Output ONLY the raw JSON object.
 """
 
 VALIDATION_PROCESSOR_PROMPT = """
@@ -1393,6 +1395,10 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
 
             if result.get("is_complex") and result.get("subtasks"):
                 subtasks = result["subtasks"]
+                # Deterministic HITL preservation: never lose the flag on decomposition.
+                if task.get("human_validation") and not any(st.get("human_validation") for st in subtasks):
+                    subtasks[-1]["human_validation"] = True
+                    logger.info(f"HITL flag restored on last subtask of '{name}'.")
                 logger.info(f"Task '{name}' decomposed successfully into {len(subtasks)} subtasks!")
                 return subtasks
             else:
@@ -1437,14 +1443,106 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
 
         expanded_plan = {
             "agents": agents,
-            "tasks": expanded_tasks
+            "tasks": expanded_tasks,
+            "expected_exports": plan.get("expected_exports", []),
+            "export_instructions": plan.get("export_instructions", ""),
         }
         logger.info(f"Workflow expansion complete. Total tasks: {len(plan.get('tasks', []))} -> {len(expanded_tasks)}. Starting Coherence Optimizer...")
         
         # Apply Coherence Optimizer
         optimized_plan = self.optimize_workflow_coherence(expanded_plan)
+        optimized_plan = self._enforce_hitl_preservation(plan.get("tasks", []), optimized_plan)
         
         return optimized_plan
+
+    def _enforce_hitl_preservation(self, original_tasks: list, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deterministically restore human_validation flags after LLM expand/optimize.
+        Prompt rules alone are not reliable — never drop HITL from the original plan.
+        """
+        if not plan or not isinstance(plan, dict):
+            return plan
+        new_tasks = plan.get("tasks") or []
+        if not new_tasks:
+            return plan
+
+        orig_hitl = [t for t in (original_tasks or []) if t.get("human_validation")]
+        if not orig_hitl:
+            return plan
+
+        # Prefer matching by task name / specialization, keeping only the best match
+        # per original HITL task (avoid marking every loosely related expanded node).
+        for ot in orig_hitl:
+            oname = (ot.get("name") or ot.get("task_name") or "").strip().lower()
+            ospec = (ot.get("agent_specialization") or "").strip().lower()
+            name_tokens = [tok for tok in oname.replace("-", " ").split() if len(tok) > 3]
+            best_nt = None
+            best_score = -1
+            for nt in new_tasks:
+                nname = (nt.get("name") or nt.get("task_name") or "").strip().lower()
+                nspec = (nt.get("agent_specialization") or "").strip().lower()
+                ndesc = (nt.get("description") or "").strip().lower()
+                blob = f"{nname} {nspec} {ndesc}"
+                score = 0
+                if oname and oname == nname:
+                    score += 100
+                elif oname and (oname in nname or nname in oname):
+                    score += 60
+                elif oname and oname in ndesc:
+                    score += 40
+                for tok in name_tokens:
+                    if tok in nname:
+                        score += 12
+                    elif tok in ndesc:
+                        score += 6
+                if ospec and ospec in (nspec or ndesc):
+                    score += 25
+                # Prefer finalize/propose choice nodes over generic "cluster themes".
+                for key, weight in (("propos", 20), ("finalize", 18), ("thematic", 15), ("option", 12), ("choos", 12), ("select", 8)):
+                    if key in blob:
+                        score += weight
+                if score > best_score:
+                    best_score = score
+                    best_nt = nt
+            if best_nt is not None and best_score > 0:
+                best_nt["human_validation"] = True
+            else:
+                logger.warning(
+                    f"HITL original task '{ot.get('name')}' had no name match after optimize; "
+                    "will apply fallback if no HITL remains."
+                )
+
+        if not any(t.get("human_validation") for t in new_tasks):
+            # Fallback: prefer the last task that looks like a choice/theme/validation step.
+            fallback_idx = max(0, min(len(new_tasks) - 1, len(new_tasks) // 2))
+            best_score = -1
+            keywords = (
+                ("propos", 5),
+                ("thematic", 5),
+                ("finalize", 4),
+                ("option", 4),
+                ("choos", 4),
+                ("select", 3),
+                ("validat", 3),
+                ("theme", 3),
+            )
+            for i, nt in enumerate(new_tasks):
+                blob = f"{nt.get('name', '')} {nt.get('description', '')}".lower()
+                score = 0
+                for key, weight in keywords:
+                    if key in blob:
+                        score += weight
+                if score > best_score:
+                    best_score = score
+                    fallback_idx = i
+            new_tasks[fallback_idx]["human_validation"] = True
+            logger.warning(
+                f"HITL flag was lost during expand/optimize — restored on task "
+                f"#{fallback_idx + 1}: {new_tasks[fallback_idx].get('name')}"
+            )
+
+        plan["tasks"] = new_tasks
+        return plan
 
     def optimize_workflow_coherence(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1466,8 +1564,12 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             )
             clean_json = self._sanitize_json(raw_output)
             optimized_plan = json.loads(clean_json)
+            # Preserve top-level metadata the optimizer often drops.
+            for key in ("expected_exports", "export_instructions"):
+                if key in plan and key not in optimized_plan:
+                    optimized_plan[key] = plan[key]
             logger.info("MasterAI: Workflow Coherence Optimizer completed successfully.")
             return optimized_plan
         except Exception as e:
             logger.error(f"Failed to optimize workflow coherence: {e}. Returning unoptimized expanded plan.")
-            return plan
+            return plan

@@ -6,6 +6,11 @@ from core.data_manager import load_env
 
 logger = logging.getLogger(__name__)
 
+# Telegram hard limits
+TG_MESSAGE_MAX = 3900
+TG_BUTTON_TEXT_MAX = 60
+
+
 class NotificationManager:
     def __init__(self):
         load_env()
@@ -20,6 +25,51 @@ class NotificationManager:
             self.allowed_ids = []
             self.default_chat_id = None
 
+    def _post_send_message(self, payload: dict) -> bool:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                if response.status == 200:
+                    return True
+                body = response.read().decode("utf-8", errors="replace")
+                logger.error(f"Failed to send Telegram notification: HTTP {response.status} — {body}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to send Telegram notification: {e}")
+            return False
+
+    @staticmethod
+    def _chunk_text(text: str, max_len: int = TG_MESSAGE_MAX) -> list:
+        if len(text) <= max_len:
+            return [text]
+        chunks = []
+        current = ""
+        for line in text.split("\n"):
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate) > max_len:
+                if current:
+                    chunks.append(current)
+                while len(line) > max_len:
+                    chunks.append(line[:max_len])
+                    line = line[max_len:]
+                current = line
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks or [text[:max_len]]
+
+    @staticmethod
+    def _short_button_label(idx: int, opt: str) -> str:
+        prefix = f"{idx + 1}. "
+        budget = TG_BUTTON_TEXT_MAX - len(prefix)
+        label = (opt or "").strip().replace("\n", " ")
+        if len(label) > budget:
+            label = label[: max(0, budget - 1)] + "…"
+        return prefix + label
+
     def send_telegram_notification(self, message, chat_id=None, options=None):
         """Sends a notification message via Telegram Bot API using built-in urllib."""
         if not self.bot_token:
@@ -31,36 +81,48 @@ class NotificationManager:
             logger.error("No chat_id available for notification.")
             return False
 
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = {
-            "chat_id": target_chat_id,
-            "text": message,
-            "parse_mode": "HTML"
-        }
-        
+        # Ensure choices are visible in the message body (buttons are optional UX).
+        options = [str(o) for o in (options or []) if str(o).strip()]
+        full_message = message or ""
         if options:
-            inline_keyboard = []
-            for idx, opt in enumerate(options):
-                # Use index-based callback_data to avoid collisions from truncated long option strings.
-                # The bot handler resolves the full option text from the button label or the index.
-                callback_data = f"hitl_{idx}_{opt}"[:64]
-                inline_keyboard.append([{"text": opt, "callback_data": callback_data}])
-            payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
-        
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'}, method='POST')
+            listed = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(options))
+            if listed not in full_message:
+                full_message = f"{full_message.rstrip()}\n\n<b>Options:</b>\n{listed}"
 
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                if response.status == 200:
-                    logger.info(f"Notification sent to {target_chat_id}")
-                    return True
-                else:
-                    logger.error(f"Failed to send Telegram notification: HTTP {response.status}")
-                    return False
-        except Exception as e:
-            logger.error(f"Failed to send Telegram notification: {e}")
-            return False
+        chunks = self._chunk_text(full_message)
+        ok = True
+        for i, chunk in enumerate(chunks):
+            payload = {
+                "chat_id": target_chat_id,
+                "text": chunk,
+                "parse_mode": "HTML",
+            }
+            # Attach buttons only on the last chunk
+            if options and i == len(chunks) - 1:
+                inline_keyboard = []
+                for idx, opt in enumerate(options):
+                    # Index-only callback_data stays well under Telegram's 64-byte limit.
+                    callback_data = f"hitl_{idx}"
+                    inline_keyboard.append([{
+                        "text": self._short_button_label(idx, opt),
+                        "callback_data": callback_data,
+                    }])
+                payload["reply_markup"] = {"inline_keyboard": inline_keyboard}
+
+            sent = self._post_send_message(payload)
+            if not sent and payload.get("reply_markup"):
+                # Retry last chunk without buttons if markup caused rejection.
+                logger.warning("Retrying HITL notification without inline buttons.")
+                payload.pop("reply_markup", None)
+                sent = self._post_send_message(payload)
+            if not sent and payload.get("parse_mode"):
+                payload.pop("parse_mode", None)
+                sent = self._post_send_message(payload)
+            ok = ok and sent
+
+        if ok:
+            logger.info(f"Notification sent to {target_chat_id} ({len(chunks)} chunk(s))")
+        return ok
 
     def notify_workflow_completion(self, workflow_name, result, chat_id=None):
         """Specific helper for workflow completion."""
