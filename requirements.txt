@@ -35,3 +35,9 @@ pdfplumber>=0.11.0
 opencv-python-headless>=4.9.0
 torchvision
 psycopg2-binary>=2.9.9
+
+# === Local Model Training (optional — GPU required) ===
+# Install these manually if you want to use the Local Training tab:
+#   pip install unsloth torch trl peft bitsandbytes accelerate datasets transformers
+# Note: unsloth requires a CUDA-compatible GPU with at least 8GB VRAM.
+# These are NOT auto-installed because they are large and GPU-specific.

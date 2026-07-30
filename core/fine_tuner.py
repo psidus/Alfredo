@@ -28,32 +28,129 @@ def estimate_vram_usage(model_name: str, batch_size: int = 2) -> dict:
 
 def prepare_chatml_dataset(file_paths: list) -> str:
     """
-    Converts raw CSV/TXT to ChatML JSONL format.
-    Reads lines from text files and assumes a simple instruction/response structure.
+    Converts raw CSV/TXT/JSON/JSONL files to ChatML JSONL format.
+    Supports:
+      - CSV files with columns: 'prompt'/'instruction' + 'completion'/'response'/'output'
+      - TXT files: reads lines alternating as user/assistant pairs
+      - JSON/JSONL files with 'messages' field already in ChatML format
+    Falls back to mock entry if a file cannot be parsed.
     """
+    import csv
+
     out_path = os.path.join(os.getcwd(), "storage", "datasets", "train_dataset.jsonl")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    
+    total_entries = 0
+
     with open(out_path, "w", encoding="utf-8") as out_f:
         # Fallback dummy data if no files
         if not file_paths:
             json.dump({"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]}, out_f)
             out_f.write("\n")
+            total_entries += 1
+            logger.info(f"No file paths provided. Wrote {total_entries} fallback entry.")
             return out_path
-            
+
         for fp in file_paths:
-            # Here we just mock parsing by taking the file name for demonstration.
-            # In a real scenario, pandas read_csv and map to ChatML would go here.
-            entry = {
-                "messages": [
-                    {"role": "system", "content": "You are a helpful AI assistant."},
-                    {"role": "user", "content": f"Analyze the data in {fp}"},
-                    {"role": "assistant", "content": f"Understood. I am processing {fp}."}
-                ]
-            }
-            json.dump(entry, out_f)
-            out_f.write("\n")
-            
+            ext = os.path.splitext(fp)[1].lower()
+            try:
+                if ext == ".csv":
+                    with open(fp, "r", encoding="utf-8") as csv_f:
+                        reader = csv.DictReader(csv_f)
+                        for row in reader:
+                            # Detect prompt column
+                            prompt_col = None
+                            for col in ("prompt", "instruction"):
+                                if col in row:
+                                    prompt_col = col
+                                    break
+                            # Detect completion column
+                            completion_col = None
+                            for col in ("completion", "response", "output"):
+                                if col in row:
+                                    completion_col = col
+                                    break
+                            if prompt_col and completion_col:
+                                entry = {
+                                    "messages": [
+                                        {"role": "system", "content": "You are a helpful AI assistant."},
+                                        {"role": "user", "content": row[prompt_col]},
+                                        {"role": "assistant", "content": row[completion_col]},
+                                    ]
+                                }
+                                json.dump(entry, out_f)
+                                out_f.write("\n")
+                                total_entries += 1
+                            else:
+                                logger.warning(f"CSV row in {fp} missing expected columns, skipping.")
+
+                elif ext == ".txt":
+                    with open(fp, "r", encoding="utf-8") as txt_f:
+                        lines = [l.strip() for l in txt_f.readlines() if l.strip()]
+                    # Pair lines as user/assistant
+                    for i in range(0, len(lines) - 1, 2):
+                        entry = {
+                            "messages": [
+                                {"role": "user", "content": lines[i]},
+                                {"role": "assistant", "content": lines[i + 1]},
+                            ]
+                        }
+                        json.dump(entry, out_f)
+                        out_f.write("\n")
+                        total_entries += 1
+
+                elif ext in (".json", ".jsonl"):
+                    with open(fp, "r", encoding="utf-8") as json_f:
+                        if ext == ".jsonl":
+                            for line in json_f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                obj = json.loads(line)
+                                if "messages" in obj:
+                                    json.dump(obj, out_f)
+                                    out_f.write("\n")
+                                    total_entries += 1
+                        else:
+                            data = json.load(json_f)
+                            if isinstance(data, list):
+                                for obj in data:
+                                    if isinstance(obj, dict) and "messages" in obj:
+                                        json.dump(obj, out_f)
+                                        out_f.write("\n")
+                                        total_entries += 1
+                            elif isinstance(data, dict) and "messages" in data:
+                                json.dump(data, out_f)
+                                out_f.write("\n")
+                                total_entries += 1
+
+                else:
+                    # Fallback: unrecognized extension, use mock entry
+                    logger.warning(f"Unrecognized file type '{ext}' for {fp}, using mock entry.")
+                    entry = {
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful AI assistant."},
+                            {"role": "user", "content": f"Analyze the data in {fp}"},
+                            {"role": "assistant", "content": f"Understood. I am processing {fp}."},
+                        ]
+                    }
+                    json.dump(entry, out_f)
+                    out_f.write("\n")
+                    total_entries += 1
+
+            except Exception as e:
+                logger.error(f"Failed to parse {fp}: {e}. Using mock entry as fallback.")
+                entry = {
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful AI assistant."},
+                        {"role": "user", "content": f"Analyze the data in {fp}"},
+                        {"role": "assistant", "content": f"Understood. I am processing {fp}."},
+                    ]
+                }
+                json.dump(entry, out_f)
+                out_f.write("\n")
+                total_entries += 1
+
+    logger.info(f"Prepared ChatML dataset with {total_entries} entries at {out_path}")
     return out_path
 
 def build_unsloth_script(config: dict) -> str:
@@ -136,7 +233,7 @@ def run():
                 "total_steps": args.max_steps,
                 "loss": state.log_history[-1].get('loss', 0.0) if state.log_history else 0.0
             }}
-            with open("training_status.json", "w") as f:
+            with open(os.path.join(os.getcwd(), "storage", "training_status.json"), "w") as f:
                 json.dump(status, f)
 
     trainer = SFTTrainer(
@@ -145,7 +242,7 @@ def run():
         train_dataset = dataset,
         dataset_text_field = "text",
         max_seq_length = max_seq_length,
-        dataset_num_proc = 2,
+        dataset_num_proc = min(os.cpu_count() or 1, 4),
         packing = False,
         args = TrainingArguments(
             per_device_train_batch_size = 2,
@@ -174,7 +271,7 @@ def run():
     print("Training Complete! Adapter saved to storage/adapters/temp")
     
     # Mark done
-    with open("training_status.json", "w") as f:
+    with open(os.path.join(os.getcwd(), "storage", "training_status.json"), "w") as f:
         json.dump({{"step": {max_steps}, "total_steps": {max_steps}, "loss": 0.01}}, f)
 
 if __name__ == "__main__":
@@ -193,7 +290,9 @@ def start_training_process(config: dict) -> subprocess.Popen:
     script_path = build_unsloth_script(config)
     
     # Initialize status file
-    with open("training_status.json", "w", encoding="utf-8") as f:
+    status_path = os.path.join(os.getcwd(), "storage", "training_status.json")
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    with open(status_path, "w", encoding="utf-8") as f:
         json.dump({"step": 0, "total_steps": 1, "loss": 0.0}, f)
         
     process = subprocess.Popen(["python", script_path])
@@ -214,7 +313,9 @@ def run_inference(prompt: str, adapter_dir: str) -> str:
         FastLanguageModel.for_inference(model)
         
         messages = [{"role": "user", "content": prompt}]
-        inputs = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to("cuda")
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        inputs = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(device)
         outputs = model.generate(input_ids=inputs, max_new_tokens=256, use_cache=True)
         resp = tokenizer.batch_decode(outputs)
         
@@ -228,6 +329,9 @@ def export_to_ollama(adapter_dir: str, final_name: str) -> bool:
     Export the model to Ollama via GGUF conversion.
     """
     logger.info(f"Exporting {adapter_dir} to Ollama as {final_name}")
+    if not os.path.exists(adapter_dir):
+        logger.error(f"Adapter directory not found: {adapter_dir}")
+        return False
     try:
         from unsloth import FastLanguageModel
         model, tokenizer = FastLanguageModel.from_pretrained(

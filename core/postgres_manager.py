@@ -489,6 +489,14 @@ class PostgresManager:
         agent_dict = self._to_dict(row)
         return self._process_json_fields(agent_dict)
 
+    def read_agent_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM agents WHERE name = %s LIMIT 1"
+        self.cursor.execute(sql, (name,))
+        row = self.cursor.fetchone()
+        if not row:
+            return None
+        return self._process_json_fields(self._to_dict(row))
+
     def read_all_agents(self) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM agents ORDER BY name"
         self.cursor.execute(sql)

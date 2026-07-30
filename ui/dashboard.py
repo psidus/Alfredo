@@ -2427,12 +2427,336 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                     st.toast(f"Deleted orphaned task {task['id']}", icon="🗑️")
                                     st.rerun()
 
+def render_workflow_share_hub(db):
+    """Share / Hub tab: local package import/export + optional hub publish/browse."""
+    import os
+    from core.workflow_package import (
+        analyze_package_compatibility,
+        dumps_package,
+        export_workflow,
+        import_workflow,
+        loads_package,
+        validate_package,
+    )
+    from core.hub_client import HubClient, HubClientError
+
+    st.subheader("Share Workflows")
+    st.caption(
+        "Packages (`.alfredo.json`) carry **logic only**: agents, tasks, tools names, inputs/outputs, "
+        "suggested models — never API keys. Each machine uses its own `.env`."
+    )
+
+    env_path = find_dotenv() or os.path.join(os.getcwd(), ".env")
+    file_env = dotenv_values(env_path) if os.path.exists(env_path) else {}
+
+    def _hub_env(key, default=""):
+        return (os.environ.get(key) or file_env.get(key) or default or "").strip()
+
+    # --- Hub connection settings (UI → .env) ---
+    with st.expander("Hub connection settings", expanded=True):
+        st.markdown(
+            """
+**How sharing works**
+
+| Mode | When to use |
+|------|-------------|
+| `off` | Only file export/import (USB, email, chat) |
+| `local` | Private company hub on LAN/VPN (recommended for coworkers) |
+| `remote` | Point to a public/global hub URL |
+
+**Visibility when publishing**
+
+- **private** — only you + usernames you share with  
+- **org** — everyone registered with the same Org slug (`HUB_ORG`)  
+- **public** — anyone who can reach this hub  
+
+**Company hub setup (once):** on a server inside the company run  
+`docker compose --profile hub up -d`  
+then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 8010 to the internet.
+            """
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            mode_opts = ["off", "local", "remote"]
+            cur_mode = _hub_env("HUB_MODE", "off").lower()
+            if cur_mode not in mode_opts:
+                cur_mode = "off"
+            new_mode = st.selectbox("HUB_MODE", mode_opts, index=mode_opts.index(cur_mode), key="hub_cfg_mode")
+            new_url = st.text_input(
+                "HUB_API_URL",
+                value=_hub_env("HUB_API_URL", "http://localhost:8010"),
+                key="hub_cfg_url",
+                help="Company hub host or global hub URL",
+            )
+            new_org = st.text_input("HUB_ORG (org slug)", value=_hub_env("HUB_ORG", ""), key="hub_cfg_org")
+        with c2:
+            new_user = st.text_input("HUB_USERNAME", value=_hub_env("HUB_USERNAME", ""), key="hub_cfg_user")
+            new_token = st.text_input(
+                "HUB_TOKEN",
+                value=_hub_env("HUB_TOKEN", ""),
+                type="password",
+                key="hub_cfg_token",
+                help="From Register below — never commit to git",
+            )
+        if st.button("Save hub settings to .env", type="primary", key="hub_cfg_save"):
+            try:
+                safe_set_key(env_path, "HUB_MODE", new_mode)
+                safe_set_key(env_path, "HUB_API_URL", new_url)
+                safe_set_key(env_path, "HUB_ORG", new_org)
+                safe_set_key(env_path, "HUB_USERNAME", new_user)
+                if new_token:
+                    safe_set_key(env_path, "HUB_TOKEN", new_token)
+                st.success("Saved. Settings apply immediately for this session.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not write .env: {e}")
+
+    hub_mode = _hub_env("HUB_MODE", "off").lower()
+    hub_url = _hub_env("HUB_API_URL", "http://localhost:8010")
+    st.info(f"Current hub: mode=**{hub_mode}** · url=`{hub_url}` · user=`{_hub_env('HUB_USERNAME') or '—'}` · org=`{_hub_env('HUB_ORG') or '—'}`")
+
+    sub_local, sub_hub = st.tabs(["Local package", "Hub registry"])
+
+    workflows = db.read_all_workflows() or []
+    wf_options = {f"{w['name']} (#{w['id']})": w["id"] for w in workflows}
+
+    with sub_local:
+        st.markdown("#### Export")
+        if not wf_options:
+            st.warning("No workflows to export.")
+        else:
+            sel = st.selectbox("Workflow", list(wf_options.keys()), key="share_export_wf")
+            c1, c2 = st.columns(2)
+            with c1:
+                desc = st.text_area("Description", key="share_export_desc", height=80)
+            with c2:
+                tags_raw = st.text_input("Tags (comma-separated)", key="share_export_tags")
+                author = st.text_input("Author", value=_hub_env("HUB_USERNAME"), key="share_export_author")
+            if st.button("Build package", key="share_build_pkg"):
+                try:
+                    tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+                    pkg = export_workflow(
+                        wf_options[sel],
+                        description=desc,
+                        tags=tags,
+                        author=author,
+                        db=db,
+                    )
+                    st.session_state["share_built_package"] = pkg
+                    compat = analyze_package_compatibility(pkg)
+                    st.success("Package ready.")
+                    if any(compat.get(k) for k in ("missing_tools", "custom_tools", "missing_secrets", "missing_schemas")):
+                        st.warning(
+                            "Compatibility notes (tools listed as custom/missing must exist on the "
+                            "target machine — they are still stored in the package)."
+                        )
+                        st.json(compat)
+                    st.download_button(
+                        "Download .alfredo.json",
+                        data=dumps_package(pkg).encode("utf-8"),
+                        file_name=f"{pkg['package'].get('slug') or 'workflow'}.alfredo.json",
+                        mime="application/json",
+                        key="share_dl_built",
+                    )
+                    with st.expander("Preview JSON"):
+                        st.json(pkg)
+                except Exception as e:
+                    st.error(f"Export failed: {e}")
+
+        st.markdown("---")
+        st.markdown("#### Import")
+        uploaded = st.file_uploader("Upload .alfredo.json", type=["json"], key="share_import_file")
+        conflict = st.selectbox(
+            "If workflow name exists",
+            ["rename", "skip", "overwrite"],
+            key="share_conflict",
+            help="rename = create with suffix; skip = abort; overwrite = delete existing workflow then import",
+        )
+        if uploaded and st.button("Analyze & import", type="primary", key="share_do_import"):
+            try:
+                raw = uploaded.read().decode("utf-8")
+                pkg = loads_package(raw)
+                errs = validate_package(pkg)
+                if errs:
+                    st.error("Invalid package:\n- " + "\n- ".join(errs))
+                else:
+                    compat = analyze_package_compatibility(pkg)
+                    st.markdown("**Compatibility**")
+                    st.json(compat)
+                    result = import_workflow(pkg, conflict_policy=conflict, db=db)
+                    st.success(
+                        f"Imported **{result['workflow_name']}** (id={result['workflow_id']}) — "
+                        f"{result['tasks_imported']} tasks, {result['agents_imported']} agents"
+                    )
+                    for w in result.get("warnings") or []:
+                        st.warning(w)
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+    with sub_hub:
+        client = HubClient(
+            base_url=hub_url,
+            username=_hub_env("HUB_USERNAME"),
+            token=_hub_env("HUB_TOKEN"),
+        )
+
+        # Health probe (always useful)
+        hub_up = False
+        try:
+            health = client.health()
+            hub_up = True
+            st.success(f"Hub reachable: {health}")
+        except HubClientError as e:
+            st.error(
+                f"Hub not reachable at `{hub_url}`.\n\n"
+                f"{e}\n\n"
+                "**Fix:** start the hub, then retry.\n"
+                "```bash\ndocker compose --profile hub up -d\n```\n"
+                "Wait until http://localhost:8010/hub/health responds, "
+                "or set HUB_API_URL to your company hub host."
+            )
+
+        st.markdown("#### Register (first time)")
+        st.caption("Creates your hub user and returns a token. Save it with the settings expander above.")
+        ru = st.text_input("Username", value=_hub_env("HUB_USERNAME"), key="hub_reg_user")
+        rd = st.text_input("Display name", key="hub_reg_disp")
+        ro = st.text_input("Org slug", value=_hub_env("HUB_ORG") or "", key="hub_reg_org")
+        if st.button("Register on hub", key="hub_reg_btn"):
+            if not hub_up:
+                st.error("Cannot register: hub is offline. Start it first (see error above).")
+            else:
+                try:
+                    res = client.register(ru, rd, ro)
+                    token = res.get("token") or ""
+                    safe_set_key(env_path, "HUB_USERNAME", res.get("username") or ru)
+                    safe_set_key(env_path, "HUB_TOKEN", token)
+                    if ro:
+                        safe_set_key(env_path, "HUB_ORG", ro)
+                    if hub_mode == "off":
+                        safe_set_key(env_path, "HUB_MODE", "local")
+                    st.success("Registered. Token saved to `.env`. Reload this page / click Save if needed.")
+                    st.code(token)
+                    st.rerun()
+                except HubClientError as e:
+                    st.error(str(e))
+
+        if hub_mode == "off":
+            st.warning("HUB_MODE is `off`. Set it to `local` or `remote` in Hub connection settings to publish/browse.")
+            return
+
+        if not client.username or not client.token:
+            st.warning("Set HUB_USERNAME + HUB_TOKEN (register above or paste into settings).")
+            return
+
+        if not hub_up:
+            return
+
+        st.markdown("#### Publish")
+        st.caption(
+            "Upload workflow **logic** to the hub. Coworkers with access can Install it. "
+            "Use visibility **org** for the whole company, **private** + share for selected people, "
+            "**public** for everyone on this hub."
+        )
+        if wf_options:
+            pub_sel = st.selectbox("Workflow to publish", list(wf_options.keys()), key="hub_pub_wf")
+            pub_title = st.text_input("Title", value=pub_sel.split(" (#")[0], key="hub_pub_title")
+            pub_slug = st.text_input("Slug", value=pub_title.lower().replace(" ", "-")[:64], key="hub_pub_slug")
+            pub_desc = st.text_area("Description", key="hub_pub_desc", height=70)
+            pub_tags = st.text_input("Tags", key="hub_pub_tags")
+            pub_vis = st.selectbox(
+                "Visibility",
+                ["private", "org", "public"],
+                key="hub_pub_vis",
+                help="org = same HUB_ORG; private = you + Share with; public = all hub users",
+            )
+            pub_ver = st.text_input("Package version", value="1.0.0", key="hub_pub_ver")
+            pub_share = st.text_input(
+                "Share with usernames (comma-separated, for private)",
+                key="hub_pub_share",
+                help="Hub usernames of coworkers who should see a private package",
+            )
+            if st.button("Publish to hub", type="primary", key="hub_pub_btn"):
+                try:
+                    pkg = export_workflow(
+                        wf_options[pub_sel],
+                        description=pub_desc,
+                        tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
+                        author=client.username,
+                        db=db,
+                    )
+                    res = client.publish(
+                        pkg,
+                        slug=pub_slug,
+                        title=pub_title,
+                        description=pub_desc,
+                        tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
+                        visibility=pub_vis,
+                        package_version=pub_ver,
+                        share_with=[u.strip() for u in pub_share.split(",") if u.strip()],
+                    )
+                    st.success(f"Published package id={res.get('id')} slug={res.get('slug')} visibility={pub_vis}")
+                    st.json(res)
+                except Exception as e:
+                    st.error(str(e))
+
+        st.markdown("---")
+        st.markdown("#### Browse / install")
+        st.caption(
+            "Search finds packages you are allowed to see (your private ones, org packages, "
+            "public ones, and packages shared with you). Install runs the same local import."
+        )
+        q = st.text_input("Search", key="hub_search_q")
+        tag = st.text_input("Filter tag", key="hub_search_tag")
+        if st.button("Search hub", key="hub_search_btn"):
+            try:
+                st.session_state["hub_search_results"] = client.search(q=q, tag=tag)
+            except HubClientError as e:
+                st.error(str(e))
+        results = st.session_state.get("hub_search_results") or []
+        if results:
+            for pkg in results:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{pkg.get('title')}** `v{pkg.get('package_version')}` — "
+                        f"@{pkg.get('author_username')} · {pkg.get('visibility')} · "
+                        f"⬇ {pkg.get('downloads', 0)}"
+                    )
+                    st.caption(pkg.get("description") or "")
+                    tags = pkg.get("tags") or []
+                    if tags:
+                        st.caption("Tags: " + ", ".join(tags))
+                    c_inst, c_share = st.columns(2)
+                    with c_inst:
+                        if st.button("Install", key=f"hub_inst_{pkg['id']}"):
+                            try:
+                                full = client.download(pkg["id"])
+                                body = full.get("package_json")
+                                if isinstance(body, str):
+                                    body = loads_package(body)
+                                result = import_workflow(body, conflict_policy="rename", db=db)
+                                st.success(f"Installed as **{result['workflow_name']}**")
+                                for w in result.get("warnings") or []:
+                                    st.warning(w)
+                            except Exception as e:
+                                st.error(str(e))
+                    with c_share:
+                        share_user = st.text_input("Share with", key=f"hub_share_u_{pkg['id']}")
+                        if st.button("Share", key=f"hub_share_b_{pkg['id']}"):
+                            try:
+                                client.share(pkg["id"], share_user)
+                                st.toast(f"Shared with {share_user}")
+                            except Exception as e:
+                                st.error(str(e))
+        elif st.session_state.get("hub_search_results") is not None:
+            st.info("No packages matched (or none visible with your credentials).")
+
+
 def render_workflow_assembler():
     """Renders Tab 4: UI for creating, viewing, and exporting workflows."""
     db = get_db_manager()
     st.header("Workflow Assembler")
     st.markdown("Combine individual tasks into a sequential workflow.")
-    tab_wf, tab_test = st.tabs(["Workflow + Saved Workflow", "Live System Test"])
+    tab_wf, tab_share, tab_test = st.tabs(["Workflow + Saved Workflow", "Share / Hub", "Live System Test"])
     with tab_wf:
 
         # Inject CSS/JS to style task buttons to look like normal clickable text
@@ -3110,7 +3434,7 @@ def render_workflow_assembler():
                     # 3. Sanitize filename and provide download button
                     safe_filename = f"{sanitize_filename(workflow['name'])}.yaml"
                 
-                    col_del, col_edit, col_export = st.columns([1, 1, 2])
+                    col_del, col_edit, col_export, col_json = st.columns([1, 1, 1.2, 1.2])
                     with col_edit:
                         if st.button("Edit", key=f"edit_wf_{workflow['id']}", use_container_width=True):
                             st.session_state.editing_workflow_id = workflow['id']
@@ -3130,13 +3454,31 @@ def render_workflow_assembler():
                                 st.rerun()
                     with col_export:
                         st.download_button(
-                            label="Export to YAML",
+                            label="Export YAML",
                             data=yaml_string.encode('utf-8'),
                             file_name=safe_filename,
                             mime="application/x-yaml",
                             key=f"export_wf_{workflow['id']}",
                             use_container_width=True
                         )
+                    with col_json:
+                        try:
+                            from core.workflow_package import export_workflow, dumps_package
+                            pkg = export_workflow(workflow['id'], db=db)
+                            st.download_button(
+                                label="Export Package",
+                                data=dumps_package(pkg).encode("utf-8"),
+                                file_name=f"{sanitize_filename(workflow['name'])}.alfredo.json",
+                                mime="application/json",
+                                key=f"export_pkg_{workflow['id']}",
+                                use_container_width=True,
+                                help="Portable .alfredo.json (agents, tasks, graph — no secrets)",
+                            )
+                        except Exception as pkg_err:
+                            st.caption(f"Package export unavailable: {pkg_err}")
+
+    with tab_share:
+        render_workflow_share_hub(db)
 
     with tab_test:
         st.subheader("🧪 Run Workflows")
@@ -3646,9 +3988,18 @@ def render_local_training():
         if st.button("Generate ChatML Dataset with AI"):
             if uploaded_files:
                 import core.fine_tuner as ft
-                st.info("Processing files and converting to ChatML format...")
-                dataset_path = ft.prepare_chatml_dataset([f.name for f in uploaded_files])
-                st.success(f"Dataset generated at {dataset_path}")
+                import os
+                st.info("Saving uploaded files and converting to ChatML format...")
+                saved_paths = []
+                for f in uploaded_files:
+                    save_dir = os.path.join(os.getcwd(), "storage", "datasets", "raw")
+                    os.makedirs(save_dir, exist_ok=True)
+                    save_path = os.path.join(save_dir, f.name)
+                    with open(save_path, "wb") as out:
+                        out.write(f.getbuffer())
+                    saved_paths.append(save_path)
+                dataset_path = ft.prepare_chatml_dataset(saved_paths)
+                st.success(f"✅ Dataset generated at `{dataset_path}` ({len(saved_paths)} files processed)")
             else:
                 st.warning("Please upload files first.")
         st.markdown("---")
@@ -3680,7 +4031,7 @@ def render_local_training():
         st.subheader("Live Monitoring")
         import os
         import json
-        status_file = "training_status.json"
+        status_file = os.path.join(os.getcwd(), "storage", "training_status.json")
         
         if os.path.exists(status_file):
             try:
@@ -3701,9 +4052,24 @@ def render_local_training():
             
         import pandas as pd
         import numpy as np
-        # Dummy loss chart for visual feedback
-        chart_data = pd.DataFrame(np.exp(-np.linspace(0, 5, 20)) + np.random.normal(0, 0.05, 20), columns=["Loss"])
-        st.line_chart(chart_data)
+        # Read real loss history if available, otherwise show placeholder
+        loss_history_file = os.path.join(os.getcwd(), "storage", "training_loss_history.json")
+        if os.path.exists(loss_history_file):
+            try:
+                with open(loss_history_file, "r") as lf:
+                    loss_history = json.load(lf)
+                if loss_history:
+                    chart_data = pd.DataFrame(loss_history, columns=["Loss"])
+                    st.line_chart(chart_data)
+                else:
+                    st.info("No loss data recorded yet.")
+            except Exception:
+                st.info("Waiting for training data...")
+        else:
+            # Placeholder chart when no training has been run
+            chart_data = pd.DataFrame(np.exp(-np.linspace(0, 5, 20)) + np.random.normal(0, 0.02, 20), columns=["Loss"])
+            st.line_chart(chart_data)
+            st.caption("📊 Placeholder chart — real data will appear once training starts.")
         with st.expander("Training Logs", expanded=True):
             st.code("Logs will be streamed here...")
 

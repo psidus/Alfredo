@@ -90,5 +90,43 @@ services:
       - ./workspace:/app/workspace
     restart: unless-stopped
 
+  # Optional sharing registry (docker compose --profile hub up)
+  hub_postgres:
+    profiles: ["hub"]
+    image: postgres:15-alpine
+    container_name: alfredo_hub_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hub_user
+      POSTGRES_PASSWORD: hub_password
+      POSTGRES_DB: alfredo_hub
+    ports:
+      - "5433:5432"
+    volumes:
+      - hub_postgres_data:/var/lib/postgresql/data
+
+  hub:
+    profiles: ["hub"]
+    build: .
+    container_name: alfredo_hub
+    command: python -c "from core.hub_server import start_hub_server; start_hub_server()"
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+      - HUB_PORT=8010
+      - HUB_DATABASE_URL=postgresql://hub_user:hub_password@hub_postgres:5432/alfredo_hub
+    volumes:
+      - ./core:/app/core
+      - ./config:/app/config
+      - ./db:/app/db
+      - ./.env:/app/.env
+    restart: unless-stopped
+    depends_on:
+      - hub_postgres
+
 volumes:
   postgres_data:
+  hub_postgres_data:

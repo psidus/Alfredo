@@ -151,6 +151,7 @@ ALLOWED_TOOLS = {
     "read_rag_chunks": vector_pagination_tool.read_rag_chunks,
     "check_excel_db": thermo_excel_reader.check_excel_db,
     "trigger_next_batch": workflow_trigger_tool.trigger_next_batch,
+    "save_markdown_data": None,  # loaded below from markdown_excel_writer_tool
     # Ephemeral Memory — sentinels, auto-injected at runtime with the correct manager
     "read_atomic_memory": None,   # Sentinel
     "write_atomic_memory": None,  # Sentinel
@@ -159,6 +160,13 @@ ALLOWED_TOOLS = {
     "app_database_query": None,  # Sentinel
     "app_api_caller": None,      # Sentinel
 }
+
+# Markdown → Excel writer (thermo / markdown extractor workflows)
+try:
+    import tools.markdown_excel_writer_tool as markdown_excel_writer_tool
+    ALLOWED_TOOLS["save_markdown_data"] = markdown_excel_writer_tool.save_markdown_data
+except Exception as e:
+    logging.warning(f"Could not load save_markdown_data tool: {e}")
 
 # --- Load Custom Tools ---
 import inspect
@@ -619,6 +627,12 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
             base_expected += vector_format_directive
 
     pydantic_kwargs = resolve_pydantic_kwargs(task_record.get('output_pydantic'))
+
+    # Task-declared tools are the source of truth for this node. Align the agent
+    # toolkit so CrewAI cannot fall back to the agent's caserma tools when the
+    # task intentionally lists a different (or empty) set.
+    if agent_instance is not None:
+        agent_instance.tools = list(task_tools) if task_tools else []
 
     task = Task(
         description=task_description,

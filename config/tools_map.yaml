@@ -104,3 +104,8 @@ tools_registry:
     display_name: "Workflow: Trigger Next Batch"
     description: "Triggers the next batch of an autonomous workflow with updated offset and context."
     required_secrets: []
+  save_markdown_data:
+    display_name: "Thermo: Save Markdown Extraction to Excel"
+    description: "Merges validated MarkdownThermalExtraction JSON rows into storage/thermo_database.xlsx."
+    required_secrets: []
+
