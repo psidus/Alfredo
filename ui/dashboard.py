@@ -3971,128 +3971,189 @@ def render_history_monitoring():
 
 def render_local_training():
     """Renders Tab: Local Model Training."""
+    import core.fine_tuner as ft
+    import pandas as pd
+    import time
+
     st.header("Local Model Training 🪖")
-    st.markdown("Fine-tune open-source models using Unsloth. The process runs in an isolated backend for maximum stability.")
+    st.markdown(
+        "Fine-tune open-source models with Unsloth (QLoRA). "
+        "Flusso: prepara dataset → addestra → monitora → testa → esporta in Ollama."
+    )
 
     tab_data, tab_tune, tab_eval, tab_chat, tab_deploy = st.tabs([
-        "1. Data Prep 🗃️", 
-        "2. Fine-Tuning ⚙️", 
-        "3. Monitoring & Eval 📊", 
-        "4. Inference Test 💬", 
-        "5. Export & Deployment 📦"
+        "1. Data Prep 🗃️",
+        "2. Fine-Tuning ⚙️",
+        "3. Monitoring & Eval 📊",
+        "4. Inference Test 💬",
+        "5. Export & Deployment 📦",
     ])
 
     with tab_data:
         st.subheader("Prepare Dataset")
-        uploaded_files = st.file_uploader("Upload raw files (CSV, TXT, PDF)", accept_multiple_files=True)
-        if st.button("Generate ChatML Dataset with AI"):
+        st.caption(
+            "Formati supportati: CSV (`prompt`/`instruction` + `completion`/`response`/`output`), "
+            "TXT (righe alternate user/assistant), JSON/JSONL (campo `messages`), PDF (testo estratto in chunk)."
+        )
+        uploaded_files = st.file_uploader(
+            "Upload raw files (CSV, TXT, JSON, JSONL, PDF)",
+            type=["csv", "txt", "json", "jsonl", "pdf"],
+            accept_multiple_files=True,
+        )
+        if st.button("Genera Dataset ChatML", type="primary"):
             if uploaded_files:
-                import core.fine_tuner as ft
-                import os
-                st.info("Saving uploaded files and converting to ChatML format...")
+                st.info("Salvataggio file e conversione in ChatML...")
                 saved_paths = []
                 for f in uploaded_files:
-                    save_dir = os.path.join(os.getcwd(), "storage", "datasets", "raw")
+                    save_dir = ft.RAW_DATASET_DIR
                     os.makedirs(save_dir, exist_ok=True)
                     save_path = os.path.join(save_dir, f.name)
                     with open(save_path, "wb") as out:
                         out.write(f.getbuffer())
                     saved_paths.append(save_path)
-                dataset_path = ft.prepare_chatml_dataset(saved_paths)
-                st.success(f"✅ Dataset generated at `{dataset_path}` ({len(saved_paths)} files processed)")
+                result = ft.prepare_chatml_dataset(saved_paths)
+                if result["total_entries"] > 0:
+                    st.success(
+                        f"✅ Dataset generato: `{result['path']}` — "
+                        f"{result['total_entries']} esempi da {len(result['processed_files'])} file."
+                    )
+                else:
+                    st.error("Nessun esempio generato. Controlla i file e i messaggi sotto.")
+                for err in result.get("errors") or []:
+                    st.warning(err)
             else:
-                st.warning("Please upload files first.")
+                st.warning("Carica almeno un file prima.")
+
         st.markdown("---")
-        st.caption("Dataset Preview (ChatML)")
-        st.dataframe([{"role": "user", "content": "Sample prompt"}, {"role": "assistant", "content": "Sample completion"}])
+        ok, ds_msg, ds_count = ft.ensure_dataset_ready()
+        if ok:
+            st.caption(f"Dataset pronto: **{ds_count}** esempi — `{ds_msg}`")
+            preview = ft.load_dataset_preview(limit=5)
+            if preview:
+                st.dataframe(preview, use_container_width=True)
+            else:
+                st.info("Dataset presente ma anteprima vuota.")
+        else:
+            st.info(ds_msg)
 
     with tab_tune:
         st.subheader("Configure Training")
         col1, col2 = st.columns(2)
         with col1:
-            base_model = st.selectbox("Base Model", ["unsloth/llama-3-8b-Instruct-bnb-4bit", "unsloth/mistral-7b-instruct-v0.3-bnb-4bit", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"])
-            preset = st.radio("Training Preset", ["🚀 Fast (Prototype)", "⚖️ Balanced (Recommended)", "🧠 Deep (High Quality)"])
-        
+            base_model = st.selectbox(
+                "Base Model",
+                [
+                    "unsloth/llama-3-8b-Instruct-bnb-4bit",
+                    "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
+                    "unsloth/Qwen2.5-7B-Instruct-bnb-4bit",
+                ],
+            )
+            preset = st.radio(
+                "Training Preset",
+                ["🚀 Fast (Prototype)", "⚖️ Balanced (Recommended)", "🧠 Deep (High Quality)"],
+            )
+            if "llama" in base_model.lower():
+                st.caption(
+                    "Llama gated: imposta `HUGGINGFACE_TOKEN` nel `.env` e accetta la licenza su HuggingFace."
+                )
+
         with col2:
             st.markdown("### Hardware Estimation")
-            import core.fine_tuner as ft
             vram_est = ft.estimate_vram_usage(base_model, batch_size=2)
             safe_text = "Safe" if vram_est["is_safe"] else "Warning: May OOM"
             color = "normal" if vram_est["is_safe"] else "inverse"
-            st.metric("Estimated VRAM Required", f"{vram_est['required_gb']:.1f} GB", delta=safe_text, delta_color=color)
-            st.metric("Estimated Time", "~ 45 mins")
-            
+            st.metric(
+                "Estimated VRAM Required",
+                f"{vram_est['required_gb']:.1f} GB",
+                delta=safe_text,
+                delta_color=color,
+            )
+            est_mins = ft.estimate_training_minutes(preset)
+            steps = ft.max_steps_for_preset(preset)
+            st.metric("Estimated Time", f"~ {est_mins} mins", delta=f"{steps} steps")
+
+        ok_ds, ds_info, ds_count = ft.ensure_dataset_ready()
+        if ok_ds:
+            st.info(f"Dataset: {ds_count} esempi pronti.")
+        else:
+            st.warning(ds_info)
+
         st.markdown("---")
         if st.button("Avvia Addestramento 🚀", type="primary", use_container_width=True):
-            ft.start_training_process({"model": base_model, "preset": preset})
-            st.success("Training subprocess started in background!")
+            result = ft.start_training_process({"model": base_model, "preset": preset})
+            if result.get("ok"):
+                st.success(result["message"])
+                st.info("Apri il tab Monitoring per seguire progressi e log.")
+            else:
+                st.error(result.get("message", "Avvio training fallito."))
 
     with tab_eval:
         st.subheader("Live Monitoring")
-        import os
-        import json
-        status_file = os.path.join(os.getcwd(), "storage", "training_status.json")
-        
-        if os.path.exists(status_file):
-            try:
-                with open(status_file, "r") as f:
-                    status = json.load(f)
-                
-                step = status.get("step", 0)
-                total = status.get("total_steps", 1)
-                loss = status.get("loss", 0.0)
-                
-                pct = min(100, int((step / total) * 100))
-                st.progress(pct, text=f"Step {step}/{total} - Loss: {loss:.4f}")
-                
-            except Exception:
-                st.progress(0, text="Reading status...")
+        status = ft.read_training_status()
+        step = int(status.get("step", 0) or 0)
+        total = max(int(status.get("total_steps", 1) or 1), 1)
+        loss = float(status.get("loss", 0.0) or 0.0)
+        done = bool(status.get("done", False))
+        running = ft.is_training_running()
+
+        pct = min(100, int((step / total) * 100))
+        label = f"Step {step}/{total} — Loss: {loss:.4f}"
+        if done:
+            label += " ✅ Completato"
+        elif running:
+            label += " ⏳ In corso"
+        st.progress(pct, text=label)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            auto_refresh = st.checkbox("Auto-refresh (3s)", value=running and not done)
+        with col_b:
+            if st.button("Aggiorna ora"):
+                st.rerun()
+
+        loss_history = ft.read_loss_history()
+        if loss_history:
+            st.line_chart(pd.DataFrame({"Loss": loss_history}))
+        elif running:
+            st.info("In attesa dei primi valori di loss...")
         else:
-            st.progress(0, text="Waiting for training to start...")
-            
-        import pandas as pd
-        import numpy as np
-        # Read real loss history if available, otherwise show placeholder
-        loss_history_file = os.path.join(os.getcwd(), "storage", "training_loss_history.json")
-        if os.path.exists(loss_history_file):
-            try:
-                with open(loss_history_file, "r") as lf:
-                    loss_history = json.load(lf)
-                if loss_history:
-                    chart_data = pd.DataFrame(loss_history, columns=["Loss"])
-                    st.line_chart(chart_data)
-                else:
-                    st.info("No loss data recorded yet.")
-            except Exception:
-                st.info("Waiting for training data...")
-        else:
-            # Placeholder chart when no training has been run
-            chart_data = pd.DataFrame(np.exp(-np.linspace(0, 5, 20)) + np.random.normal(0, 0.02, 20), columns=["Loss"])
-            st.line_chart(chart_data)
-            st.caption("📊 Placeholder chart — real data will appear once training starts.")
+            st.caption("Nessuna curva loss ancora. Avvia un training per vedere i dati reali.")
+
         with st.expander("Training Logs", expanded=True):
-            st.code("Logs will be streamed here...")
+            st.code(ft.read_training_logs(), language="text")
+
+        if auto_refresh and running and not done:
+            time.sleep(3)
+            st.rerun()
 
     with tab_chat:
         st.subheader("Inference Test")
-        st.markdown("Test the newly generated LoRA adapters before merging.")
-        prompt = st.chat_input("Say something to the fine-tuned model...")
+        st.markdown("Testa l'adapter LoRA salvato in `storage/adapters/temp` dopo il training.")
+        if not os.path.isdir(ft.ADAPTER_DIR):
+            st.warning("Nessun adapter trovato. Completa prima un training.")
+        prompt = st.chat_input("Di' qualcosa al modello fine-tuned...")
         if prompt:
-            import core.fine_tuner as ft
             st.chat_message("user").write(prompt)
-            resp = ft.run_inference(prompt, "storage/adapters/temp")
+            with st.spinner("Generazione in corso..."):
+                resp = ft.run_inference(prompt, ft.ADAPTER_DIR)
             st.chat_message("assistant").write(resp)
 
     with tab_deploy:
         st.subheader("Export to Ollama")
+        st.caption("Esporta GGUF (q4_k_m), scrive un Modelfile e prova `ollama create`.")
         final_name = st.text_input("Final Model Name", placeholder="e.g. Alfredo-Support-Bot-8B")
         if st.button("Export to .gguf and Deploy 📦", type="primary"):
             if final_name:
-                import core.fine_tuner as ft
-                ft.export_to_ollama("storage/adapters/temp", final_name)
-                st.success(f"Model exported successfully as {final_name}!")
+                with st.spinner("Export GGUF in corso (può richiedere diversi minuti)..."):
+                    result = ft.export_to_ollama(ft.ADAPTER_DIR, final_name)
+                if result.get("ok"):
+                    st.success(result["message"])
+                    if result.get("gguf_path"):
+                        st.code(result["gguf_path"])
+                else:
+                    st.error(result.get("message", "Export fallito."))
             else:
-                st.error("Please provide a name for the model.")
+                st.error("Inserisci un nome per il modello.")
 
 
 def render_my_apps():
