@@ -19,6 +19,20 @@ from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
 from core.schema_loader import get_available_schemas, get_schema_class
+from core.workflow_graph import (
+    NODE_TYPE_BATCH,
+    NODE_TYPE_EXPORT,
+    NODE_TYPE_HITL,
+    NODE_TYPE_INPUT,
+    NODE_TYPE_TASK,
+    canonicalize_graph,
+    graph_to_dot,
+    new_node_id,
+    normalize_graph,
+    remove_node,
+    sync_header_from_export_nodes,
+    validate_graph,
+)
 
 def safe_set_key(env_path, key_to_set, value_to_set):
     """
@@ -2884,27 +2898,17 @@ def render_workflow_assembler():
     
         import uuid
         raw_task_ids = list(editing_workflow.get('task_ids', [])) if editing_workflow else []
-        default_wf_task_ids = []
-        for i, t in enumerate(raw_task_ids):
-            if isinstance(t, int):
-                default_wf_task_ids.append({"id": f"node_{i}_{uuid.uuid4().hex[:6]}", "task_id": t, "depends_on": [default_wf_task_ids[-1]["id"]] if default_wf_task_ids else [], "execution_level": 1, "model_tier": "default"})
-            elif isinstance(t, dict):
-                if "id" not in t:
-                    t["id"] = f"node_{i}_{uuid.uuid4().hex[:6]}"
-                if "depends_on" not in t:
-                    t["depends_on"] = []
-                if "execution_level" not in t:
-                    t["execution_level"] = 1
-                # Legacy: per-node supervisor role removed — Master AI is sole orchestrator
-                if isinstance(t, dict):
-                    t.pop("role", None)
-                    if "model_tier" not in t:
-                        t["model_tier"] = "default"
-                default_wf_task_ids.append(t)
+        default_wf_expected_exports = []
         raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
         default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
-
         default_export_instructions = (editing_workflow.get("export_instructions", "") or "") if editing_workflow else ""
+
+        default_wf_task_ids = normalize_graph(
+            raw_task_ids,
+            expected_exports=default_wf_expected_exports,
+            export_instructions=default_export_instructions,
+            materialize_export=True,
+        )
 
         if "last_editing_workflow_id" not in st.session_state or st.session_state.last_editing_workflow_id != current_editing_wf_id:
             st.session_state.last_editing_workflow_id = current_editing_wf_id
@@ -2912,7 +2916,22 @@ def render_workflow_assembler():
             st.session_state.wf_human_check = default_wf_human_check
             st.session_state.wf_expected_exports = default_wf_expected_exports
             st.session_state.wf_export_instructions = default_export_instructions
-            st.session_state.wf_selected_task_ids = default_wf_task_ids
+            # Rebuild canvas structure (Level columns + stacked cards) for this draft
+            try:
+                from core.workflow_canvas import hydrate_graph_for_canvas
+                _task_map = {t["id"]: t for t in tasks}
+                st.session_state.wf_selected_task_ids = hydrate_graph_for_canvas(
+                    default_wf_task_ids, task_id_map=_task_map, force_layout=True
+                )
+            except Exception:
+                st.session_state.wf_selected_task_ids = default_wf_task_ids
+            for k in (
+                "wf_flow_state",
+                "wf_loop_select_mode",
+                "wf_loop_select_ids",
+                "canvas_selected_node",
+            ):
+                st.session_state.pop(k, None)
             for k in list(st.session_state.keys()):
                 if k.startswith("wf_check_"):
                     del st.session_state[k]
@@ -2920,6 +2939,12 @@ def render_workflow_assembler():
         # Failsafe check
         if "wf_selected_task_ids" not in st.session_state:
             st.session_state.wf_selected_task_ids = default_wf_task_ids
+        else:
+            # Keep draft typed / repaired across reruns
+            st.session_state.wf_selected_task_ids = normalize_graph(
+                st.session_state.wf_selected_task_ids,
+                materialize_export=False,
+            )
 
         def remove_wf_task(task_id):
             if task_id in st.session_state.wf_selected_task_ids:
@@ -2977,297 +3002,526 @@ def render_workflow_assembler():
 
         
             st.markdown("---")
-            st.markdown("**📋 Add Workflow Blocks**")
-        
-            default_block_type_idx = 0
-            default_b_size = 5
-            default_b_source = "{previous_result}"
-            default_inner_tasks = []
+            editor_mode = st.radio(
+                "Editor mode",
+                ["Canvas (drag & drop)", "Lanes (classic)"],
+                horizontal=True,
+                key="wf_editor_mode",
+                help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
+            )
 
-            all_task_options = {}
-            if tasks:
-                all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
-                for step in st.session_state.wf_selected_task_ids:
-                    if isinstance(step, dict) and step.get("type") == "batch_loop":
-                        default_block_type_idx = 1
-                        default_b_size = int(step.get("batch_size", 5))
-                        default_b_source = step.get("source_variable", "{previous_result}")
-                        for tid in step.get("task_ids", []):
-                            for k, v in all_task_options.items():
-                                if v == tid:
-                                    default_inner_tasks.append(k)
-                                    break
-                        break
-
-            block_type = st.radio("Block Type to Add", ["Single Task", "Batch Loop"], index=default_block_type_idx, horizontal=True)
-
-            if block_type == "Single Task":
-                if not agents:
-                    st.info("No agents available.")
+            if editor_mode.startswith("Canvas"):
+                canvas_ok = False
+                try:
+                    from ui.workflow_canvas_panel import render_canvas_palette_and_board
+                    render_canvas_palette_and_board(
+                        db=db,
+                        tasks=tasks,
+                        agents=agents,
+                        available_exports=available_exports,
+                        sanitize_input=sanitize_input,
+                    )
+                    canvas_ok = True
+                except Exception as canvas_err:
+                    import traceback
+                    st.error(f"Canvas editor error: {canvas_err}")
+                    st.code(traceback.format_exc(), language="text")
+                    st.info("Falling back to Lanes mode below. If this is an import error, run: pip install streamlit-flow-component")
+                st.markdown("---")
+                if canvas_ok:
+                    synced_exports, synced_instr = sync_header_from_export_nodes(
+                        st.session_state.wf_selected_task_ids,
+                        st.session_state.get("wf_expected_exports") or parsed_exports,
+                        export_instructions or "",
+                    )
+                    if synced_exports and set(synced_exports) != set(parsed_exports or []):
+                        st.info(
+                            f"Export blocks declare: {', '.join(synced_exports)}. "
+                            "On save these sync into Expected File Outputs."
+                        )
+                    st.session_state["_wf_skip_lanes"] = True
                 else:
-                    agent_options = {f"{a['name']} - {a['role']}": a['id'] for a in agents}
-                    sel_agent_str = st.selectbox("Select Agent", list(agent_options.keys()), key="wf_single_agent")
-                    agent_id = agent_options[sel_agent_str]
-                    agent_tasks = tasks_by_agent.get(agent_id, [])
-                    if agent_tasks:
-                        task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
-                        sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
-                        if st.button("➕ Add Single Task"):
-                            import uuid
-                            new_node = {
-                                "id": f"node_{uuid.uuid4().hex[:8]}",
-                                "task_id": task_options[sel_task_str],
-                                "depends_on": [],
-                                "execution_level": 1,
-                                "model_tier": "default",
-                            }
-                            st.session_state.wf_selected_task_ids.append(new_node)
-                            st.rerun()
-                    else:
-                        st.info("No tasks assigned to this agent.")
+                    st.session_state["_wf_skip_lanes"] = False
+            else:
+                st.session_state["_wf_skip_lanes"] = False
 
-            elif block_type == "Batch Loop":
-                with st.container(border=True):
-                    st.markdown("**Batch Loop Properties**")
-                    b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=default_b_size)
-                    b_source = st.text_input("Source Variable", value=default_b_source, help="The variable or output holding the JSON array to iterate over.")
-                
-                    st.markdown("**Select inner loop tasks (in order):**")
-                    if tasks:
-                        valid_defaults = [x for x in default_inner_tasks if x in all_task_options]
-                        sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()), default=valid_defaults)
-                        if st.button("➕ Add Batch Loop"):
-                            inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
-                            if inner_ids:
-                                import uuid
-                                new_block = {
-                                    "id": f"node_{uuid.uuid4().hex[:8]}",
-                                    "type": "batch_loop",
-                                    "task_ids": inner_ids,
-                                    "batch_size": b_size,
-                                    "source_variable": b_source,
+            if not st.session_state.get("_wf_skip_lanes"):
+                st.markdown("**Add workflow blocks** (function-block schema)")
+                st.caption(
+                    "Primary block = Task (agent is the face). Also: Input, Batch, HITL gate, Export. "
+                    "Wire data ports below each card; control deps via Depends On."
+                )
+
+                default_block_type_idx = 0
+                default_b_size = 5
+                default_b_source = "{previous_result}"
+                default_inner_tasks = []
+
+                all_task_options = {}
+                if tasks:
+                    all_task_options = {f"{t.get('name') or 'Task #'+str(t['id'])} ({agent_id_map.get(t.get('agent_id'), {}).get('name', 'Unknown')}): {t['description'][:50]}": t['id'] for t in tasks}
+                    for step in st.session_state.wf_selected_task_ids:
+                        if isinstance(step, dict) and step.get("type") == NODE_TYPE_BATCH:
+                            default_block_type_idx = 1
+                            default_b_size = int(step.get("batch_size", 5))
+                            default_b_source = step.get("source_variable", "{previous_result}")
+                            for tid in step.get("task_ids", []):
+                                for k, v in all_task_options.items():
+                                    if v == tid:
+                                        default_inner_tasks.append(k)
+                                        break
+                            break
+
+                block_type = st.radio(
+                    "Block Type to Add",
+                    ["Task", "Batch Loop", "HITL", "Export", "Input"],
+                    index=min(default_block_type_idx, 4),
+                    horizontal=True,
+                )
+
+                if block_type == "Task":
+                    if not agents:
+                        st.info("No agents available.")
+                    else:
+                        agent_options = {f"{a['name']} - {a['role']}": a['id'] for a in agents}
+                        sel_agent_str = st.selectbox("Select Agent", list(agent_options.keys()), key="wf_single_agent")
+                        agent_id = agent_options[sel_agent_str]
+                        agent_tasks = tasks_by_agent.get(agent_id, [])
+                        if agent_tasks:
+                            task_options = {f"{t.get('name') or 'Task #'+str(t['id'])}: {t['description'][:50]}": t['id'] for t in agent_tasks}
+                            sel_task_str = st.selectbox("Select Task", list(task_options.keys()), key="wf_single_task")
+                            if st.button("Add Task block"):
+                                new_node = {
+                                    "id": new_node_id(),
+                                    "type": NODE_TYPE_TASK,
+                                    "task_id": task_options[sel_task_str],
                                     "depends_on": [],
                                     "execution_level": 1,
                                     "model_tier": "default",
+                                    "inputs_map": {},
                                 }
-                                st.session_state.wf_selected_task_ids.append(new_block)
+                                st.session_state.wf_selected_task_ids.append(new_node)
                                 st.rerun()
-                            else:
-                                st.error("Select at least one inner task.")
-                    else:
-                        st.info("No tasks available.")
+                        else:
+                            st.info("No tasks assigned to this agent.")
 
-            # --- Ordered Task Preview ---
-            st.markdown("---")
-            st.markdown("**⚙️ Workflow Nodes (DAG Order)**")
-            st.markdown("Nodes execute in parallel when dependencies allow. Reorder nodes to change dependency constraints.")
-        
-            if not st.session_state.wf_selected_task_ids:
-                st.info("No tasks selected yet.")
-            else:
-                def rem_step(idx):
-                    removed_id = st.session_state.wf_selected_task_ids[idx]["id"]
-                    st.session_state.wf_selected_task_ids.pop(idx)
-                    # Cleanup dependencies pointing to removed node
-                    for step in st.session_state.wf_selected_task_ids:
-                        if removed_id in step.get("depends_on", []):
-                            step["depends_on"].remove(removed_id)
-
-                def get_node_label(step):
-                    is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                    is_seq = isinstance(step, dict) and step.get("type") == "sequential"
-                    if is_batch:
-                        return f"🔄 Batch Loop ({step['id']})"
-                    if is_seq:
-                        return f"▶️ Sequential ({step['id']})"
-                    
-                    task_id = step if isinstance(step, int) else step.get("task_id", -1)
-                    task = task_id_map.get(int(task_id))
-                    t_name = task.get('name') or f"Task #{task_id}" if task else "Unknown"
-                    step_id_str = step['id'] if isinstance(step, dict) else str(step)
-                    return f"{t_name} ({step_id_str})"
-
-                levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
-                if not levels:
-                    levels = [1]
-                
-                st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
-                st.markdown("""
-                <style>
-                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
-                    flex-wrap: nowrap !important;
-                    overflow-x: auto !important;
-                    padding-bottom: 10px !important;
-                }
-                div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
-                    min-width: 350px !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-            
-                level_columns = st.columns(len(levels))
-            
-                for lvl_idx, lvl in enumerate(levels):
-                    with level_columns[lvl_idx]:
-                        st.markdown(f"### 📍 Livello {lvl}")
-                    
-                        for i, step in enumerate(st.session_state.wf_selected_task_ids):
-                            if step.get("execution_level", 1) != lvl:
-                                continue
-                            
-                            with st.container(border=True):
-                                col_main = st.container()
-                            
-                                is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
-                                is_seq = isinstance(step, dict) and step.get("type") == "sequential"
-                                
-                                if not is_batch and not is_seq:
-                                    task_id = step if isinstance(step, int) else step.get("task_id")
-                                    if task_id is not None:
-                                        task = task_id_map.get(int(task_id))
-                                    else:
-                                        task = None
-                                    if task:
-                                        agent = agent_id_map.get(task['agent_id'])
-                                        a_name = agent['name'] if agent else "Unknown Agent"
-                                        t_name = task.get('name') or f"Task #{task['id']}"
-                                        tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
-                                        col_main.markdown(f"🚀 **{t_name}** {tooltip_html} (👤 {a_name})<br><sub>{task['description'][:100]}...</sub>", unsafe_allow_html=True)
-                                    else:
-                                        col_main.markdown(f"❌ Unknown Task ID: {task_id}")
+                elif block_type == "Batch Loop":
+                    with st.container(border=True):
+                        st.markdown("**Batch Loop Properties**")
+                        b_size = st.number_input("Batch Size (items per chunk)", min_value=1, value=default_b_size)
+                        b_source = st.text_input("Source Variable", value=default_b_source, help="The variable or output holding the JSON array to iterate over.")
+                        st.markdown("**Select inner loop tasks (in order):**")
+                        if tasks:
+                            valid_defaults = [x for x in default_inner_tasks if x in all_task_options]
+                            sel_inner_tasks_str = st.multiselect("Inner Tasks", list(all_task_options.keys()), default=valid_defaults)
+                            if st.button("Add Batch Loop"):
+                                inner_ids = [all_task_options[s] for s in sel_inner_tasks_str]
+                                if inner_ids:
+                                    new_block = {
+                                        "id": new_node_id(),
+                                        "type": NODE_TYPE_BATCH,
+                                        "task_ids": inner_ids,
+                                        "batch_size": b_size,
+                                        "source_variable": b_source,
+                                        "depends_on": [],
+                                        "execution_level": 1,
+                                        "model_tier": "default",
+                                        "inputs_map": {},
+                                    }
+                                    st.session_state.wf_selected_task_ids.append(new_block)
+                                    st.rerun()
                                 else:
-                                    inner_ids = step.get("task_ids", [])
-                                    tooltip_html = f"<span title='Node ID: {step['id']}' style='cursor:help;'>ℹ️</span>"
-                                    
-                                    if is_batch:
+                                    st.error("Select at least one inner task.")
+                        else:
+                            st.info("No tasks available.")
+
+                elif block_type == "HITL":
+                    hitl_msg = st.text_input(
+                        "HITL message",
+                        value="Please review and approve before continuing.",
+                        key="wf_hitl_msg",
+                    )
+                    if st.button("Add HITL gate"):
+                        st.session_state.wf_selected_task_ids.append({
+                            "id": new_node_id("hitl"),
+                            "type": NODE_TYPE_HITL,
+                            "depends_on": [],
+                            "execution_level": 1,
+                            "model_tier": "default",
+                            "inputs_map": {},
+                            "message": hitl_msg,
+                            "gate_mode": "after_parents",
+                        })
+                        st.rerun()
+
+                elif block_type == "Export":
+                    ex_opts = st.multiselect(
+                        "Export formats",
+                        options=available_exports,
+                        default=[],
+                        key="wf_add_export_formats",
+                    )
+                    ex_instr = st.text_area("Export instructions", key="wf_add_export_instr", height=80)
+                    if st.button("Add Export block"):
+                        st.session_state.wf_selected_task_ids.append({
+                            "id": new_node_id("export"),
+                            "type": NODE_TYPE_EXPORT,
+                            "depends_on": [],
+                            "execution_level": 1,
+                            "model_tier": "default",
+                            "inputs_map": {},
+                            "exports": ex_opts,
+                            "export_instructions": ex_instr or "",
+                        })
+                        st.rerun()
+
+                elif block_type == "Input":
+                    in_keys = st.text_input(
+                        "Declared input keys (comma-separated)",
+                        value="user_input",
+                        key="wf_add_input_keys",
+                        help="Logical ports available as from=input in data wiring.",
+                    )
+                    if st.button("Add Input block"):
+                        keys = [k.strip() for k in (in_keys or "").split(",") if k.strip()]
+                        st.session_state.wf_selected_task_ids.append({
+                            "id": new_node_id("input"),
+                            "type": NODE_TYPE_INPUT,
+                            "depends_on": [],
+                            "execution_level": 1,
+                            "model_tier": "default",
+                            "inputs_map": {},
+                            "keys": keys or ["user_input"],
+                        })
+                        st.rerun()
+
+                st.markdown("---")
+                st.markdown("**Schema (by execution level)**")
+                st.markdown("Nodes run in parallel when dependencies allow. Use Data wiring for named ports.")
+
+                if not st.session_state.wf_selected_task_ids:
+                    st.info("No blocks yet. Add a Task, Batch, HITL, Export, or Input block above.")
+                else:
+                    def rem_step(idx):
+                        removed_id = st.session_state.wf_selected_task_ids[idx]["id"]
+                        st.session_state.wf_selected_task_ids = remove_node(
+                            st.session_state.wf_selected_task_ids, removed_id
+                        )
+
+                    def get_node_label(step):
+                        if not isinstance(step, dict):
+                            return str(step)
+                        ntype = step.get("type", NODE_TYPE_TASK)
+                        if ntype == NODE_TYPE_BATCH:
+                            return f"Batch ({step.get('id')})"
+                        if ntype == NODE_TYPE_HITL:
+                            return f"HITL ({step.get('id')})"
+                        if ntype == NODE_TYPE_EXPORT:
+                            return f"Export ({step.get('id')})"
+                        if ntype == NODE_TYPE_INPUT:
+                            return f"Input ({step.get('id')})"
+                        task_id = step.get("task_id")
+                        task = task_id_map.get(int(task_id)) if task_id is not None else None
+                        t_name = (task.get('name') or f"Task #{task_id}") if task else "Unknown"
+                        return f"{t_name} ({step.get('id')})"
+
+                    levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
+                    if not levels:
+                        levels = [1]
+
+                    st.markdown("<div class='workflow-level-marker'></div>", unsafe_allow_html=True)
+                    st.markdown("""
+                    <style>
+                    div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] {
+                        flex-wrap: nowrap !important;
+                        overflow-x: auto !important;
+                        padding-bottom: 10px !important;
+                    }
+                    div[data-testid="stElementContainer"]:has(.workflow-level-marker) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                        min-width: 350px !important;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+
+                    level_columns = st.columns(len(levels))
+
+                    for lvl_idx, lvl in enumerate(levels):
+                        with level_columns[lvl_idx]:
+                            st.markdown(f"### Level {lvl}")
+
+                            for i, step in enumerate(st.session_state.wf_selected_task_ids):
+                                if step.get("execution_level", 1) != lvl:
+                                    continue
+
+                                with st.container(border=True):
+                                    col_main = st.container()
+                                    ntype = step.get("type", NODE_TYPE_TASK)
+                                    is_batch = ntype == NODE_TYPE_BATCH
+                                    is_hitl = ntype == NODE_TYPE_HITL
+                                    is_export = ntype == NODE_TYPE_EXPORT
+                                    is_input = ntype == NODE_TYPE_INPUT
+
+                                    if ntype == NODE_TYPE_TASK:
+                                        task_id = step.get("task_id")
+                                        task = task_id_map.get(int(task_id)) if task_id is not None else None
+                                        if task:
+                                            agent = agent_id_map.get(task['agent_id'])
+                                            a_name = agent['name'] if agent else "Unknown Agent"
+                                            t_name = task.get('name') or f"Task #{task['id']}"
+                                            av_col, tx_col = col_main.columns([1, 5])
+                                            with av_col:
+                                                if agent:
+                                                    st.image(get_agent_avatar_url(agent), width=56)
+                                            with tx_col:
+                                                st.markdown(
+                                                    f"**TASK** {t_name} (`{step['id']}`)<br>"
+                                                    f"<sub>Agent: {a_name}</sub><br>"
+                                                    f"<sub>{(task.get('description') or '')[:100]}...</sub>",
+                                                    unsafe_allow_html=True,
+                                                )
+                                                if task.get("human_validation"):
+                                                    st.caption("Task flag: human_validation")
+                                        else:
+                                            col_main.markdown(f"Unknown Task ID: {task_id}")
+                                    elif is_batch:
                                         b_size = step.get("batch_size", 1)
-                                        col_main.markdown(f"🔄 **Batch Loop** {tooltip_html}<br><sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>", unsafe_allow_html=True)
-                                    else:
-                                        col_main.markdown(f"▶️ **Sequential Tasks** {tooltip_html}", unsafe_allow_html=True)
-                                        
-                                    for inner_id in inner_ids:
-                                        if inner_id is not None:
-                                            itask = task_id_map.get(int(inner_id))
-                                        else:
-                                            itask = None
-                                        if itask:
-                                            iagent = agent_id_map.get(itask['agent_id'])
-                                            i_aname = iagent['name'] if iagent else "Unknown Agent"
-                                            i_tname = itask.get('name') or f"Task #{itask['id']}"
-                                            tooltip_inner = f"<span title='Inner Task ID: {inner_id}' style='cursor:help;'>ℹ️</span>"
-                                            i_col_indent, i_col_card = col_main.columns([0.5, 7.5])
-                                            with i_col_card:
-                                                with st.container(border=True):
-                                                    i_col_avatar, i_col_text = st.columns([1, 8])
-                                                    with i_col_avatar:
-                                                        if iagent:
-                                                            st.image(get_agent_avatar_url(iagent), width=70)
-                                                        else:
-                                                            st.markdown("<h4 style='margin:0'>❓</h4>", unsafe_allow_html=True)
-                                                    with i_col_text:
-                                                        st.markdown(f"🚀 **{i_tname}** {tooltip_inner}<br><sub>{itask.get('description', '')[:100]}...</sub>", unsafe_allow_html=True)
-                                        else:
-                                            col_main.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;↳ ❌ Unknown Task ID: {inner_id}")
-                            
-                                # Execution Level Selection
-                                step["execution_level"] = col_main.number_input("Level (Parallelism)", min_value=1, value=lvl, key=f"lvl_{step['id']}")
+                                        col_main.markdown(
+                                            f"**BATCH** (`{step['id']}`)<br>"
+                                            f"<sub>Size: {b_size}, Source: `{step.get('source_variable')}`</sub>",
+                                            unsafe_allow_html=True,
+                                        )
+                                        for inner_id in step.get("task_ids", []):
+                                            itask = task_id_map.get(int(inner_id)) if inner_id is not None else None
+                                            if itask:
+                                                iagent = agent_id_map.get(itask['agent_id'])
+                                                i_tname = itask.get('name') or f"Task #{itask['id']}"
+                                                i_aname = iagent['name'] if iagent else "?"
+                                                col_main.markdown(f"&nbsp;&nbsp;-> {i_tname} ({i_aname})", unsafe_allow_html=True)
+                                    elif is_hitl:
+                                        col_main.markdown(f"**HITL gate** `{step['id']}`")
+                                        step["message"] = col_main.text_input(
+                                            "Message",
+                                            value=step.get("message") or "",
+                                            key=f"hitl_msg_{step['id']}",
+                                        )
+                                    elif is_export:
+                                        col_main.markdown(f"**EXPORT** `{step['id']}`")
+                                        cur_ex = [x for x in (step.get("exports") or []) if x in available_exports]
+                                        step["exports"] = col_main.multiselect(
+                                            "Formats",
+                                            options=available_exports,
+                                            default=cur_ex,
+                                            key=f"ex_fmt_{step['id']}",
+                                        )
+                                        step["export_instructions"] = col_main.text_area(
+                                            "Instructions",
+                                            value=step.get("export_instructions") or "",
+                                            key=f"ex_instr_{step['id']}",
+                                            height=70,
+                                        )
+                                    elif is_input:
+                                        col_main.markdown(f"**INPUT** `{step['id']}`")
+                                        keys_str = ", ".join(step.get("keys") or [])
+                                        new_keys = col_main.text_input(
+                                            "Keys",
+                                            value=keys_str,
+                                            key=f"in_keys_{step['id']}",
+                                        )
+                                        step["keys"] = [k.strip() for k in new_keys.split(",") if k.strip()]
 
-                                # Model tier for worker agents (Master AI remains the sole orchestrator)
-                                tier_opts = ["default", "simple"]
-                                cur_tier = step.get("model_tier", "default")
-                                if cur_tier not in tier_opts:
-                                    cur_tier = "default"
-                                step["model_tier"] = col_main.selectbox(
-                                    "Model Tier",
-                                    options=tier_opts,
-                                    index=tier_opts.index(cur_tier),
-                                    key=f"tier_{step['id']}",
-                                    help="All DAG agents are workers. simple uses SIMPLE_AGENT_MODEL_ID / DEFAULT_AGENT_MODEL_ID.",
-                                )
-                                # Drop legacy per-node supervisor role if present
-                                step.pop("role", None)
-                            
-                                # Dependency Selection
-                                possible_deps = {get_node_label(prev_step): prev_step["id"] for prev_step in st.session_state.wf_selected_task_ids if prev_step["id"] != step["id"]}
-                                current_deps = step.get("depends_on", [])
-                                valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
-                            
-                                selected_labels = col_main.multiselect("Depends On:", options=list(possible_deps.keys()), default=valid_default_deps, key=f"deps_{step['id']}", placeholder="No dependencies (Default)")
-                                step["depends_on"] = [possible_deps[label] for label in selected_labels]
+                                    step["execution_level"] = col_main.number_input(
+                                        "Level (Parallelism)", min_value=1, value=int(lvl), key=f"lvl_{step['id']}"
+                                    )
 
-                                # Actions
-                                c_up, c_down, c_rem = col_main.columns(3)
-                                c_up.button("🔼", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,))
-                                c_down.button("🔽", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,))
-                                c_rem.button("✖️", key=f"wf_rem_{i}", on_click=rem_step, args=(i,))
+                                    if ntype in (NODE_TYPE_TASK, NODE_TYPE_BATCH):
+                                        tier_opts = ["default", "simple"]
+                                        cur_tier = step.get("model_tier", "default")
+                                        if cur_tier not in tier_opts:
+                                            cur_tier = "default"
+                                        step["model_tier"] = col_main.selectbox(
+                                            "Model Tier",
+                                            options=tier_opts,
+                                            index=tier_opts.index(cur_tier),
+                                            key=f"tier_{step['id']}",
+                                            help="All DAG agents are workers.",
+                                        )
+                                    step.pop("role", None)
+
+                                    possible_deps = {
+                                        get_node_label(prev_step): prev_step["id"]
+                                        for prev_step in st.session_state.wf_selected_task_ids
+                                        if prev_step["id"] != step["id"]
+                                    }
+                                    current_deps = step.get("depends_on", [])
+                                    valid_default_deps = [label for label, n_id in possible_deps.items() if n_id in current_deps]
+
+                                    selected_labels = col_main.multiselect(
+                                        "Depends On (control):",
+                                        options=list(possible_deps.keys()),
+                                        default=valid_default_deps,
+                                        key=f"deps_{step['id']}",
+                                        placeholder="No dependencies",
+                                    )
+                                    step["depends_on"] = [possible_deps[label] for label in selected_labels]
+
+                                    if ntype in (NODE_TYPE_TASK, NODE_TYPE_BATCH):
+                                        with col_main.expander("Data wiring", expanded=False):
+                                            imap = dict(step.get("inputs_map") or {})
+                                            source_opts = {"(run input)": "input"}
+                                            source_opts.update({
+                                                get_node_label(p): p["id"]
+                                                for p in st.session_state.wf_selected_task_ids
+                                                if p["id"] != step["id"]
+                                            })
+                                            port_name = st.text_input(
+                                                "Port name (placeholder in task text)",
+                                                key=f"wire_port_{step['id']}",
+                                                placeholder="e.g. brief",
+                                            )
+                                            src_label = st.selectbox(
+                                                "From",
+                                                options=list(source_opts.keys()),
+                                                key=f"wire_from_{step['id']}",
+                                            )
+                                            key_field = st.text_input(
+                                                "Key / field (optional)",
+                                                key=f"wire_key_{step['id']}",
+                                                placeholder="JSON field or empty for full output",
+                                            )
+                                            if st.button("Set wire", key=f"wire_set_{step['id']}"):
+                                                if port_name.strip():
+                                                    src_id = source_opts[src_label]
+                                                    imap[port_name.strip()] = {
+                                                        "from": src_id,
+                                                        "key": key_field.strip(),
+                                                    }
+                                                    if src_id != "input" and src_id not in step["depends_on"]:
+                                                        step["depends_on"] = list(step["depends_on"]) + [src_id]
+                                                    step["inputs_map"] = imap
+                                                    st.rerun()
+                                            if imap:
+                                                st.markdown("**Current wires:**")
+                                                for port, binding in list(imap.items()):
+                                                    bfrom = binding.get("from") if isinstance(binding, dict) else "?"
+                                                    bkey = (binding.get("key") if isinstance(binding, dict) else "") or "*"
+                                                    c1, c2 = st.columns([4, 1])
+                                                    c1.code(f"{{{port}}} <- {bfrom}.{bkey}")
+                                                    if c2.button("x", key=f"wire_del_{step['id']}_{port}"):
+                                                        imap.pop(port, None)
+                                                        step["inputs_map"] = imap
+                                                        st.rerun()
+                                            else:
+                                                st.caption("No wires — runtime uses {previous_result} from last parent.")
+
+                                    c_up, c_down, c_rem = col_main.columns(3)
+                                    c_up.button("Up", key=f"wf_up_{i}", on_click=move_wf_task_up, args=(i,))
+                                    c_down.button("Down", key=f"wf_down_{i}", on_click=move_wf_task_down, args=(i,))
+                                    c_rem.button("Remove", key=f"wf_rem_{i}", on_click=rem_step, args=(i,))
+
+                    st.markdown("**Dependency mini-map**")
+                    task_labels = {t["id"]: (t.get("name") or f"Task #{t['id']}") for t in tasks}
+                    try:
+                        dot = graph_to_dot(st.session_state.wf_selected_task_ids, task_labels=task_labels)
+                        st.graphviz_chart(dot)
+                    except Exception as viz_err:
+                        st.caption(f"Graphviz preview unavailable: {viz_err}")
+                        wires = []
+                        for n in st.session_state.wf_selected_task_ids:
+                            for d in n.get("depends_on") or []:
+                                wires.append(f"{d} -> {n.get('id')} (control)")
+                            for port, binding in (n.get("inputs_map") or {}).items():
+                                if isinstance(binding, dict):
+                                    wires.append(
+                                        f"{binding.get('from')}.{binding.get('key') or '*'} -> {n.get('id')}.{{{port}}}"
+                                    )
+                        if wires:
+                            st.code("\n".join(wires))
+                        else:
+                            st.caption("No edges yet.")
+
+                synced_exports, synced_instr = sync_header_from_export_nodes(
+                    st.session_state.wf_selected_task_ids,
+                    st.session_state.get("wf_expected_exports") or parsed_exports,
+                    export_instructions or "",
+                )
+                if synced_exports and set(synced_exports) != set(parsed_exports or []):
+                    st.info(
+                        f"Export blocks declare: {', '.join(synced_exports)}. "
+                        "On save these sync into Expected File Outputs for Master AI compatibility."
+                    )
+
             st.markdown("---")
+
+            def _persist_workflow_draft(name: str, workflow_id=None):
+                """Validate → canonicalize → sync export header → create/update."""
+                graph = canonicalize_graph(st.session_state.wf_selected_task_ids)
+                errors, warnings = validate_graph(graph, task_id_map=task_id_map)
+                for w in warnings:
+                    st.warning(w)
+                if errors:
+                    for e in errors:
+                        st.error(e)
+                    return False
+                exports, instr = sync_header_from_export_nodes(
+                    graph, parsed_exports, export_instructions or ""
+                )
+                if not exports:
+                    exports = list(parsed_exports or [])
+                if not instr:
+                    instr = export_instructions or ""
+                if workflow_id is not None:
+                    db.update_workflow(
+                        workflow_id, name, graph, requires_human_check, exports, instr
+                    )
+                else:
+                    db.create_workflow(
+                        name, graph, requires_human_check, exports, instr
+                    )
+                return True
+
+            def _clear_wf_edit_session():
+                st.session_state.editing_workflow_id = None
+                for key in (
+                    "last_editing_workflow_id",
+                    "wf_selected_task_ids",
+                    "wf_name_input",
+                    "wf_human_check",
+                    "wf_expected_exports",
+                    "wf_export_instructions",
+                    "wf_flow_state",
+                    "wf_loop_select_mode",
+                    "wf_loop_select_ids",
+                    "canvas_selected_node",
+                ):
+                    if key in st.session_state:
+                        del st.session_state[key]
+                for k in list(st.session_state.keys()):
+                    if k.startswith("wf_check_"):
+                        del st.session_state[k]
+
             if editing_workflow:
                 col_save, col_cancel = st.columns([1, 1])
                 with col_save:
-                    if st.button("💾 Update Workflow", type="primary", use_container_width=True):
+                    if st.button("Update Workflow", type="primary", use_container_width=True):
                         sane_workflow_name = sanitize_input(workflow_name)
-                        if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
-                            st.error("Workflow Name and at least one Task are required.")
-                        else:
-                            db.update_workflow(editing_workflow['id'], sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
+                        if not sane_workflow_name:
+                            st.error("Workflow Name is required.")
+                        elif _persist_workflow_draft(sane_workflow_name, editing_workflow["id"]):
                             st.success(f"Workflow '{sane_workflow_name}' updated successfully!")
-                            st.session_state.editing_workflow_id = None
-                            if 'last_editing_workflow_id' in st.session_state:
-                                del st.session_state.last_editing_workflow_id
-                            if 'wf_selected_task_ids' in st.session_state:
-                                del st.session_state.wf_selected_task_ids
-                            if 'wf_name_input' in st.session_state:
-                                del st.session_state.wf_name_input
-                            if 'wf_human_check' in st.session_state:
-                                del st.session_state.wf_human_check
-                            if 'wf_expected_exports' in st.session_state:
-                                del st.session_state.wf_expected_exports
-                            if 'wf_export_instructions' in st.session_state:
-                                del st.session_state.wf_export_instructions
-                            for k in list(st.session_state.keys()):
-                                if k.startswith("wf_check_"):
-                                    del st.session_state[k]
+                            _clear_wf_edit_session()
                             st.rerun()
                 with col_cancel:
-                    if st.button("❌ Cancel Edit", use_container_width=True):
-                        st.session_state.editing_workflow_id = None
-                        if 'last_editing_workflow_id' in st.session_state:
-                            del st.session_state.last_editing_workflow_id
-                        if 'wf_selected_task_ids' in st.session_state:
-                            del st.session_state.wf_selected_task_ids
-                        if 'wf_name_input' in st.session_state:
-                            del st.session_state.wf_name_input
-                        if 'wf_human_check' in st.session_state:
-                            del st.session_state.wf_human_check
-                        if 'wf_expected_exports' in st.session_state:
-                            del st.session_state.wf_expected_exports
-                        if 'wf_export_instructions' in st.session_state:
-                            del st.session_state.wf_export_instructions
-                        for k in list(st.session_state.keys()):
-                            if k.startswith("wf_check_"):
-                                del st.session_state[k]
+                    if st.button("Cancel Edit", use_container_width=True):
+                        _clear_wf_edit_session()
                         st.rerun()
             else:
-                if st.button("💾 Save Workflow", type="primary", use_container_width=True):
+                if st.button("Save Workflow", type="primary", use_container_width=True):
                     sane_workflow_name = sanitize_input(workflow_name)
-                    if not sane_workflow_name or not st.session_state.wf_selected_task_ids:
-                        st.error("Workflow Name and at least one Task are required.")
-                    else:
-                        db.create_workflow(sane_workflow_name, st.session_state.wf_selected_task_ids, requires_human_check, parsed_exports, export_instructions)
+                    if not sane_workflow_name:
+                        st.error("Workflow Name is required.")
+                    elif _persist_workflow_draft(sane_workflow_name, None):
                         st.success(f"Workflow '{sane_workflow_name}' created successfully!")
-                        if 'wf_selected_task_ids' in st.session_state:
-                            del st.session_state.wf_selected_task_ids
-                        if 'wf_name_input' in st.session_state:
-                            del st.session_state.wf_name_input
-                        if 'wf_human_check' in st.session_state:
-                            del st.session_state.wf_human_check
-                        if 'wf_expected_exports' in st.session_state:
-                            del st.session_state.wf_expected_exports
-                        if 'wf_export_instructions' in st.session_state:
-                            del st.session_state.wf_export_instructions
-                        for k in list(st.session_state.keys()):
-                            if k.startswith("wf_check_"):
-                                del st.session_state[k]
+                        _clear_wf_edit_session()
                         st.rerun()
 
         st.divider()
@@ -3324,9 +3578,25 @@ def render_workflow_assembler():
                                     continue
                                 
                                 with st.container(border=True):
+                                    ntype = step.get("type") if isinstance(step, dict) else None
                                     is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
                                     is_seq = isinstance(step, dict) and step.get("type") == "sequential"
-                                    if not is_batch and not is_seq:
+                                    is_hitl = ntype == "hitl"
+                                    is_export = ntype == "export"
+                                    is_input = ntype == "input"
+                                    if is_hitl:
+                                        st.markdown(f"**HITL** `{step.get('id')}` — {step.get('message') or 'gate'}")
+                                    elif is_export:
+                                        st.markdown(
+                                            f"**EXPORT** `{step.get('id')}` — "
+                                            f"{', '.join(step.get('exports') or []) or 'formats TBD'}"
+                                        )
+                                    elif is_input:
+                                        st.markdown(
+                                            f"**INPUT** `{step.get('id')}` — keys: "
+                                            f"{', '.join(step.get('keys') or []) or 'user_input'}"
+                                        )
+                                    elif not is_batch and not is_seq:
                                         task_id = step if isinstance(step, int) else step.get("task_id")
                                         if task_id is not None:
                                             task = task_id_map.get(int(task_id))
@@ -4512,9 +4782,9 @@ def main():
 
         ### ⚙️ How It Works
         1. **Define Team**: Register models and create agents with unique roles, backstories, and tools in **Agent Caserma**.
-        2. **Build Workflows**: Build individual tasks and link them sequentially in **Workflow Assembler**.
+        2. **Build Workflows**: Create tasks in Task Builder, then assemble a **function-block DAG** in **Workflow Assembler** (Task / Batch / HITL / Export / Input).
         3. **Dynamic Planning**: Send a request. **Master AI** analyzes your intent, selects the workflow, asks for required inputs, and configures the agents.
-        4. **Execute**: The crew runs the tasks step-by-step, feeding results from one task to the next.
+        4. **Execute**: The crew runs executable blocks (task/batch); HITL and Export desugar to validation gates and Master AI exports.
 
         ---
 
@@ -4528,7 +4798,8 @@ def main():
         - **`{variable_name}`**: Define custom parameters in the task's **Required Inputs**. Alfredo will prompt you for them before execution.
           *Tip: Identical variables across tasks are requested only once!*
         - **`{user_input}`**: Inserts your initial message that triggered the workflow.
-        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task.
+        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task (legacy / fallback).
+        - **Data wiring ports**: In the Assembler, map named ports on a block (`inputs_map`). Use `{port_name}` in the task text to inject wired values from a parent node or run input.
 
         ---
         ### 🛠️ Model & Tool Compatibility

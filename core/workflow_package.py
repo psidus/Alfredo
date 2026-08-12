@@ -147,28 +147,33 @@ def _slugify(text: str) -> str:
 
 
 def _task_ids_from_graph(task_ids: Any) -> List[int]:
-    """Collect numeric task IDs from legacy / DAG / batch_loop structures."""
-    out: List[int] = []
-    if not task_ids:
-        return out
-    for step in task_ids:
-        if isinstance(step, int):
-            out.append(step)
-        elif isinstance(step, dict):
-            if step.get("type") == "batch_loop":
-                for tid in step.get("task_ids") or []:
-                    if tid is not None:
-                        out.append(int(tid))
-            elif step.get("task_id") is not None:
-                out.append(int(step["task_id"]))
-    # unique preserve order
-    seen = set()
-    ordered = []
-    for tid in out:
-        if tid not in seen:
-            seen.add(tid)
-            ordered.append(tid)
-    return ordered
+    """Collect numeric task IDs from legacy / DAG / batch_loop / typed block structures."""
+    try:
+        from core.workflow_graph import collect_task_ids
+        return collect_task_ids(task_ids or [])
+    except Exception:
+        out: List[int] = []
+        if not task_ids:
+            return out
+        for step in task_ids:
+            if isinstance(step, int):
+                out.append(step)
+            elif isinstance(step, dict):
+                if step.get("type") in ("input", "hitl", "export"):
+                    continue
+                if step.get("type") == "batch_loop":
+                    for tid in step.get("task_ids") or []:
+                        if tid is not None:
+                            out.append(int(tid))
+                elif step.get("task_id") is not None:
+                    out.append(int(step["task_id"]))
+        seen = set()
+        ordered = []
+        for tid in out:
+            if tid not in seen:
+                seen.add(tid)
+                ordered.append(tid)
+        return ordered
 
 
 def package_checksum(package: Dict[str, Any]) -> str:

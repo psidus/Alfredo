@@ -13,6 +13,8 @@ vector embeddings, workspace files. Each coworker configures their own `.env`.
 
 Packages are sanitized on export and again on hub publish (`sanitize_package_for_share`).
 
+Graph shape for packages follows the function-block model (`input` / `task` / `batch_loop` / `hitl` / `export` + optional `inputs_map`). See [WORKFLOW_BLOCKS.md](WORKFLOW_BLOCKS.md).
+
 ## Modes (`HUB_MODE` in `.env`)
 
 | Value | Behavior |

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    :root { color-scheme: light; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: #f7f9fc;
+      color: #1a237e;
+      overflow: hidden;
+      user-select: none;
+    }
+    #wrap { position: relative; width: 100%; height: 100%; }
+    #hint {
+      position: absolute; left: 10px; top: 8px; z-index: 3;
+      font-size: 12px; background: rgba(255,255,255,0.9);
+      border: 1px solid #bbdefb; border-radius: 6px; padding: 6px 8px;
+      pointer-events: none;
+    }
+    canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="hint">
+      Drag to select · L→R = fully inside · R→L = also partial
+    </div>
+    <canvas id="c"></canvas>
+  </div>
+  <script>
+    function sendMessage(type, data) {
+      const msg = Object.assign({ isStreamlitMessage: true, type }, data);
+      window.parent.postMessage(msg, "*");
+    }
+    function setFrameHeight(h) {
+      sendMessage("streamlit:setFrameHeight", { height: h });
+    }
+    function setComponentValue(value) {
+      sendMessage("streamlit:setComponentValue", { value });
+    }
+    function onReady() {
+      sendMessage("streamlit:componentReady", { apiVersion: 1 });
+    }
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+    let nodes = [];
+    let scale = 1, ox = 20, oy = 40;
+    let dragging = false;
+    let sx = 0, sy = 0, cx = 0, cy = 0;
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 640;
+      const h = canvas.clientHeight || 360;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      fit();
+      draw();
+    }
+
+    function fit() {
+      if (!nodes.length) { scale = 1; ox = 20; oy = 40; return; }
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      nodes.forEach(n => {
+        minX = Math.min(minX, n.x);
+        minY = Math.min(minY, n.y);
+        maxX = Math.max(maxX, n.x + n.w);
+        maxY = Math.max(maxY, n.y + n.h);
+      });
+      const pad = 40;
+      const bw = Math.max(1, maxX - minX);
+      const bh = Math.max(1, maxY - minY);
+      const vw = canvas.clientWidth - pad * 2;
+      const vh = canvas.clientHeight - pad * 2 - 20;
+      scale = Math.min(vw / bw, vh / bh, 1.2);
+      ox = pad - minX * scale;
+      oy = pad + 20 - minY * scale;
+    }
+
+    function toWorld(mx, my) {
+      return { x: (mx - ox) / scale, y: (my - oy) / scale };
+    }
+
+    function draw() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#eef3fb";
+      ctx.fillRect(0, 0, w, h);
+
+      // grid
+      ctx.strokeStyle = "#dde5f2";
+      ctx.lineWidth = 1;
+      for (let x = ox % 40; x < w; x += 40) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      for (let y = oy % 40; y < h; y += 40) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      nodes.forEach(n => {
+        const x = ox + n.x * scale;
+        const y = oy + n.y * scale;
+        const ww = n.w * scale;
+        const hh = n.h * scale;
+        ctx.fillStyle = n.color || "#2196F3";
+        ctx.globalAlpha = 0.88;
+        ctx.fillRect(x, y, ww, hh);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "#0d47a1";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x, y, ww, hh);
+        ctx.fillStyle = "#fff";
+        ctx.font = "12px sans-serif";
+        ctx.fillText((n.label || n.id || "").slice(0, 28), x + 6, y + 16);
+      });
+
+      if (dragging) {
+        const x = Math.min(sx, cx), y = Math.min(sy, cy);
+        const ww = Math.abs(cx - sx), hh = Math.abs(cy - sy);
+        const ltr = cx >= sx;
+        ctx.fillStyle = ltr ? "rgba(33,150,243,0.15)" : "rgba(233,30,99,0.15)";
+        ctx.strokeStyle = ltr ? "#1976D2" : "#C2185B";
+        ctx.setLineDash(ltr ? [] : [6, 4]);
+        ctx.lineWidth = 2;
+        ctx.fillRect(x, y, ww, hh);
+        ctx.strokeRect(x, y, ww, hh);
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#333";
+        ctx.font = "11px sans-serif";
+        ctx.fillText(ltr ? "FULL (L→R)" : "PARTIAL (R→L)", x + 6, y - 6);
+      }
+    }
+
+    function hitTest(x1, y1, x2, y2) {
+      const left = Math.min(x1, x2), right = Math.max(x1, x2);
+      const top = Math.min(y1, y2), bottom = Math.max(y1, y2);
+      const full = x2 >= x1;
+      const ids = [];
+      nodes.forEach(n => {
+        const nr = n.x + n.w, nb = n.y + n.h;
+        if (full) {
+          if (n.x >= left && nr <= right && n.y >= top && nb <= bottom) ids.push(n.id);
+        } else {
+          const intersects = !(nr < left || n.x > right || nb < top || n.y > bottom);
+          if (intersects) ids.push(n.id);
+        }
+      });
+      return ids;
+    }
+
+    canvas.addEventListener("mousedown", (e) => {
+      const r = canvas.getBoundingClientRect();
+      sx = e.clientX - r.left; sy = e.clientY - r.top;
+      cx = sx; cy = sy; dragging = true; draw();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const r = canvas.getBoundingClientRect();
+      cx = e.clientX - r.left; cy = e.clientY - r.top; draw();
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (!dragging) return;
+      dragging = false;
+      const a = toWorld(sx, sy), b = toWorld(cx, cy);
+      const ids = hitTest(a.x, a.y, b.x, b.y);
+      setComponentValue({
+        ids,
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+        direction: (b.x >= a.x) ? "ltr" : "rtl",
+        ts: Date.now(),
+      });
+      draw();
+    });
+
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.type !== "streamlit:render") return;
+      nodes = (data.args && data.args.nodes) || [];
+      nodes = nodes.map(n => ({
+        id: String(n.id),
+        label: n.label || n.id,
+        x: Number(n.x) || 0,
+        y: Number(n.y) || 0,
+        w: Number(n.w || n.width) || 120,
+        h: Number(n.h || n.height) || 80,
+        color: n.color || "#2196F3",
+      }));
+      fit(); draw();
+    });
+
+    window.addEventListener("resize", resize);
+    onReady();
+    setFrameHeight(360);
+    resize();
+  </script>
+</body>
+</html>

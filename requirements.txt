@@ -1,4 +1,5 @@
 streamlit
+streamlit-flow-component>=1.6.1
 crewai>=0.120.0
 # Context compression — reduces token usage 60-95% via LiteLLM callback
 headroom-ai[all]

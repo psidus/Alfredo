@@ -286,6 +286,13 @@ def assemble_workflow_result(
     }
 
 
+# Typed handoff ports (function-block schema):
+# - Control deps: node.depends_on
+# - Data wires: node.inputs_map[port] = {"from": node_id|"input", "key": field}
+# - Out: ephemeral memory key task_<id> (+ optional output_pydantic fields)
+# See core.workflow_graph for normalize / validate / desugar.
+
+
 def serialize_run_result_payload(payload: Dict[str, Any]) -> str:
     """Store structured result as JSON string in workflow_runs.result when useful."""
     return json.dumps(payload, ensure_ascii=False, indent=2)

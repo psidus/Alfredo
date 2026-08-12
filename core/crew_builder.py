@@ -45,6 +45,12 @@ from core.workflow_contracts import (
     resolve_tool_profile,
     serialize_run_result_payload,
 )
+from core.workflow_graph import (
+    desugar_graph_for_runtime,
+    evaluate_loop_exit_condition,
+    normalize_graph,
+    resolve_inputs_map_values,
+)
 import tools.local_tools as local_tools
 import tools.terminal_executor as terminal_executor
 import tools.office_tool as office_tool
@@ -814,6 +820,35 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     start_idx = run.get('current_task_idx', 0)
     db.update_run(run_id, status='running', current_task_idx=start_idx, task_outputs=task_outputs)
 
+    # --- Function-block desugar (input/hitl/export → overlays; keep task/batch) ---
+    raw_exports = workflow_record.get("expected_exports") or []
+    if isinstance(raw_exports, str):
+        try:
+            raw_exports = json.loads(raw_exports)
+        except Exception:
+            raw_exports = [raw_exports] if raw_exports else []
+    prepared_graph = desugar_graph_for_runtime(
+        normalize_graph(
+            task_ids,
+            expected_exports=raw_exports,
+            export_instructions=workflow_record.get("export_instructions") or "",
+            materialize_export=False,
+        ),
+        workflow_expected_exports=raw_exports,
+        workflow_export_instructions=workflow_record.get("export_instructions") or "",
+    )
+    task_ids = prepared_graph["executable_steps"]
+    human_validation_task_ids = set(prepared_graph.get("human_validation_task_ids") or [])
+    desugared_exports = prepared_graph.get("expected_exports") or list(raw_exports or [])
+    desugared_export_instructions = prepared_graph.get("export_instructions") or (
+        workflow_record.get("export_instructions") or ""
+    )
+    if not task_ids:
+        raise ValueError(
+            f"Workflow ID {workflow_id} has no executable blocks after desugaring "
+            f"(skipped control nodes: {prepared_graph.get('skipped_nodes')})."
+        )
+
     # --- DAG NORMALIZATION ---
     dag_nodes = {}
     level_nodes = {}
@@ -821,10 +856,16 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         node_id = f"node_{i}"
         depends_on = []
         is_batch = False
+        is_loop = False
         task_id = None
         batch_tasks = []
         batch_size = 5
         source_variable = ""
+        body_steps = []
+        loop_mode = "for_each"
+        max_iterations = 10
+        exit_on_hitl = True
+        exit_condition: Dict[str, Any] = {}
         execution_level = 1
         
         if isinstance(step_def, int):
@@ -841,6 +882,15 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 batch_tasks = step_def.get("task_ids", [])
                 batch_size = step_def.get("batch_size", 5)
                 source_variable = step_def.get("source_variable", "")
+            elif step_def.get("type") == "loop" or step_def.get("is_structured_loop"):
+                is_loop = True
+                body_steps = list(step_def.get("body_steps") or [])
+                loop_mode = step_def.get("loop_mode") or "for_each"
+                source_variable = step_def.get("source_variable", "{previous_result}")
+                batch_size = step_def.get("batch_size", 5)
+                max_iterations = int(step_def.get("max_iterations") or 10)
+                exit_on_hitl = bool(step_def.get("exit_on_hitl", True))
+                exit_condition = step_def.get("exit_condition") if isinstance(step_def.get("exit_condition"), dict) else {}
             else:
                 task_id = step_def.get("task_id")
                 
@@ -852,14 +902,21 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             "step_def": step_def,
             "task_id": task_id,
             "is_batch": is_batch,
+            "is_loop": is_loop,
             "batch_tasks": batch_tasks,
             "batch_size": batch_size,
             "source_variable": source_variable,
+            "body_steps": body_steps,
+            "loop_mode": loop_mode,
+            "max_iterations": max_iterations,
+            "exit_on_hitl": exit_on_hitl,
+            "exit_condition": exit_condition,
             "depends_on": depends_on,
             "execution_level": execution_level,
             "original_index": i,
             "model_tier": resolve_model_tier(step_def) if isinstance(step_def, dict) else "default",
             "tool_profile": (step_def.get("tool_profile") if isinstance(step_def, dict) else None),
+            "inputs_map": (step_def.get("inputs_map") if isinstance(step_def, dict) else {}) or {},
         }
 
     for node_id, data in dag_nodes.items():
@@ -889,24 +946,26 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     completed_nodes = set()
     node_outputs = {}
     for n_id, data in dag_nodes.items():
-        if data["is_batch"]:
+        if data.get("is_batch") or data.get("is_loop"):
             if task_outputs.get(f"{n_id}_completed") == True:
                 completed_nodes.add(n_id)
                 node_outputs[n_id] = task_outputs.get(f"{n_id}_final_output", "")
         else:
-            if str(data["task_id"]) in task_outputs:
+            if data.get("task_id") is not None and str(data["task_id"]) in task_outputs:
                 completed_nodes.add(n_id)
                 node_outputs[n_id] = task_outputs[str(data["task_id"])]
 
     for n_id in completed_nodes:
         data = dag_nodes[n_id]
-        if data["is_batch"]:
+        if data.get("is_batch"):
             for b_tid in data["batch_tasks"]:
                 if str(b_tid) in task_outputs:
                     _auto_save_to_memory(memory_manager, b_tid, task_outputs[str(b_tid)], "Unknown")
+        elif data.get("is_loop"):
+            pass
         else:
-            tid = data["task_id"]
-            if str(tid) in task_outputs:
+            tid = data.get("task_id")
+            if tid is not None and str(tid) in task_outputs:
                 _auto_save_to_memory(memory_manager, tid, task_outputs[str(tid)], "Unknown")
                 
         for dep in dependents[n_id]:
@@ -971,6 +1030,19 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
         def apply_interpolation(text: str) -> str:
             if not text: return text
+            # Explicit function-block data wires (inputs_map) take precedence as named ports
+            wired = {}
+            if isinstance(step_def, dict):
+                snap = step_def.get("_node_outputs_snapshot")
+                if not isinstance(snap, dict):
+                    snap = node_outputs
+                wired = resolve_inputs_map_values(
+                    step_def.get("inputs_map") or {},
+                    node_outputs=snap,
+                    run_inputs=current_inputs,
+                )
+            for port, val in wired.items():
+                text = text.replace(f"{{{port}}}", str(val))
             for k, v in current_inputs.items():
                 text = text.replace(f"{{{k}}}", str(v))
             text = text.replace("{user_input}", current_inputs.get('user_input', ''))
@@ -1079,7 +1151,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             handoffs.append(handoff)
 
         t_rec = db.read_task(task_id)
-        if t_rec and chat_id and t_rec.get('human_validation'):
+        needs_hitl = bool(t_rec and t_rec.get('human_validation')) or (
+            task_id is not None and int(task_id) in human_validation_task_ids
+        )
+        if t_rec and chat_id and needs_hitl:
             from core.master_ai import MasterAI
             from core.human_in_the_loop import request_human_input
             master_ai = MasterAI()
@@ -1090,6 +1165,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             )
             user_feedback = request_human_input(chat_id, question, options=options, task_id=f"task_{task_id}")
             if user_feedback and user_feedback != "SYSTEM_ABORT":
+                with task_outputs_lock:
+                    if node_id:
+                        task_outputs[f"__hitl_ok__{node_id}"] = True
                 task_out = master_ai.process_validation_feedback(task_out, user_feedback)
                 _auto_save_to_memory(memory_manager, task_id, task_out, f"{agent_role} (Human Edited)")
                 handoff = enforce_node_handoff(
@@ -1148,10 +1226,19 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         data = dag_nodes[n_id]
         
         cost = 0.0
-        if data["is_batch"]:
+        if data.get("is_loop"):
+            body = data.get("body_steps") or []
+            costs = []
+            for bs in body:
+                if bs.get("type") == "batch_loop":
+                    costs.extend(get_task_vram_cost(tid) for tid in (bs.get("task_ids") or []))
+                elif bs.get("task_id") is not None:
+                    costs.append(get_task_vram_cost(bs["task_id"]))
+            cost = max(costs) if costs else 0.0
+        elif data["is_batch"]:
             cost = max([get_task_vram_cost(tid) for tid in data["batch_tasks"]], default=0.0)
         else:
-            cost = get_task_vram_cost(data["task_id"])
+            cost = get_task_vram_cost(data["task_id"]) if data.get("task_id") is not None else 0.0
             
         with vram_condition:
             while current_vram_usage + cost > MAX_VRAM_GB and (current_vram_usage > 0 or cost > MAX_VRAM_GB):
@@ -1162,10 +1249,98 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
         try:
             parent_output = ""
+            outputs_snapshot = {}
             if data["depends_on"]:
                 parent_id = data["depends_on"][-1]
                 with task_outputs_lock:
                     parent_output = node_outputs.get(parent_id, "")
+                    outputs_snapshot = dict(node_outputs)
+            else:
+                with task_outputs_lock:
+                    outputs_snapshot = dict(node_outputs)
+
+            # Attach snapshot for inputs_map resolution inside _execute_task_instance
+            step_def = data.get("step_def")
+            if isinstance(step_def, dict):
+                step_def = dict(step_def)
+                step_def["_node_outputs_snapshot"] = outputs_snapshot
+
+            def _run_body_once(iter_inputs, iter_parent):
+                last = iter_parent
+                local_snap = dict(outputs_snapshot)
+                hitl_ok: set = set()
+                for bi, bs in enumerate(data.get("body_steps") or []):
+                    if bs.get("type") == "batch_loop":
+                        continue  # nested batch inside structured loop: skip for now
+                    tid = bs.get("task_id")
+                    if tid is None:
+                        continue
+                    bdef = dict(bs)
+                    bdef["_node_outputs_snapshot"] = local_snap
+                    body_nid = bs.get("id") or f"{n_id}__body_{bi}"
+                    last = _execute_task_instance(
+                        tid,
+                        iter_inputs,
+                        f"Loop {n_id} body task {tid}...",
+                        task_idx=data["original_index"],
+                        parent_output=last,
+                        step_def=bdef,
+                        node_id=body_nid,
+                    )
+                    local_snap[body_nid] = last
+                    with task_outputs_lock:
+                        if task_outputs.get(f"__hitl_ok__{body_nid}"):
+                            hitl_ok.add(body_nid)
+                with task_outputs_lock:
+                    node_outputs.update(local_snap)
+                return last, hitl_ok, local_snap
+
+            if data.get("is_loop"):
+                mode = data.get("loop_mode") or "for_each"
+                if mode == "while":
+                    max_it = int(data.get("max_iterations") or 10)
+                    out = parent_output
+                    for it in range(max_it):
+                        logging.info(f"Structured while-loop {n_id} iteration {it+1}/{max_it}")
+                        out, hitl_ok, snap = _run_body_once(inputs, out)
+                        if evaluate_loop_exit_condition(
+                            exit_on_hitl=bool(data.get("exit_on_hitl", True)),
+                            exit_condition=data.get("exit_condition") or {},
+                            node_outputs=snap,
+                            hitl_approved_nodes=hitl_ok,
+                        ):
+                            logging.info(f"Structured while-loop {n_id} exit at iteration {it+1}")
+                            break
+                    node_outputs[n_id] = out
+                    with task_outputs_lock:
+                        completed_order.append(n_id)
+                    return out
+                # for_each: iterate JSON array like batch_loop
+                data_str = parent_output
+                try:
+                    json_match = re.search(r"\[.*\]", data_str, re.DOTALL)
+                    if json_match:
+                        items = json.loads(json_match.group(0))
+                    else:
+                        items = json.loads(data_str)
+                    if not isinstance(items, list):
+                        raise ValueError("not a list")
+                except Exception:
+                    items = [data_str]
+                outs = []
+                bsize = int(data.get("batch_size") or 5)
+                for i0 in range(0, len(items), bsize):
+                    chunk = items[i0 : i0 + bsize]
+                    binp = dict(inputs)
+                    binp["current_batch"] = json.dumps(chunk)
+                    outs.append(_run_body_once(binp, json.dumps(chunk))[0])
+                out = "\n\n".join(outs)
+                node_outputs[n_id] = out
+                with task_outputs_lock:
+                    completed_order.append(n_id)
+                    task_outputs[f"{n_id}_completed"] = True
+                    task_outputs[f"{n_id}_final_output"] = out
+                return out
                 
             if not data["is_batch"]:
                 log_msg = f"Executing Node {n_id} (Task {data['task_id']})..."
@@ -1175,7 +1350,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     log_msg,
                     task_idx=data["original_index"],
                     parent_output=parent_output,
-                    step_def=data.get("step_def"),
+                    step_def=step_def,
                     node_id=n_id,
                 )
                 node_outputs[n_id] = out
@@ -1334,9 +1509,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         dag_nodes, node_outputs, handoffs, completed_order=completed_order
     )
 
-    # Generate workflow-level exports when configured
+    # Generate workflow-level exports when configured (header and/or export blocks)
     export_paths = []
-    expected_exports = workflow_record.get("expected_exports") or []
+    expected_exports = list(desugared_exports or [])
     if isinstance(expected_exports, str):
         try:
             expected_exports = json.loads(expected_exports)
@@ -1352,7 +1527,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 expected_exports=expected_exports,
                 output_dir=export_dir,
                 global_context=global_context,
-                export_instructions=workflow_record.get("export_instructions"),
+                export_instructions=desugared_export_instructions or workflow_record.get("export_instructions"),
             )
             logging.info(f"Run {run_id}: generated {len(export_paths)} export file(s)")
         except Exception as export_err:
