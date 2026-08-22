@@ -53,6 +53,10 @@ provider_map:
     - qwen3-vl:8b
     - qwen3:14b
     provider: Ollama
+  LMSTUDIO_API_KEY:
+    models: []
+    embed_models: []
+    provider: LMStudio
   OPENAI_API_KEY:
     models:
     - gpt-4o

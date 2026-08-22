@@ -206,7 +206,10 @@ def _instantiate_llm(model_id, task_record=None):
     provider_mapping = {
         'google': 'gemini',
         'google_vertex': 'vertex_ai',
-        'mistralai': 'mistral'
+        'mistralai': 'mistral',
+        'bionic': 'lmstudio',
+        'lm_studio': 'lmstudio',
+        'lm studio': 'lmstudio',
     }
     provider = provider_mapping.get(provider, provider)
 
@@ -268,6 +271,29 @@ def _instantiate_llm(model_id, task_record=None):
         except Exception as e:
             logging.warning(f"Failed to instantiate LLM object for Ollama: {e}")
             return f"ollama/{model_name}"
+    elif provider == 'lmstudio':
+        from core.api_verifier import openai_compatible_v1_base
+        raw_base = (
+            os.getenv("LMSTUDIO_API_BASE")
+            or os.getenv("LM_STUDIO_API_BASE")
+            or "http://127.0.0.1:1234"
+        )
+        base_url = openai_compatible_v1_base(raw_base)
+        api_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("LM_STUDIO_API_KEY") or "lm-studio"
+        try:
+            from crewai import LLM
+            kwargs = {
+                "model": f"lm_studio/{model_name}",
+                "base_url": base_url,
+                "api_key": api_key,
+                "timeout": 180,
+            }
+            if max_output_tokens > 0:
+                kwargs["max_tokens"] = max_output_tokens
+            return LLM(**kwargs)
+        except Exception as e:
+            logging.warning(f"Failed to instantiate LLM object for LM Studio: {e}")
+            return f"lm_studio/{model_name}"
     else:
         # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
         model_string = f"{provider}/{model_name}"
@@ -405,8 +431,8 @@ def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
 def _build_agent(agent_id, specialization=None, model_id_override=None, task_record=None):
     """
     Constructs a CrewAI Agent object from database records.
-    Automatically disables tools for local models (Ollama/phi3, etc.)
-    that do not support the function-calling protocol.
+    Automatically disables tools only when the selected model is marked
+    as not supporting function-calling (`supports_tools` == False).
     If a 'specialization' string is provided, the agent's role and backstory
     are dynamically narrowed for that specific task without altering the DB record.
     """

@@ -515,7 +515,10 @@ class MasterAI:
                 # --- PROVIDER & MODEL NORMALIZATION ---
                 provider_mapping = {
                     'google': 'gemini',
-                    'mistralai': 'mistral'
+                    'mistralai': 'mistral',
+                    'bionic': 'lmstudio',
+                    'lm_studio': 'lmstudio',
+                    'lm studio': 'lmstudio',
                 }
                 self.model_provider = provider_mapping.get(self.model_provider, self.model_provider)
 
@@ -533,11 +536,12 @@ class MasterAI:
 
         # Securely retrieve API key via DataManager
         self.api_key = self.data_manager.load_api_key(f"{self.model_provider.upper()}_API_KEY")
-        if not self.api_key:
+
+        is_local_provider = self.model_provider in ['ollama', 'lmstudio', 'lm_studio', 'bionic', 'vllm', 'llama.cpp'] or getattr(self, 'is_local', False)
+
+        if not self.api_key and not is_local_provider:
             # Fallback to general GEMINI_API_KEY if specific one fails
             self.api_key = self.data_manager.load_api_key("GEMINI_API_KEY")
-            
-        is_local_provider = self.model_provider in ['ollama', 'lmstudio', 'vllm', 'llama.cpp'] or getattr(self, 'is_local', False)
 
         if not self.api_key and not is_local_provider:
             logger.error(f"API key for {self.model_provider} not found in DataManager. Check 'ui/dashboard.py' API Vault.")
@@ -570,7 +574,22 @@ class MasterAI:
             return self.model_name
         elif provider == "gemini" or provider == "google":
             return f"gemini/{self.model_name.split('/')[-1]}" if "/" in self.model_name else f"gemini/{self.model_name}"
+        elif provider in ("lmstudio", "lm_studio", "bionic"):
+            return f"lm_studio/{self.model_name}"
         return f"{provider}/{self.model_name}"
+
+    def _apply_local_runtime(self, call_kwargs: dict, model_string: str) -> None:
+        """Attach api_base / dummy key for Ollama and LM Studio local servers."""
+        prefix = model_string.split("/")[0] if "/" in model_string else ""
+        if prefix == "ollama":
+            base = os.environ.get("OLLAMA_API_BASE")
+            if base:
+                call_kwargs["api_base"] = base
+        elif prefix in ("lm_studio", "lmstudio"):
+            base = os.environ.get("LMSTUDIO_API_BASE") or os.environ.get("LM_STUDIO_API_BASE")
+            if base:
+                call_kwargs["api_base"] = base
+            call_kwargs["api_key"] = os.environ.get("LMSTUDIO_API_KEY") or "lm-studio"
 
     def _fetch_workflows_context(self):
         """
@@ -681,10 +700,8 @@ class MasterAI:
                     )
                     
                     provider_prefix = m.split('/')[0] if '/' in m else m
-                    if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
-                        api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
-                        if os.environ.get(api_base_env_var):
-                            call_kwargs["api_base"] = os.environ.get(api_base_env_var)
+                    if provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]:
+                        self._apply_local_runtime(call_kwargs, m)
                     if use_json_mode:
                         call_kwargs["response_format"] = {"type": "json_object"}
                     # Compress messages before sending to the LLM
@@ -1064,10 +1081,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         if hasattr(self, 'api_key') and self.api_key:
             call_kwargs["api_key"] = self.api_key
         provider_prefix = model_string.split('/')[0] if '/' in model_string else model_string
-        if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
-            api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
-            if os.environ.get(api_base_env_var):
-                call_kwargs["api_base"] = os.environ.get(api_base_env_var)
+        if provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]:
+            self._apply_local_runtime(call_kwargs, model_string)
                 
         import time
         RETRY_WAITS = [5, 10, 15]
@@ -1219,10 +1234,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             call_kwargs["api_key"] = self.api_key
 
         provider_prefix = model_string.split('/')[0] if '/' in model_string else model_string
-        if provider_prefix in ["ollama", "lmstudio", "vllm", "llama.cpp"]:
-            api_base_env_var = f"{provider_prefix.upper()}_API_BASE"
-            if os.environ.get(api_base_env_var):
-                call_kwargs["api_base"] = os.environ.get(api_base_env_var)
+        if provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]:
+            self._apply_local_runtime(call_kwargs, model_string)
                 
         import time
         RETRY_WAITS = [5, 10, 15]

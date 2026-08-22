@@ -67,6 +67,36 @@ def safe_set_key(env_path, key_to_set, value_to_set):
         
     os.environ[key_to_set] = str(value_to_set)
 
+
+def sync_fetched_local_models(db, provider, chat_models, detailed=None, env_var_name=""):
+    """Add fetched local runtime models to the registry without deleting existing ones."""
+    from core.api_verifier import estimate_supports_tools_from_model_id
+
+    existing = {
+        m["model_name"]
+        for m in db.read_all_models()
+        if (m.get("provider") or "").lower() == provider.lower()
+    }
+    size_map = {m["name"]: float(m.get("size_gb") or 0) for m in (detailed or [])}
+    added = 0
+    for name in chat_models or []:
+        if not name or name in existing:
+            continue
+        try:
+            db.create_model(
+                provider,
+                name,
+                env_var_name,
+                True,
+                vram_gb=size_map.get(name) or 0.0,
+                supports_tools=estimate_supports_tools_from_model_id(name, provider),
+            )
+            added += 1
+        except Exception:
+            continue
+    return added
+
+
 @st.cache_resource
 def get_db_manager():
     return DBManager()
@@ -991,6 +1021,7 @@ def render_api_vault():
         "ANTHROPIC_API_KEY", 
         "GEMINI_API_KEY",
         "OLLAMA_API_KEY",
+        "LMSTUDIO_API_KEY",
         "MISTRAL_API_KEY"
     ]
     
@@ -1002,8 +1033,8 @@ def render_api_vault():
     ])
     
     # Categorize keys dynamically
-    llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA", "MISTRAL"]
-    llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords) and k != "OLLAMA_API_BASE"]
+    llm_keywords = ["OPENAI", "GROQ", "ANTHROPIC", "GEMINI", "OLLAMA", "LMSTUDIO", "LM_STUDIO", "MISTRAL"]
+    llm_keys = [k for k in all_env_keys if any(kw in k for kw in llm_keywords) and k not in ("OLLAMA_API_BASE", "LMSTUDIO_API_BASE", "LM_STUDIO_API_BASE", "LMSTUDIO_MODELS_DIR")]
     
     connection_suffixes = ["_API_KEY", "_DB_URL", "_TOKEN", "_PASSWORD"]
     conn_keys = [k for k in all_env_keys if k not in llm_keys and any(k.endswith(s) for s in connection_suffixes)]
@@ -1017,7 +1048,10 @@ def render_api_vault():
         "ERP_API_KEY": "Password to connect to the external business management system (e.g. Biomass App).",
         "ERP_DB_URL": "Address to access the external app database (e.g. Biomass DB).",
         "MASTER_AI_MODEL_NAME": "The main AI brain Alfredo uses for everyday tasks.",
-        "OLLAMA_API_BASE": "The URL of the local or remote Ollama server (e.g. http://192.168.178.105:11434)."
+        "OLLAMA_API_BASE": "The URL of the local or remote Ollama server (e.g. http://192.168.178.105:11434).",
+        "LMSTUDIO_API_BASE": "The URL of the LM Studio / Bionic local server (e.g. http://127.0.0.1:1234).",
+        "LMSTUDIO_API_KEY": "Credential checked against the LM Studio server (dummy lm-studio is fine locally).",
+        "LMSTUDIO_MODELS_DIR": "This computer's GGUF folder (e.g. C:\\Users\\<you>\\.lmstudio\\models).",
     }
     
     tab_sys, tab_models = st.tabs(["System Setting", "Load Models"])
@@ -1181,7 +1215,11 @@ def render_api_vault():
         st.divider()
                 
         st.subheader("Load cloud models")
-        st.markdown("Add or update an API Key for cloud providers.")
+        st.markdown(
+            "Add or update an API Key for **cloud** providers (Gemini, OpenAI, …). "
+            "For **Ollama**, do not paste the URL here as a key — use **Configure Local Providers** below, "
+            "or paste `http://192.168.178.105:11434` and Alfredo will save it as Base URL with an empty key."
+        )
         form_col1, form_col2 = st.columns(2)
         with form_col1:
             selected_key = st.selectbox("Select Key", options=["Custom..."] + suggested_keys)
@@ -1192,10 +1230,34 @@ def render_api_vault():
         submitted_key = st.button("Save to .env", type="primary", key="save_cloud_model_btn")
         if submitted_key:
             final_key_name = custom_key.strip() if selected_key == "Custom..." else selected_key
-            if final_key_name and key_value:
+            if final_key_name:
                 final_key_name = final_key_name.upper().replace(' ', '_')
-                if "TELEGRAM" in final_key_name:
+                raw_value = (key_value or "").strip()
+                looks_like_url = raw_value.lower().startswith("http://") or raw_value.lower().startswith("https://")
+                # Local Ollama is reached by URL, not by a secret. Pasting the URL as "API key" is the usual mix-up.
+                if "OLLAMA" in final_key_name and looks_like_url:
+                    safe_set_key(env_path, "OLLAMA_API_BASE", raw_value.rstrip("/"))
+                    safe_set_key(env_path, "OLLAMA_API_KEY", "")
+                    from core.api_verifier import _fetch_ollama
+                    with st.spinner("Checking Ollama at that URL (no API key needed)..."):
+                        result = _fetch_ollama(api_key="", base_url_override=raw_value.rstrip("/"))
+                    if result.get("success"):
+                        added = sync_fetched_local_models(
+                            db, "Ollama", result.get("chat_models", []),
+                            result.get("chat_models_detailed", []), env_var_name="",
+                        )
+                        st.success(
+                            f"That value is the Ollama Base URL, not a key. Saved as OLLAMA_API_BASE. "
+                            f"Found {len(result.get('chat_models', []))} local models"
+                            + (f", {added} added to the registry." if added else ".")
+                        )
+                        st.rerun()
+                    else:
+                        st.error(f"Ollama URL check failed: {result.get('error')}")
+                elif "TELEGRAM" in final_key_name:
                     st.error("Telegram bot tokens must be managed in the Telegram Bot Config at the top right, not here.")
+                elif not raw_value:
+                    st.error("Please provide both a valid Key Name and a Value.")
                 else:
                     from core.api_verifier import verify_and_fetch_models
                     with st.spinner("Verifying API Key and fetching models..."):
@@ -1219,6 +1281,7 @@ def render_api_vault():
                             elif "ANTHROPIC" in final_key_name: prov_name = "Anthropic"
                             elif "GEMINI" in final_key_name or "GOOGLE" in final_key_name: prov_name = "Google"
                             elif "OLLAMA" in final_key_name: prov_name = "Ollama"
+                            elif "LMSTUDIO" in final_key_name or "LM_STUDIO" in final_key_name: prov_name = "LMStudio"
                             elif "MISTRAL" in final_key_name: prov_name = "Mistral"
                             
                             provider_map[final_key_name] = {"provider": prov_name, "models": [], "embed_models": []}
@@ -1242,10 +1305,19 @@ def render_api_vault():
                         
                         fetched_chat_models = result.get("chat_models", [])
                         
+                        from core.api_verifier import estimate_supports_tools_from_model_id
+
                         # Add new models
                         for m_name in fetched_chat_models:
                             if m_name not in existing_model_names:
-                                db.create_model(prov, m_name, final_key_name, False)
+                                is_local_sync = prov in ("Ollama", "LMStudio")
+                                db.create_model(
+                                    prov,
+                                    m_name,
+                                    final_key_name,
+                                    is_local_sync,
+                                    supports_tools=estimate_supports_tools_from_model_id(m_name, prov) if is_local_sync else True,
+                                )
                                 
                         # Remove deleted models
                         for m_name, m_id in existing_model_names.items():
@@ -1262,26 +1334,165 @@ def render_api_vault():
         st.subheader("Local Model registry")
         
         # --- Configure Local Provider ---
-        with st.expander("🔌 Configure Local Provider (Ollama)", expanded=False):
+        with st.expander("🔌 Configure Local Providers (Ollama / LM Studio)", expanded=False):
             env_path = os.path.join(os.getcwd(), '.env')
-            current_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
-            current_key = os.getenv("OLLAMA_API_KEY", "")
-            
-            new_url = st.text_input("Ollama Base URL", value=current_url, help="The IP and port of your Ollama server (e.g., http://192.168.178.105:11434/).")
-            new_key = st.text_input("Ollama API Key (Optional)", value=current_key, type="password")
-            
-            if st.button("Connect & Refresh Models"):
-                safe_set_key(env_path, "OLLAMA_API_BASE", new_url)
-                safe_set_key(env_path, "OLLAMA_API_KEY", new_key)
-                from core.api_verifier import _fetch_ollama
-                res = _fetch_ollama(api_key=new_key, base_url_override=new_url)
-                if res.get("success"):
-                    st.success(f"Connected successfully! Found {len(res.get('chat_models', []))} models.")
+            tab_ol, tab_lms, tab_import = st.tabs(["Ollama", "LM Studio / Bionic", "Import GGUF"])
+
+            with tab_ol:
+                st.caption(
+                    "Ollama on this PC is reached at **http://192.168.178.105:11434** — that is the Base URL, not an API key. "
+                    "Leave **Ollama API Key empty**. Put the URL only in **Ollama Base URL**, then Connect."
+                )
+                current_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+                current_key = os.getenv("OLLAMA_API_KEY", "")
+
+                new_url = st.text_input("Ollama Base URL", value=current_url, help="The IP and port of your Ollama server (e.g., http://192.168.178.105:11434/). From Docker use http://host.docker.internal:11434")
+                new_key = st.text_input("Ollama API Key (Optional)", value=current_key, type="password")
+
+                if st.button("Connect & Refresh Ollama Models"):
+                    safe_set_key(env_path, "OLLAMA_API_BASE", new_url)
+                    safe_set_key(env_path, "OLLAMA_API_KEY", new_key)
+                    from core.api_verifier import _fetch_ollama
+                    res = _fetch_ollama(api_key=new_key, base_url_override=new_url)
+                    if res.get("success"):
+                        added = sync_fetched_local_models(
+                            db, "Ollama", res.get("chat_models", []),
+                            res.get("chat_models_detailed", []), env_var_name="",
+                        )
+                        st.success(
+                            f"Ollama verified at {new_url}. "
+                            f"Found {len(res.get('chat_models', []))} models"
+                            + (f", {added} added to registry." if added else ".")
+                        )
+                        import time
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"Ollama credential/URL check failed: {res.get('error')}")
+
+            with tab_lms:
+                st.caption(
+                    "Same flow as Ollama: save **Base URL** + **API key**, then Connect verifies the credential "
+                    "against the local server and syncs models. Default GGUF folder is `~/.lmstudio/models` on this PC; "
+                    "another computer pastes its own path. Start **LM Studio → Developer → Local Server** first."
+                )
+                current_lms_url = os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE") or "http://127.0.0.1:1234"
+                current_lms_key = os.getenv("LMSTUDIO_API_KEY") or "lm-studio"
+                new_lms_url = st.text_input(
+                    "LM Studio Base URL",
+                    value=current_lms_url,
+                    help="Equivalent to Ollama Base URL. Local: http://127.0.0.1:1234. Docker: http://host.docker.internal:1234",
+                )
+                new_lms_key = st.text_input(
+                    "LM Studio API Key",
+                    value=current_lms_key,
+                    type="password",
+                    help="Checked like Ollama's API key. LM Studio accepts a dummy such as lm-studio.",
+                )
+                from core.api_verifier import default_lmstudio_models_dir
+                new_lms_dir = st.text_input(
+                    "Local GGUF folder (this computer)",
+                    value=default_lmstudio_models_dir(),
+                    help="Saved as LMSTUDIO_MODELS_DIR. On another PC set that machine's models folder.",
+                )
+                if st.button("Connect & Refresh LM Studio Models"):
+                    if not new_lms_url.strip():
+                        st.error("LM Studio Base URL is required.")
+                    elif not (new_lms_key or "").strip():
+                        st.error("LM Studio API Key is required (use lm-studio if the server has no auth).")
+                    else:
+                        key_to_save = new_lms_key.strip()
+                        safe_set_key(env_path, "LMSTUDIO_API_BASE", new_lms_url.strip())
+                        safe_set_key(env_path, "LM_STUDIO_API_BASE", new_lms_url.strip())
+                        safe_set_key(env_path, "LMSTUDIO_API_KEY", key_to_save)
+                        safe_set_key(env_path, "LMSTUDIO_MODELS_DIR", new_lms_dir)
+                        from core.api_verifier import _fetch_lmstudio
+                        res = _fetch_lmstudio(api_key=key_to_save, base_url_override=new_lms_url.strip())
+                        if res.get("success"):
+                            added = sync_fetched_local_models(
+                                db, "LMStudio", res.get("chat_models", []),
+                                res.get("chat_models_detailed", []),
+                                env_var_name="LMSTUDIO_API_KEY",
+                            )
+                            st.success(
+                                f"LM Studio verified at {new_lms_url.strip()}. "
+                                f"Found {len(res.get('chat_models', []))} models"
+                                + (f", {added} added to registry." if added else ".")
+                            )
+                            import time
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"LM Studio credential/URL check failed: {res.get('error')}")
+
+            with tab_import:
+                st.caption(
+                    "Put a quantized GGUF into Ollama without Hugging Face pull. "
+                    "For 16 GB VRAM pick a file **under ~15 GB** (your Qwen3.8 27B Q3_K_S is ~12.6 GB)."
+                )
+                from core.api_verifier import default_lmstudio_models_dir, list_local_gguf_files, import_gguf_to_ollama
+                gguf_root = st.text_input(
+                    "Folder to scan",
+                    value=default_lmstudio_models_dir(),
+                    help="Not hardcoded: defaults to this user's ~/.lmstudio/models. Save a custom path for this PC.",
+                )
+                if st.button("Save GGUF folder for this computer"):
+                    safe_set_key(env_path, "LMSTUDIO_MODELS_DIR", gguf_root)
+                    st.success("Saved LMSTUDIO_MODELS_DIR in .env")
                     import time
-                    time.sleep(1)
+                    time.sleep(0.5)
                     st.rerun()
+                gguf_files = list_local_gguf_files(gguf_root)
+                fits_vram = [g for g in gguf_files if g.get("size_gb", 0) <= 15.5]
+                if not gguf_files:
+                    st.info("No .gguf files found in that folder (mmproj files are skipped).")
                 else:
-                    st.error(f"Connection failed: {res.get('error')}")
+                    if fits_vram:
+                        st.caption(f"{len(fits_vram)} file(s) fit under 16 GB VRAM.")
+                    recommended = next(
+                        (g for g in fits_vram if "qwen3.8" in g["name"].lower() and "q3_k_s" in g["name"].lower()),
+                        fits_vram[0] if fits_vram else gguf_files[0],
+                    )
+                    gguf_labels = {
+                        f"{g['rel']} ({g['size_gb']} GB"
+                        + (" — fits 16GB" if g.get("size_gb", 0) <= 15.5 else " — too large for 16GB")
+                        + ")": g
+                        for g in gguf_files
+                    }
+                    default_label = next(
+                        (lab for lab, g in gguf_labels.items() if g["path"] == recommended["path"]),
+                        list(gguf_labels.keys())[0],
+                    )
+                    selected_gguf_label = st.selectbox(
+                        "GGUF file",
+                        options=list(gguf_labels.keys()),
+                        index=list(gguf_labels.keys()).index(default_label),
+                    )
+                    selected_gguf = gguf_labels[selected_gguf_label]
+                    if selected_gguf.get("size_gb", 0) > 15.5:
+                        st.warning("This quant is larger than 16 GB VRAM. Prefer Q3_K_S / Q4_K_M smaller than 15 GB.")
+                    default_import_name = os.path.splitext(selected_gguf["name"])[0].lower().replace(" ", "-")
+                    import_name = st.text_input("Ollama model name", value=default_import_name)
+                    if st.button("Import into Ollama (no download)"):
+                        with st.spinner("Importing GGUF into Ollama (copying blobs, can take several minutes)..."):
+                            res = import_gguf_to_ollama(selected_gguf["path"], import_name)
+                        if res.get("success"):
+                            try:
+                                db.create_model(
+                                    "Ollama",
+                                    res.get("model_name") or import_name,
+                                    "",
+                                    True,
+                                    vram_gb=float(selected_gguf.get("size_gb") or 13.0),
+                                )
+                            except Exception:
+                                pass
+                            st.success(res.get("message") or f"Imported as {import_name}")
+                            import time
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(res.get("error"))
         
         # Load model config
         model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
@@ -1289,53 +1500,84 @@ def render_api_vault():
         PROVIDER_MAP = model_config.get('provider_map', {})
         LOCAL_MODELS = model_config.get('local_models', [])
         
-        # Fetch dynamic local models from Ollama
-        from core.api_verifier import _fetch_ollama, get_ollama_model_info
+        from core.api_verifier import _fetch_ollama, _fetch_lmstudio, estimate_supports_tools_from_model_id
         ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
         ollama_models = _fetch_ollama(ollama_api_key)
         LOCAL_MODELS_DETAILED = []
         if ollama_models.get("success"):
-            # If API succeeds, only show the actually pulled models
             LOCAL_MODELS = ollama_models.get("chat_models", [])
             LOCAL_MODELS_DETAILED = ollama_models.get("chat_models_detailed", [])
-        # else it falls back to the hardcoded list from models_map.yaml
+
+        lms_models = {"success": False}
+        if os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE"):
+            lms_models = _fetch_lmstudio()
+        LMS_MODELS = lms_models.get("chat_models", []) if lms_models.get("success") else []
+        LMS_MODELS_DETAILED = lms_models.get("chat_models_detailed", []) if lms_models.get("success") else []
         
         st.markdown("Add or update a model available for agents.")
         
-        # --- Only Local Models can be added manually now ---
-        provider = "Ollama"
         env_var_name = ""
         is_local = True
+        local_runtime = st.selectbox("Local runtime", ["Ollama", "LM Studio"])
+        provider = "Ollama" if local_runtime == "Ollama" else "LMStudio"
+        runtime_models = LOCAL_MODELS if provider == "Ollama" else LMS_MODELS
+        runtime_detailed = LOCAL_MODELS_DETAILED if provider == "Ollama" else LMS_MODELS_DETAILED
+        if provider == "LMStudio" and not runtime_models:
+            st.warning("LM Studio server not reachable. Start it in LM Studio → Developer → Local Server, then Connect.")
         
         local_col1, local_col2 = st.columns(2)
         with local_col1:
             def format_model(name):
                 if name == "Other (Manual)...": return name
-                for m in LOCAL_MODELS_DETAILED:
+                for m in runtime_detailed:
                     if m["name"] == name:
-                        return f"{name} ({m['size_gb']} GB VRAM)"
+                        size = m.get("size_gb") or 0
+                        return f"{name} ({size} GB)" if size else name
                 return name
 
-            selected_local = st.selectbox("Local Model Name", options=LOCAL_MODELS + ["Other (Manual)..."], format_func=format_model)
+            selected_local = st.selectbox("Local Model Name", options=runtime_models + ["Other (Manual)..."], format_func=format_model)
             if selected_local == "Other (Manual)...":
-                model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., my-custom-model")
+                model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., qwen3.8-27b-tools or llama-3.1-8b-instruct")
             else:
                 model_name = selected_local
         with local_col2:
             default_vram = 4.0
             if selected_local != "Other (Manual)...":
-                for m in LOCAL_MODELS_DETAILED:
+                for m in runtime_detailed:
                     if m["name"] == selected_local:
-                        default_vram = float(m["size_gb"])
+                        default_vram = float(m.get("size_gb") or 4.0) or 4.0
                         break
             vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=default_vram, step=0.5, help="Estimated memory used by this model.")
+            auto_supports_tools = estimate_supports_tools_from_model_id(model_name or selected_local, provider)
+            support_mode = st.selectbox(
+                "Tool-calling support",
+                options=["Auto", "Yes", "No"],
+                index=0,
+                help="Auto infers support from runtime and model family. Override to force-enable or disable tools for this model.",
+            )
+            supports_tools = auto_supports_tools if support_mode == "Auto" else (support_mode == "Yes")
+            st.caption(
+                f"Auto guess for `{model_name or selected_local}`: "
+                f"{'✅ supports tools' if auto_supports_tools else '❌ no tool-calling'}."
+            )
 
         submitted = st.button("Add Local Model", type="primary")
         if submitted and provider and model_name:
             import sqlite3
             try:
-                db.create_model(provider, model_name, "", True, vram_gb=vram_gb)
-                st.success(f"Added local model '{model_name}' requiring {vram_gb} GB VRAM.")
+                env_for_model = "LMSTUDIO_API_KEY" if provider == "LMStudio" else ""
+                db.create_model(
+                    provider,
+                    model_name,
+                    env_for_model,
+                    True,
+                    vram_gb=vram_gb,
+                    supports_tools=supports_tools,
+                )
+                st.success(
+                    f"Added local model '{model_name}' requiring {vram_gb} GB VRAM "
+                    f"({'tools ON' if supports_tools else 'tools OFF'})."
+                )
                 st.rerun()
             except sqlite3.IntegrityError:
                 st.error(f"Il modello '{model_name}' è già presente nel database.")
@@ -1358,9 +1600,15 @@ def render_api_vault():
                 st.markdown(f"**{provider_name}**")
                 with st.container(height=250, border=True):
                     for model in p_models:
-                        col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 2, 2, 1.5, 1])
+                        col1, col2, col3, col4, col5, col6, col7 = st.columns([0.5, 2, 2, 1.3, 2, 1.5, 1])
                         type_icon = "🏠" if model.get('is_local') else "☁️"
-                        if model.get('is_local'):
+                        prov_l = (model.get('provider') or "").lower()
+                        if prov_l in ("lmstudio", "lm_studio"):
+                            env_key = model.get('env_var_name') or "LMSTUDIO_API_KEY"
+                            has_key = bool(str(current_env.get(env_key, "")).strip())
+                            has_url = bool(str(current_env.get("LMSTUDIO_API_BASE") or current_env.get("LM_STUDIO_API_BASE") or "").strip())
+                            status_sema = "🟢" if (has_key or has_url) else "🔴"
+                        elif model.get('is_local'):
                             status_sema = "🟢"
                         else:
                             env_key = model.get('env_var_name', '')
@@ -1368,12 +1616,17 @@ def render_api_vault():
                         col1.markdown(f"{type_icon} {status_sema}")
                         col2.text(f"P: {model['provider']}")
                         col3.text(f"M: {model['model_name']}")
-                        key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
-                        col4.text(f"Key: {key_display}")
+                        tools_enabled = bool(model.get("supports_tools", 1))
+                        col4.text(f"Tools: {'✅' if tools_enabled else '❌'}")
+                        if prov_l in ("lmstudio", "lm_studio"):
+                            key_display = model.get('env_var_name') or "LMSTUDIO_API_KEY"
+                        else:
+                            key_display = "---" if model.get('is_local') else (model.get('env_var_name') or "N/A")
+                        col5.text(f"Key: {key_display}")
                         vram_val = model.get('vram_gb', 0.0)
                         vram_display = f"{vram_val} GB" if model.get('is_local') else "---"
-                        col5.text(f"VRAM: {vram_display}")
-                        if col6.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
+                        col6.text(f"VRAM: {vram_display}")
+                        if col7.button("Delete", key=f"del_model_{model['id']}", use_container_width=True):
                             db.delete_model(model['id'])
                             st.toast(f"Deleted model {model['model_name']}", icon="🗑️")
                             st.rerun()
@@ -1983,7 +2236,7 @@ def render_task_builder():
                 selected_model_id = model_options.get(selected_model_str)
                 model_record = next((m for m in models if m['id'] == selected_model_id), None)
                 if model_record:
-                    is_ollama = bool(model_record.get('is_local')) or model_record.get('provider', '').lower() == 'ollama'
+                    is_ollama = model_record.get('provider', '').lower() == 'ollama'
                     
                     st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
                     task_max_output_tokens = st.slider(
@@ -2061,7 +2314,7 @@ def render_task_builder():
         
         # Display Tools inside a collapsible expander containing Premium Cards
         with st.expander("🛠️ Assign Tools (Optional)", expanded=False):
-            st.caption("Select the tools this task's agent is authorized to use:")
+            st.caption("Select the tools this task's agent is authorized to use. Tool execution depends on the selected model's `supports_tools` setting in Model Registry.")
             
             # 1. Initialize all tool checkboxes in session state so selection is preserved even when filtered out
             for tool_id in AVAILABLE_TOOLS:
@@ -4777,39 +5030,184 @@ def main():
     @st.dialog("🚀 Guide & Placeholders", width="large")
     def show_guide():
         st.markdown("""
-        ### 🤖 What is Alfredo?
-        **Alfredo** is an AI Agentic Orchestrator powered by **CrewAI** and **Master AI**. It allows you to model custom teams of AI agents, organize them into sequential workflows, and execute them dynamically through natural language (via Streamlit or Telegram).
+### 🤖 What is Alfredo?
+**Alfredo** is an AI OS / agent orchestrator. You build a team of agents, wire them into workflows, then run those workflows with natural language from this dashboard or from **Telegram**.
 
-        ### ⚙️ How It Works
-        1. **Define Team**: Register models and create agents with unique roles, backstories, and tools in **Agent Caserma**.
-        2. **Build Workflows**: Create tasks in Task Builder, then assemble a **function-block DAG** in **Workflow Assembler** (Task / Batch / HITL / Export / Input).
-        3. **Dynamic Planning**: Send a request. **Master AI** analyzes your intent, selects the workflow, asks for required inputs, and configures the agents.
-        4. **Execute**: The crew runs executable blocks (task/batch); HITL and Export desugar to validation gates and Master AI exports.
+Under the hood: **Master AI** plans and routes; **CrewAI** runs the crew; your data and keys stay in your machine (`.env` + database).
 
-        ---
+**Golden rule (do this order):**
+1. Put API keys → 2. Register models → 3. Create agents → 4. Create tasks → 5. Assemble a workflow → 6. Chat / Telegram.
 
-        ### 👤 Agent Specialization
-        Keep agents generic (e.g. *Researcher*) and specialize them per-task:
-        - **`{specialization}`**: Place this in the agent's **Role** or **Backstory** (e.g. `Researcher specialized in {specialization}`). Alfredo will inject the task's custom specialization at runtime.
-          *Note: If omitted, the task specialization is automatically appended.*
+---
 
-        ### 📝 Task Inputs
-        Format task **Descriptions** or **Expected Outputs** with:
-        - **`{variable_name}`**: Define custom parameters in the task's **Required Inputs**. Alfredo will prompt you for them before execution.
-          *Tip: Identical variables across tasks are requested only once!*
-        - **`{user_input}`**: Inserts your initial message that triggered the workflow.
-        - **`{previous_result}`** (or **`{context}`**): Inserts the output of the preceding task (legacy / fallback).
-        - **Data wiring ports**: In the Assembler, map named ports on a block (`inputs_map`). Use `{port_name}` in the task text to inject wired values from a parent node or run input.
+### 🗺️ What is in each section?
+Use the left navigation. Click each page once so you know where things live.
 
-        ---
-        ### 🛠️ Model & Tool Compatibility
-        - ✅ **Cloud Models** (OpenAI, Gemini, Anthropic, Groq): Full support for function calling and tools (web search, file access, shell commands).
-        - ❌ **Local Models** (Ollama): Do not support tool calling. Tools are automatically disabled for local models.
+| Page | What it is for |
+|------|----------------|
+| **🔐 API Vault** | Save provider API keys, register LLM models, pick Master AI + default agent model, Ollama URL, VRAM limit. **Start here.** |
+| **🧱 Asset Builder** | Three tabs: **Knowledge Base** (RAG / documents), **Agent Caserma** (agents), **Tool Factory** (tools for agents). |
+| **📋 Task Builder** | Create tasks assigned to an agent (description, inputs, tools, HITL, specialization). |
+| **🧩 Workflow Assembler** | Build the workflow graph: Canvas (drag & drop) or Lanes. Blocks: Level, Task, Batch, HITL, Export, Input, Loop. |
+| **📊 History & Monitoring** | Past runs, logs, status of executions. |
+| **🪖 Local Model Training** | Optional fine-tuning / local training helpers (advanced). |
+| **🔗 My Apps** | Connect external apps (env keys for DB/API) and link workflows to them. |
 
-        *Alfredo resolves all parameters dynamically during planning and execution.*
+**Top of the home header (not a nav page):**
+- **🤖** (big robot button) → this guide.
+- **🟢 Start / 🔴 Stop Bot Telegram** → starts `bot.py` so Telegram works.
+- **🤖 Telegram Bot Config** → paste BotFather token + allowed user IDs (saved to `.env`).
+
+---
+
+### 1️⃣ First setup — credentials & models (step by step)
+
+#### A. File `.env` (once)
+1. In the project folder, copy `.env.example` → `.env` (if you do not already have `.env`).
+2. Never commit `.env` (it holds secrets).
+3. You can fill keys in the file **or** from the UI below — both write the same `.env`.
+
+#### B. Cloud API keys + models — page **API Vault** → tab **Load Models**
+1. Open **API Vault** → tab **Load Models**.
+2. Under **Load cloud models**:
+   - **Select Key** (e.g. `GEMINI_API_KEY`, `OPENAI_API_KEY`, …) or **Custom...**
+   - Paste the **API Key Value**
+   - Click **Save to .env**
+3. Alfredo **verifies the key**, downloads the provider’s model list, and **syncs models into the database**. Wait for success (🟢 on the key).
+4. **Do not** put Telegram tokens here — use **Telegram Bot Config** (top right).
+
+#### C. Set Master AI + default agent model
+1. Go to **API Vault → System Setting**.
+2. Under **Global Default Models**:
+   - pick **Master AI** (orchestrator) → **💾 Save Model**
+   - pick **Default Model for Agents** → **💾 Save Default Model**
+3. Without these defaults, planning / agents may have nothing to run on.
+
+#### D. Local models (Ollama / LM Studio) — optional
+1. **Ollama** (Windows service on the desktop PC, **not** Docker)
+   - `localhost:11434` / `http://192.168.178.105:11434` is only the API. Docker is Qdrant.
+   - To **update**: run the new Windows installer from [ollama.com](https://ollama.com/download). Do **not** run `sc create` again, do **not** change the system variable `OLLAMA_HOST`, do **not** stop Docker.
+   - In **API Vault → Load Models → Configure Local Providers → Ollama**: keep **Ollama Base URL** as `http://192.168.178.105:11434` (or `http://host.docker.internal:11434` if the dashboard itself runs in Docker). Leave the API key empty. **Connect**.
+2. **LM Studio / Bionic (reuse GGUF already on disk)**
+   - Bionic and LM Studio share `~/.lmstudio/models`. Start **LM Studio → Developer → Local Server** (port 1234).
+   - In **Configure Local Providers → LM Studio / Bionic**, set the URL and **Connect**, then add the model as runtime **LM Studio**.
+3. **Import GGUF into Ollama** (no re-download): tab **Import GGUF**, pick a file under `.lmstudio/models`, import. Needs a recent Ollama for new architectures (e.g. Qwen3.8). Uses extra disk because Ollama copies blobs.
+4. In **Local Model registry**, add the model so agents can use it.
+5. Set **Tool-calling support** per local model when adding it to the registry (`Auto/Yes/No`). Alfredo enforces this per-model flag, not just by provider.
+
+#### E. Telegram — step by step
+1. In Telegram, open **@BotFather** → `/newbot` → copy the token.
+2. Get your numeric user id (e.g. talk to `@userinfobot` or similar) — it looks like `123456789`.
+3. In Alfredo header → **Telegram Bot Config**:
+   - paste **Bot Token**
+   - paste **Allowed User IDs** (comma-separated if more people: `111,222`)
+   - **Save Telegram Config**
+4. On the header click **🟢 Start Bot Telegram** (turns red when running).
+5. Message your bot on Telegram. If the bot does not answer: check token, your id is in the allow-list, and the bot is started.
+
+#### F. Optional extras
+- **Outlook email tools**: configure Outlook email + app password where the Task / tool UI asks for them (saved in `.env`).
+- **Headroom** (token compression): see **API Vault → System Setting**.
+- **MAX_VRAM_GB**: same tab — limits parallel local GPU use.
+
+---
+
+### 2️⃣ Build a working crew (step by step)
+
+#### 1) Agents — **Asset Builder → Agent Caserma**
+1. Create an agent: name, role, backstory, tools.
+2. Keep agents **generic** (e.g. Researcher, Writer). Specialize per task (see placeholders below).
+3. Assign tools only if the agent’s model supports tools (`supports_tools` in Model Registry). This is per-model (cloud and local), not provider-wide.
+
+#### 2) Knowledge (optional) — **Asset Builder → Knowledge Base**
+Upload / index documents so agents can retrieve facts (RAG) instead of inventing.
+
+#### 3) Tools (optional) — **Asset Builder → Tool Factory**
+Generate or register tools, then attach them to agents in Caserma.
+
+#### 4) Tasks — **Task Builder**
+1. Pick an agent.
+2. Write **Description** and **Expected Output**.
+3. Add **Required Inputs** if the task needs parameters (`topic`, `language`, …).
+4. Optional: specialization, HITL (human check), tools override, output schema.
+5. Save. Tasks are shared assets: editing a task updates every workflow that uses it.
+
+#### 5) Workflow — **Workflow Assembler**
+1. Name the workflow.
+2. Prefer **Canvas (drag & drop)**:
+   - **Add Level** = columns (execution stages).
+   - Drop **Task / Batch / HITL / Export / Input** into a level.
+   - Wire outputs → inputs with the dots on task cards (or **Auto-link by levels**).
+   - **Loop select**: marquee a group → create a **loop frame** (`while` or `for_each`).
+3. Or use **Lanes (classic)** if you prefer form + columns.
+4. **Update / Create Workflow** to save.
+5. Opening **Edit** on an existing workflow rebuilds the canvas layout automatically.
+
+**Block cheat-sheet**
+- **Task** — does the work (runs an agent task).
+- **Batch** — for-each over a JSON list inside one block.
+- **HITL** — pause for human approve / feedback.
+- **Export** — ask Master AI to write files (python, excel, word, …).
+- **Input** — declares run keys for `{port}` wiring.
+- **Level** — column / stage (not executed by itself).
+- **Loop frame** — repeats a body: **`while`** until HITL approve and/or output regex (capped by `max_iterations`); **`for_each`** runs the body once per item in a JSON array from the previous result.
+
+#### 6) Run it
+- From Telegram / chat: describe what you want in plain language. Master AI picks the workflow, asks for missing inputs, then runs.
+- Watch progress in **History & Monitoring**.
+
+---
+
+### 👤 Agent specialization
+Keep one generic agent; change focus per task:
+
+- Put **`{specialization}`** in the agent **Role** or **Backstory**  
+  Example: `Researcher specialized in {specialization}`
+- In the task, set the specialization field (e.g. `thermochemistry`).
+- If you omit `{specialization}` in the agent text, Alfredo still appends the task specialization at the end.
+
+---
+
+### 📝 Placeholders (copy-paste into task text)
+
+Use these in **Description** or **Expected Output**:
+
+| Placeholder | Meaning |
+|-------------|---------|
+| `{variable_name}` | Any name you listed in **Required Inputs**. Alfredo asks once before run (same name shared across tasks = asked once). |
+| `{user_input}` | The first user message that started the run. |
+| `{previous_result}` or `{context}` | Output of the previous step (legacy fallback). |
+| `{port_name}` | Value from Assembler **data wiring** (`inputs_map`): from a parent node or from a run **Input** block. |
+| `{specialization}` | (In agent Role/Backstory) filled from the task specialization. |
+
+**Tip:** Prefer named ports in Canvas (`inputs_map`) for clean graphs; keep `{previous_result}` for simple linear chains.
+
+---
+
+### 🛠️ Model & tool compatibility
+- ✅ **Cloud** (OpenAI, Gemini, Anthropic, Groq, …): tools / function-calling OK.
+- 🧠 **Local Ollama / LM Studio**: support is **per model** (`supports_tools`), with Auto guess available when you add models.
+- ⚙️ In execution, Alfredo enables or strips tools based on that model flag, so you can keep modern local models tool-capable.
+- Master AI and agents use the models you registered + set as defaults in API Vault.
+
+---
+
+### 🆘 If something does not work
+1. API Vault shows 🔴 on the key? Save the key again.
+2. No models in the dropdown? Register a model under **Load Models**.
+3. Agent / task empty lists? Create agent before task; create task before workflow.
+4. Telegram silent? Token + allowed IDs saved, then **Start Bot**.
+5. Canvas empty on Edit? Wait for hydrate / click **Rebuild canvas layout**.
+6. Loop never stops? Set HITL exit and/or regex, and a safe `max_iterations`.
+
+Secrets → `.env` · Agents / tasks / workflows → database · This guide → robot button 🤖
         """)
         st.divider()
-        st.info("The configuration is saved directly to your SQLite database.")
+        st.info(
+            "Keys and Telegram settings are stored in your local `.env`. "
+            "Agents, tasks, workflows, and models live in the Alfredo database. "
+            "Nothing here is shared unless you explicitly publish a workflow package (logic only — no secrets)."
+        )
 
     # --- Header with Right Popovers ---
     col_title, col_tools = st.columns([7, 3])
