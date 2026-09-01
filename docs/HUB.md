@@ -81,6 +81,25 @@ Same package format — only the URL changes.
 
 `HUB_MODE=off`. Export `.alfredo.json` from Share/Hub or “Export Package”, send the file, Import on the other PC. Maximum privacy; no central catalog.
 
+## PSID company hub (LAN)
+
+For the PSID semi-private company server on LAN (`psid.us`), see **[PSID_HUB.md](PSID_HUB.md)**.
+
+Quick start on the server PC:
+
+```bat
+run_psid_hub.bat
+```
+
+## Server-side access control (hub container)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HUB_REGISTRATION` | `open` | `open` \| `invite` \| `closed` |
+| `HUB_INVITE_TOKEN` | — | Required when `HUB_REGISTRATION=invite` |
+| `HUB_REQUIRED_ORG` | — | Force all new users into this org slug |
+| `HUB_ALLOW_PUBLIC` | `true` | Set `false` to block `visibility=public` publishes |
+
 ## Register
 
 ```bash

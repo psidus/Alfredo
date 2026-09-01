@@ -1,0 +1,12 @@
+# PSID company hub — LAN hostname mapping
+# Add this line to C:\Windows\System32\drivers\etc\hosts on the server PC
+# AND on every colleague PC that should reach the hub.
+#
+# Replace 192.168.1.50 with the actual LAN IP of the server computer.
+# Edit hosts as Administrator (Notepad → Run as administrator).
+
+192.168.1.50  psid.us
+
+# Verify (PowerShell):
+#   ping psid.us
+#   curl http://psid.us:8010/hub/health

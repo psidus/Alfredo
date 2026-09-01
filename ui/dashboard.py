@@ -133,6 +133,46 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'[^a-zA-Z0-9_-]', '', name)
     return name or "unnamed_workflow"
 
+def _humanize_field_name(name: str) -> str:
+    return str(name).replace("_", " ").strip().capitalize()
+
+def _format_status_cell(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+def render_status_table(title: str, data, *, kind: str = "success", extra_rows: dict | None = None):
+    """Render dict payloads as a status banner plus a key/value table."""
+    banner_fn = getattr(st, kind, st.info)
+    if not isinstance(data, dict):
+        banner_fn(f"{title}: {data}")
+        return
+
+    merged = dict(data)
+    if extra_rows:
+        merged.update(extra_rows)
+
+    rows = [
+        {"Field": _humanize_field_name(key), "Value": _format_status_cell(value)}
+        for key, value in merged.items()
+    ]
+
+    banner_fn(title)
+    if rows:
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Field": st.column_config.TextColumn("Field", width="medium"),
+                "Value": st.column_config.TextColumn("Value", width="large"),
+            },
+        )
+
 # --- Helper Functions for Callbacks ---
 
 def set_editing_state(key, value):
@@ -2780,7 +2820,16 @@ then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 80
 
     hub_mode = _hub_env("HUB_MODE", "off").lower()
     hub_url = _hub_env("HUB_API_URL", "http://localhost:8010")
-    st.info(f"Current hub: mode=**{hub_mode}** · url=`{hub_url}` · user=`{_hub_env('HUB_USERNAME') or '—'}` · org=`{_hub_env('HUB_ORG') or '—'}`")
+    render_status_table(
+        "Current hub connection",
+        {
+            "mode": hub_mode,
+            "url": hub_url,
+            "user": _hub_env("HUB_USERNAME") or "—",
+            "org": _hub_env("HUB_ORG") or "—",
+        },
+        kind="info",
+    )
 
     sub_local, sub_hub = st.tabs(["Local package", "Hub registry"])
 
@@ -2872,7 +2921,7 @@ then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 80
         try:
             health = client.health()
             hub_up = True
-            st.success(f"Hub reachable: {health}")
+            render_status_table("Hub reachable", health, kind="success")
         except HubClientError as e:
             st.error(
                 f"Hub not reachable at `{hub_url}`.\n\n"
@@ -2961,8 +3010,7 @@ then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 80
                         package_version=pub_ver,
                         share_with=[u.strip() for u in pub_share.split(",") if u.strip()],
                     )
-                    st.success(f"Published package id={res.get('id')} slug={res.get('slug')} visibility={pub_vis}")
-                    st.json(res)
+                    render_status_table("Package published", res, kind="success", extra_rows={"visibility": pub_vis})
                 except Exception as e:
                     st.error(str(e))
 
@@ -5053,10 +5101,9 @@ Use the left navigation. Click each page once so you know where things live.
 | **🪖 Local Model Training** | Optional fine-tuning / local training helpers (advanced). |
 | **🔗 My Apps** | Connect external apps (env keys for DB/API) and link workflows to them. |
 
-**Top of the home header (not a nav page):**
-- **🤖** (big robot button) → this guide.
-- **🟢 Start / 🔴 Stop Bot Telegram** → starts `bot.py` so Telegram works.
-- **🤖 Telegram Bot Config** → paste BotFather token + allowed user IDs (saved to `.env`).
+**Sidebar (top):**
+- **🤖** (robot button) → this guide.
+- **Main area (top left):** **🟢 Start / 🔴 Stop Bot Telegram** and **🤖 Telegram Bot Config**.
 
 ---
 
@@ -5074,7 +5121,7 @@ Use the left navigation. Click each page once so you know where things live.
    - Paste the **API Key Value**
    - Click **Save to .env**
 3. Alfredo **verifies the key**, downloads the provider’s model list, and **syncs models into the database**. Wait for success (🟢 on the key).
-4. **Do not** put Telegram tokens here — use **Telegram Bot Config** (top right).
+4. **Do not** put Telegram tokens here — use **Telegram Bot Config** (top left of the main area).
 
 #### C. Set Master AI + default agent model
 1. Go to **API Vault → System Setting**.
@@ -5098,11 +5145,11 @@ Use the left navigation. Click each page once so you know where things live.
 #### E. Telegram — step by step
 1. In Telegram, open **@BotFather** → `/newbot` → copy the token.
 2. Get your numeric user id (e.g. talk to `@userinfobot` or similar) — it looks like `123456789`.
-3. In Alfredo header → **Telegram Bot Config**:
+3. In Alfredo main area (top left) → **Telegram Bot Config**:
    - paste **Bot Token**
    - paste **Allowed User IDs** (comma-separated if more people: `111,222`)
    - **Save Telegram Config**
-4. On the header click **🟢 Start Bot Telegram** (turns red when running).
+4. On the main toolbar click **🟢 Start Bot Telegram** (turns red when running).
 5. Message your bot on Telegram. If the bot does not answer: check token, your id is in the allow-list, and the bot is started.
 
 #### F. Optional extras
@@ -5209,85 +5256,163 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             "Nothing here is shared unless you explicitly publish a workflow package (logic only — no secrets)."
         )
 
-    # --- Header with Right Popovers ---
-    col_title, col_tools = st.columns([7, 3])
-    with col_title:
-        t_col1, t_col2 = st.columns([0.08, 0.92], vertical_alignment="center")
-        with t_col1:
-            if st.button("🤖", use_container_width=True):
-                show_guide()
-        with t_col2:
-            st.markdown("""
-            <div class='robot-marker'></div>
-            <style>
-            /* Target exactly the column IMMEDIATELY PRECEDING the column with .robot-marker */
-            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button {
-                height: auto !important;
-                min-height: 58px !important;
-                padding: 2px !important;
-                background: transparent !important;
-                border: none !important;
-                box-shadow: none !important;
-                cursor: pointer !important;
-                color: inherit !important;
-            }
-            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button:hover {
-                background: rgba(128,128,128,0.1) !important;
-                border-radius: 12px !important;
-                transition: all 0.2s ease;
-            }
-            [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .robot-marker) .stButton button p {
-                font-size: 2.8rem !important;
-                line-height: 1 !important;
-                margin: 0 !important;
-                padding: 0 !important;
-            }
-            </style>
-            <h1 style='margin-top: -18px;'>AI Workflow Configurator</h1>
-            """, unsafe_allow_html=True)
-            
-        st.caption("A secure dashboard for building and managing AI agent workflows.")
-        
-        bot_running = is_bot_running()
-        btn_label = "🔴 Stop Bot Telegram" if bot_running else "🟢 Start Bot Telegram"
-        
-        col_btn, _ = st.columns([3, 7])
-        with col_btn:
-            if st.button(btn_label, use_container_width=True):
-                toggle_bot()
-                st.rerun()
-    
-    with col_tools:
-        st.write("") # Spacer
-        st.write("") # Spacer
-        
+    # --- Sidebar branding (title + guide) ---
+    with st.sidebar:
+        st.markdown("""
+        <style>
+        [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+            display: flex;
+            flex-direction: column;
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+            order: 0;
+            flex-shrink: 0;
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarNav"] {
+            order: 1;
+            flex: 1;
+            padding-top: 0 !important;
+            border-top: 1px solid rgba(128, 128, 128, 0.22);
+            margin-top: 2rem;
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarNav"] ul {
+            padding-top: 0 !important;
+            margin-top: 0 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarNav"] li:first-child {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0.1rem 0.2rem !important;
+            min-height: auto !important;
+            font-size: 1.55rem !important;
+            line-height: 1 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button:hover {
+            background: rgba(128, 128, 128, 0.12) !important;
+            border-radius: 8px !important;
+        }
+        [data-testid="stSidebar"] .sidebar-brand-block {
+            margin-bottom: 0;
+        }
+        [data-testid="stSidebar"] .sidebar-brand-title {
+            font-size: 1.12rem;
+            font-weight: 700;
+            line-height: 1.25;
+            margin: 0;
+            letter-spacing: -0.02em;
+        }
+        [data-testid="stSidebar"] .sidebar-brand-subtitle {
+            font-size: 0.82rem;
+            line-height: 1.45;
+            margin: 0.35rem 0 0 0;
+            padding-bottom: 0;
+            opacity: 0.72;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
-        # --- Popover 2: Telegram Config ---
-        with st.popover("🤖 Telegram Bot Config", use_container_width=True):
+        brand_icon_col, brand_title_col = st.columns([0.16, 0.84], vertical_alignment="center")
+        with brand_icon_col:
+            if st.button("🤖", key="sidebar_guide_btn", help="Guide & Placeholders", use_container_width=True):
+                show_guide()
+        with brand_title_col:
+            st.markdown(
+                '<div class="sidebar-brand-marker"></div>'
+                '<div class="sidebar-brand-block">'
+                '<p class="sidebar-brand-title">AI Workflow Configurator</p>'
+                '<p class="sidebar-brand-subtitle">A secure dashboard for building and managing AI agent workflows.</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+    # --- Main toolbar: Telegram actions (left, above page titles) ---
+    st.markdown("""
+    <style>
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) {
+        gap: 0.85rem !important;
+        width: 50% !important;
+        max-width: 50% !important;
+        margin-bottom: 1.25rem !important;
+        align-items: center !important;
+        justify-content: flex-start !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) > [data-testid="stLayoutWrapper"] {
+        flex: 1 1 0 !important;
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        height: auto !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding-top: 0.5rem !important;
+        padding-bottom: 0.5rem !important;
+        box-sizing: border-box !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .stButton,
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) [data-testid="stPopover"] {
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .stButton > button,
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) [data-testid="stPopover"] > button,
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) button[data-testid="stPopoverButton"] {
+        width: 100% !important;
+        min-width: 100% !important;
+        min-height: 2.9rem !important;
+        height: 2.9rem !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+        padding: 0.55rem 1.25rem !important;
+        border-radius: 10px !important;
+        white-space: nowrap !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    bot_running = is_bot_running()
+    btn_label = "🔴 Stop Bot Telegram" if bot_running else "🟢 Start Bot Telegram"
+
+    with st.container(horizontal=True, key="telegram_toolbar"):
+        if st.button(btn_label, use_container_width=True, key="top_bot_toggle"):
+            toggle_bot()
+            st.rerun()
+        with st.popover("🤖 Telegram Bot Config", use_container_width=True, key="top_tg_config"):
             st.markdown("### Telegram Vault")
             st.markdown("Configure your bot credentials for remote control.")
-            
+
             env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
             current_env = dotenv_values(env_path)
-            
+
             tg_token = current_env.get("TELEGRAM_BOT_TOKEN", "")
             tg_ids = current_env.get("TELEGRAM_ALLOWED_USER_IDS", "")
-            
-            # Status Indicators
+
             token_status = "🟢" if tg_token.strip() else "🔴"
             ids_status = "🟢" if tg_ids.strip() else "🔴"
-            
+
             st.markdown(f"{token_status} **Bot Token**")
             st.markdown(f"{ids_status} **Allowed User IDs**")
-            
+
             with st.form("telegram_vault_form_standalone"):
                 token_placeholder = "Saved (enter new to overwrite)" if tg_token.strip() else "123456789:ABCDEF..."
                 ids_placeholder = "Saved (enter new to overwrite)" if tg_ids.strip() else "e.g. 123456789, 987654321"
-                
+
                 new_tg_token = st.text_input("Telegram Bot Token", type="password", value="", placeholder=token_placeholder)
                 new_tg_ids = st.text_input("Allowed User IDs", type="password", value="", placeholder=ids_placeholder)
                 st.caption("IDs must be comma-separated integers.")
-                
+
                 if st.form_submit_button("Save Telegram Config"):
                     if new_tg_token:
                         safe_set_key(env_path, "TELEGRAM_BOT_TOKEN", new_tg_token.strip())

@@ -39,12 +39,55 @@ def get_hub() -> HubDB:
     return HubDB()
 
 
+def _hub_registration_mode() -> str:
+    mode = (os.getenv("HUB_REGISTRATION") or "open").strip().lower()
+    return mode if mode in ("open", "invite", "closed") else "open"
+
+
+def _hub_required_org() -> str:
+    return (os.getenv("HUB_REQUIRED_ORG") or "").strip().lower()
+
+
+def _hub_allow_public() -> bool:
+    return (os.getenv("HUB_ALLOW_PUBLIC") or "true").strip().lower() in ("1", "true", "yes")
+
+
+def _validate_registration(req: "RegisterRequest") -> str:
+    """Return org_slug to use after policy checks. Raises HTTPException on failure."""
+    mode = _hub_registration_mode()
+    if mode == "closed":
+        raise HTTPException(status_code=403, detail="Hub registration is closed")
+
+    if mode == "invite":
+        expected = (os.getenv("HUB_INVITE_TOKEN") or "").strip()
+        if not expected:
+            raise HTTPException(status_code=503, detail="Hub invite token is not configured")
+        provided = (req.invite_token or "").strip()
+        if provided != expected:
+            raise HTTPException(status_code=403, detail="Invalid invite token")
+
+    required_org = _hub_required_org()
+    if required_org:
+        return required_org
+    return (req.org_slug or "").strip().lower()
+
+
+def _validate_visibility(visibility: str) -> str:
+    visibility = (visibility or "private").lower()
+    if visibility not in ("private", "org", "public"):
+        raise HTTPException(status_code=400, detail="visibility must be private|org|public")
+    if visibility == "public" and not _hub_allow_public():
+        raise HTTPException(status_code=403, detail="Public packages are disabled on this hub")
+    return visibility
+
+
 # --- models ---
 
 class RegisterRequest(BaseModel):
     username: str
     display_name: str = ""
     org_slug: str = ""
+    invite_token: str = ""
 
 
 class RegisterResponse(BaseModel):
@@ -104,13 +147,22 @@ def _require_user(user: Optional[Dict[str, Any]] = Depends(_auth_user)) -> Dict[
 
 @app.get("/hub/health")
 def health():
-    return {"status": "ok", "service": "alfredo-hub", "version": "1.0.0"}
+    required_org = _hub_required_org()
+    return {
+        "status": "ok",
+        "service": "alfredo-hub",
+        "version": "1.0.0",
+        "registration_mode": _hub_registration_mode(),
+        "required_org": required_org or None,
+        "public_packages_allowed": _hub_allow_public(),
+    }
 
 
 @app.post("/hub/register", response_model=RegisterResponse)
 def register(req: RegisterRequest, hub: HubDB = Depends(get_hub)):
+    org_slug = _validate_registration(req)
     try:
-        user, token = hub.register_user(req.username, req.display_name, req.org_slug)
+        user, token = hub.register_user(req.username, req.display_name, org_slug)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return RegisterResponse(
@@ -129,6 +181,7 @@ def rotate_token(user: Dict[str, Any] = Depends(_require_user), hub: HubDB = Dep
 
 @app.post("/hub/packages")
 def publish(req: PublishRequest, user: Dict[str, Any] = Depends(_require_user), hub: HubDB = Depends(get_hub)):
+    visibility = _validate_visibility(req.visibility)
     # Strip any accidental credentials before storing on the hub
     safe_package = sanitize_package_for_share(req.package)
     errors = validate_package(safe_package)
@@ -142,7 +195,7 @@ def publish(req: PublishRequest, user: Dict[str, Any] = Depends(_require_user), 
             title=req.title,
             description=req.description,
             tags=req.tags,
-            visibility=req.visibility,
+            visibility=visibility,
             package_json=safe_package,
             checksum=checksum,
             package_version=req.package_version,

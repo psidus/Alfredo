@@ -96,6 +96,14 @@ Alfredo uses a `.env` file for configuration. Here are the core variables:
 | `TELEGRAM_BOT_TOKEN` | Token generated via BotFather on Telegram. |
 | `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated list of Telegram user IDs allowed to interact with the bot. |
 | `MASTER_AI_MODEL_ID` | Default LLM model identifier for the Master AI. |
+| `HUB_MODE` | Workflow hub: `off`, `local` (LAN), or `remote`. See [docs/HUB.md](docs/HUB.md). |
+| `HUB_API_URL` | Hub registry URL (e.g. `http://psid.us:8010` for PSID LAN). |
+| `HUB_ORG` | Organization slug for company-wide package visibility. |
+| `OLLAMA_API_BASE` | Ollama server URL; point to a LAN host for shared GPU inference. |
+
+### PSID company hub (LAN)
+
+This PC can act as the PSID workflow server for coworkers on the local network. See **[docs/PSID_HUB.md](docs/PSID_HUB.md)** for setup (hosts file, `run_psid_hub.bat`, Ollama LAN, colleague onboarding).
 
 ---
 

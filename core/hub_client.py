@@ -64,12 +64,23 @@ class HubClient:
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/hub/health", auth=False)
 
-    def register(self, username: str, display_name: str = "", org_slug: str = "") -> Dict[str, Any]:
+    def register(
+        self,
+        username: str,
+        display_name: str = "",
+        org_slug: str = "",
+        invite_token: str = "",
+    ) -> Dict[str, Any]:
         return self._request(
             "POST",
             "/hub/register",
             auth=False,
-            json={"username": username, "display_name": display_name, "org_slug": org_slug},
+            json={
+                "username": username,
+                "display_name": display_name,
+                "org_slug": org_slug,
+                "invite_token": invite_token,
+            },
         )
 
     def publish(

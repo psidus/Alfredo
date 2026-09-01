@@ -118,6 +118,10 @@ services:
       - PYTHONPATH=/app
       - HUB_PORT=8010
       - HUB_DATABASE_URL=postgresql://hub_user:hub_password@hub_postgres:5432/alfredo_hub
+      - HUB_REGISTRATION=${HUB_REGISTRATION:-open}
+      - HUB_INVITE_TOKEN=${HUB_INVITE_TOKEN:-}
+      - HUB_REQUIRED_ORG=${HUB_REQUIRED_ORG:-}
+      - HUB_ALLOW_PUBLIC=${HUB_ALLOW_PUBLIC:-true}
     volumes:
       - ./core:/app/core
       - ./config:/app/config
