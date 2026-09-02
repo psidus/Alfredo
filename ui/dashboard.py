@@ -2746,12 +2746,52 @@ def render_workflow_share_hub(db):
         validate_package,
     )
     from core.hub_client import HubClient, HubClientError
+    from core.hub_setup import (
+        build_colleague_env_snippet,
+        build_hosts_snippet,
+        generate_invite_token,
+        get_lan_ip,
+        hub_container_status,
+        is_running_in_docker,
+        run_hub_compose,
+        suggest_client_hub_url,
+        suggest_colleague_hub_url,
+        wait_for_hub_health,
+    )
+
+    def _hub_profile_from_mode(mode: str) -> str:
+        mode = (mode or "off").strip().lower()
+        if mode == "remote":
+            return "remote"
+        return "company"
+
+    def _hub_mode_from_profile(profile: str) -> str:
+        if profile == "remote":
+            return "remote"
+        return "local"
 
     st.subheader("Share Workflows")
     st.caption(
-        "Packages (`.alfredo.json`) carry **logic only**: agents, tasks, tools names, inputs/outputs, "
-        "suggested models — never API keys. Each machine uses its own `.env`."
+        "Packages (`.alfredo.json`) carry **logic only** — never API keys. "
+        "Configure the hub in **Connect & account**, then publish or install from **Catalog**."
     )
+
+    _publish_flash = st.session_state.get("hub_publish_flash")
+    if _publish_flash:
+        pc1, pc2 = st.columns([6, 1])
+        with pc1:
+            st.success(
+                f"✅ **Publish confirmed** — **{_publish_flash.get('title')}** · "
+                f"package id **{_publish_flash.get('id')}** · slug `{_publish_flash.get('slug')}` · "
+                f"visibility **{_publish_flash.get('visibility')}**"
+            )
+        with pc2:
+            if st.button("OK", key="hub_dismiss_publish_flash_top"):
+                del st.session_state["hub_publish_flash"]
+                st.rerun()
+    _publish_err = st.session_state.get("hub_publish_error")
+    if _publish_err:
+        st.error(f"Last publish failed: {_publish_err}")
 
     env_path = find_dotenv() or os.path.join(os.getcwd(), ".env")
     file_env = dotenv_values(env_path) if os.path.exists(env_path) else {}
@@ -2759,84 +2799,629 @@ def render_workflow_share_hub(db):
     def _hub_env(key, default=""):
         return (os.environ.get(key) or file_env.get(key) or default or "").strip()
 
-    # --- Hub connection settings (UI → .env) ---
-    with st.expander("Hub connection settings", expanded=True):
-        st.markdown(
-            """
-**How sharing works**
+    def _apply_hub_connection(
+        *,
+        mode,
+        url,
+        org,
+        username="",
+        token="",
+        display_name="",
+        server_role="",
+        update_token=True,
+    ):
+        safe_set_key(env_path, "HUB_MODE", mode)
+        safe_set_key(env_path, "HUB_API_URL", url)
+        safe_set_key(env_path, "HUB_ORG", org)
+        if username:
+            safe_set_key(env_path, "HUB_USERNAME", username)
+        if update_token and token:
+            safe_set_key(env_path, "HUB_TOKEN", token)
+        if display_name:
+            safe_set_key(env_path, "HUB_DISPLAY_NAME", display_name)
+        if server_role in ("client", "server_admin"):
+            safe_set_key(env_path, "HUB_SERVER_ROLE", server_role)
+        os.environ["HUB_MODE"] = mode
+        os.environ["HUB_API_URL"] = url
+        os.environ["HUB_ORG"] = org
+        if username:
+            os.environ["HUB_USERNAME"] = username
+        if update_token and token:
+            os.environ["HUB_TOKEN"] = token
+        if display_name:
+            os.environ["HUB_DISPLAY_NAME"] = display_name
+        if server_role in ("client", "server_admin"):
+            os.environ["HUB_SERVER_ROLE"] = server_role
 
-| Mode | When to use |
-|------|-------------|
-| `off` | Only file export/import (USB, email, chat) |
-| `local` | Private company hub on LAN/VPN (recommended for coworkers) |
-| `remote` | Point to a public/global hub URL |
-
-**Visibility when publishing**
-
-- **private** — only you + usernames you share with  
-- **org** — everyone registered with the same Org slug (`HUB_ORG`)  
-- **public** — anyone who can reach this hub  
-
-**Company hub setup (once):** on a server inside the company run  
-`docker compose --profile hub up -d`  
-then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 8010 to the internet.
-            """
+    def _sync_hub_form_from_env(*, profile_hint: str = "company"):
+        """Pre-fill hub widgets from .env when credentials on disk change."""
+        default_url = (
+            hub_url
+            or suggest_client_hub_url(lan_ip=lan_ip)
+            if profile_hint == "company"
+            else (hub_url or "https://hub.example.com")
         )
-        c1, c2 = st.columns(2)
-        with c1:
-            mode_opts = ["off", "local", "remote"]
-            cur_mode = _hub_env("HUB_MODE", "off").lower()
-            if cur_mode not in mode_opts:
-                cur_mode = "off"
-            new_mode = st.selectbox("HUB_MODE", mode_opts, index=mode_opts.index(cur_mode), key="hub_cfg_mode")
-            new_url = st.text_input(
-                "HUB_API_URL",
-                value=_hub_env("HUB_API_URL", "http://localhost:8010"),
-                key="hub_cfg_url",
-                help="Company hub host or global hub URL",
-            )
-            new_org = st.text_input("HUB_ORG (org slug)", value=_hub_env("HUB_ORG", ""), key="hub_cfg_org")
-        with c2:
-            new_user = st.text_input("HUB_USERNAME", value=_hub_env("HUB_USERNAME", ""), key="hub_cfg_user")
-            new_token = st.text_input(
-                "HUB_TOKEN",
-                value=_hub_env("HUB_TOKEN", ""),
-                type="password",
-                key="hub_cfg_token",
-                help="From Register below — never commit to git",
-            )
-        if st.button("Save hub settings to .env", type="primary", key="hub_cfg_save"):
-            try:
-                safe_set_key(env_path, "HUB_MODE", new_mode)
-                safe_set_key(env_path, "HUB_API_URL", new_url)
-                safe_set_key(env_path, "HUB_ORG", new_org)
-                safe_set_key(env_path, "HUB_USERNAME", new_user)
-                if new_token:
-                    safe_set_key(env_path, "HUB_TOKEN", new_token)
-                st.success("Saved. Settings apply immediately for this session.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not write .env: {e}")
+        saved_role = _hub_env("HUB_SERVER_ROLE")
+        if saved_role not in ("client", "server_admin"):
+            saved_role = "server_admin" if _hub_env("HUB_REQUIRED_ORG") else "client"
+        env_sig = "|".join(
+            [
+                hub_mode,
+                hub_url,
+                hub_org,
+                hub_user,
+                hub_token,
+                _hub_env("HUB_DISPLAY_NAME"),
+                _hub_env("HUB_INVITE_TOKEN"),
+                saved_role,
+            ]
+        )
+        if st.session_state.get("_hub_env_sig") == env_sig:
+            return
+        st.session_state["_hub_env_sig"] = env_sig
+        fields = {
+            "hub_profile": _hub_profile_from_mode(hub_mode),
+            "hub_conn_url": default_url,
+            "hub_conn_org": hub_org or "psid",
+            "hub_reg_user": hub_user,
+            "hub_reg_disp": _hub_env("HUB_DISPLAY_NAME"),
+            "hub_reg_org": hub_org or "psid",
+            "hub_existing_user": hub_user,
+            "hub_existing_token": hub_token,
+            "hub_reg_invite": _hub_env("HUB_INVITE_TOKEN"),
+            "hub_server_role": saved_role,
+        }
+        for key, val in fields.items():
+            if val:
+                st.session_state[key] = val
 
+    lan_ip = get_lan_ip()
+    docker_status = hub_container_status()
     hub_mode = _hub_env("HUB_MODE", "off").lower()
     hub_url = _hub_env("HUB_API_URL", "http://localhost:8010")
-    render_status_table(
-        "Current hub connection",
-        {
-            "mode": hub_mode,
-            "url": hub_url,
-            "user": _hub_env("HUB_USERNAME") or "—",
-            "org": _hub_env("HUB_ORG") or "—",
-        },
-        kind="info",
-    )
-
-    sub_local, sub_hub = st.tabs(["Local package", "Hub registry"])
+    hub_user = _hub_env("HUB_USERNAME")
+    hub_token = _hub_env("HUB_TOKEN")
+    hub_org = _hub_env("HUB_ORG")
 
     workflows = db.read_all_workflows() or []
     wf_options = {f"{w['name']} (#{w['id']})": w["id"] for w in workflows}
 
-    with sub_local:
+    tab_connect, tab_catalog, tab_files = st.tabs(
+        ["Connect & account", "Catalog (publish / install)", "File transfer (.alfredo.json)"]
+    )
+
+    # ── Connect & account ──────────────────────────────────────────────
+    with tab_connect:
+        _sync_hub_form_from_env(profile_hint=_hub_profile_from_mode(hub_mode))
+
+        profile_labels = {
+            "company": "Company hub — private LAN/VPN",
+            "remote": "Remote hub — public or hosted URL",
+        }
+        cur_profile = _hub_profile_from_mode(hub_mode)
+        profile = st.radio(
+            "Connection type",
+            options=["company", "remote"],
+            index=["company", "remote"].index(cur_profile),
+            format_func=lambda k: profile_labels[k],
+            horizontal=True,
+            key="hub_profile",
+            help="Company = hub on your office network. Remote = any public hub URL.",
+        )
+        selected_mode = _hub_mode_from_profile(profile)
+
+        is_server_admin = False
+        if profile == "company":
+            server_role = st.radio(
+                "Role of this PC",
+                options=["client", "server_admin"],
+                format_func=lambda r: (
+                    "Client — connect to a company hub on the network"
+                    if r == "client"
+                    else "Server — I run the hub on this PC"
+                ),
+                horizontal=True,
+                key="hub_server_role",
+            )
+            is_server_admin = server_role == "server_admin"
+
+        conn_url = st.text_input(
+            "Hub URL",
+            key="hub_conn_url",
+            help="Company: http://psid.us:8010 · Remote: https://your-public-hub.example.com",
+        )
+        conn_org = st.text_input(
+            "Organization slug",
+            key="hub_conn_org",
+            help="Same org slug for all colleagues. Required for org-visible packages.",
+        )
+
+        server_role = st.session_state.get("hub_server_role", "client")
+        save_col, test_col = st.columns(2)
+        with save_col:
+            if st.button("Save connection", type="primary", key="hub_save_connection"):
+                _apply_hub_connection(
+                    mode=selected_mode,
+                    url=conn_url,
+                    org=conn_org,
+                    server_role=server_role if profile == "company" else "",
+                    update_token=False,
+                )
+                st.success(f"Connection saved (`HUB_MODE={selected_mode}`).")
+                st.rerun()
+        with test_col:
+            test_clicked = st.button("Test connection", key="hub_test_conn")
+
+        hub_up = False
+        health: dict = {}
+        test_url = conn_url if test_clicked else (st.session_state.get("hub_last_health_url") or conn_url)
+        if test_clicked:
+            st.session_state["hub_last_health_url"] = conn_url
+            _apply_hub_connection(
+                mode=selected_mode,
+                url=conn_url,
+                org=conn_org,
+                server_role=server_role if profile == "company" else "",
+                update_token=False,
+            )
+            st.rerun()
+        try:
+            health = HubClient(base_url=test_url).health()
+            hub_up = health.get("status") == "ok"
+            render_status_table("Hub status", health, kind="success")
+        except HubClientError as e:
+            st.error(f"Cannot reach `{test_url}`: {e}")
+
+        if hub_mode in ("local", "remote") and hub_url == conn_url:
+            st.caption(f"Saved: `{hub_mode}` · `{hub_url}` · org `{hub_org or '—'}`")
+        elif hub_mode == "off":
+            st.warning("Connection not saved yet — click **Save connection** or **Test connection**.")
+
+        if profile == "company" and is_server_admin:
+            with st.expander("Hub server on this PC (Docker + access policy)", expanded=not docker_status.get("hub_running")):
+                tip_col, _ = st.columns([20, 1])
+                with tip_col:
+                    st.caption("Start the registry containers, then set who may register and publish.")
+                if is_running_in_docker():
+                    st.button(
+                        "ℹ️",
+                        key="hub_srv_docker_tip",
+                        help="Dashboard is inside Docker — start/stop hub from the host terminal: "
+                        "docker compose --profile hub up -d, or run_psid_hub_start.bat",
+                    )
+                elif not docker_status.get("docker_available"):
+                    st.warning("Docker Desktop is not running.")
+                else:
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Hub", "running" if docker_status.get("hub_running") else "stopped")
+                    m2.metric("Database", "running" if docker_status.get("postgres_running") else "stopped")
+                    m3.metric("LAN IP", lan_ip or "—")
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("Start hub", type="primary", key="hub_srv_start"):
+                            ok, msg = run_hub_compose("up")
+                            st.success("Started.") if ok else st.error(msg)
+                            st.rerun()
+                    with b2:
+                        if st.button("Stop hub", key="hub_srv_stop"):
+                            ok, msg = run_hub_compose("stop")
+                            st.success("Stopped.") if ok else st.error(msg)
+                            st.rerun()
+
+                p1, p2 = st.columns(2)
+                with p1:
+                    srv_reg = st.selectbox(
+                        "Who can register",
+                        ["invite", "open", "closed"],
+                        index=["invite", "open", "closed"].index(
+                            (_hub_env("HUB_REGISTRATION") or "invite").lower()
+                            if (_hub_env("HUB_REGISTRATION") or "invite").lower() in ("invite", "open", "closed")
+                            else "invite"
+                        ),
+                        key="hub_srv_reg",
+                    )
+                    srv_hostname = st.text_input("LAN hostname (optional)", value="psid.us", key="hub_srv_host")
+                with p2:
+                    srv_invite_val = _hub_env("HUB_INVITE_TOKEN") or st.session_state.get("hub_srv_invite_gen") or ""
+                    ic1, ic2 = st.columns([5, 1], vertical_alignment="bottom")
+                    with ic1:
+                        srv_invite = st.text_input("Invite token", value=srv_invite_val, key="hub_srv_invite")
+                    with ic2:
+                        if st.button("Generate", key="hub_srv_gen_invite"):
+                            tok = generate_invite_token()
+                            st.session_state["hub_srv_invite_gen"] = tok
+                            st.session_state["hub_srv_invite"] = tok
+                            st.rerun()
+                    srv_public = st.checkbox(
+                        "Allow public packages on this hub",
+                        value=_hub_env("HUB_ALLOW_PUBLIC", "false").lower() in ("1", "true", "yes"),
+                        key="hub_srv_public",
+                    )
+                if st.button("Save server policy", key="hub_srv_save_policy"):
+                    _apply_hub_connection(
+                        mode=selected_mode,
+                        url=conn_url,
+                        org=conn_org,
+                        server_role=server_role,
+                        update_token=False,
+                    )
+                    safe_set_key(env_path, "HUB_REGISTRATION", srv_reg)
+                    safe_set_key(env_path, "HUB_REQUIRED_ORG", conn_org)
+                    safe_set_key(env_path, "HUB_ALLOW_PUBLIC", "true" if srv_public else "false")
+                    if srv_reg == "invite" and srv_invite:
+                        safe_set_key(env_path, "HUB_INVITE_TOKEN", srv_invite)
+                    st.success("Server policy and connection saved. Restart hub if it was already running.")
+                    st.rerun()
+                if lan_ip and srv_hostname.strip():
+                    st.markdown("**Colleague onboarding (copy to other PCs)**")
+                    st.code(
+                        build_colleague_env_snippet(
+                            hub_url=suggest_colleague_hub_url(lan_ip=lan_ip, hostname=srv_hostname.strip()),
+                            org_slug=conn_org,
+                            ollama_url=f"http://{srv_hostname.strip()}:11434",
+                        ),
+                        language="ini",
+                    )
+                    st.caption("`hosts` file (all PCs):")
+                    st.code(build_hosts_snippet(lan_ip=lan_ip, hostname=srv_hostname.strip()), language="text")
+
+        st.markdown("---")
+        st.markdown("#### Your account")
+
+        hub_display = _hub_env("HUB_DISPLAY_NAME")
+        if hub_user and hub_token:
+            who = f"**@{hub_user}**"
+            if hub_display:
+                who = f"**{hub_display}** (@{hub_user})"
+            st.success(f"Signed in as {who} · org `{hub_org or '—'}` · `{hub_url}`")
+            st.caption("Credentials are saved in `.env` on this PC and will pre-fill on next visit.")
+            if st.button("Sign out (clear token)", key="hub_disconnect"):
+                safe_set_key(env_path, "HUB_TOKEN", "")
+                os.environ["HUB_TOKEN"] = ""
+                st.session_state["hub_existing_token"] = ""
+                st.rerun()
+        else:
+            st.caption("Create a new hub user, or connect with a token you already received.")
+            reg_mode = (health or {}).get("registration_mode") if hub_up else (_hub_env("HUB_REGISTRATION") or "invite")
+            r1, r2 = st.columns(2)
+            with r1:
+                reg_user = st.text_input("Username", key="hub_reg_user")
+                reg_disp = st.text_input("Display name", key="hub_reg_disp")
+            with r2:
+                reg_org = st.text_input("Org slug", key="hub_reg_org")
+                reg_invite = ""
+                if reg_mode == "invite":
+                    reg_invite = st.text_input(
+                        "Invite token",
+                        key="hub_reg_invite",
+                        type="password",
+                        help="Ask the hub admin for this token.",
+                    )
+            if st.button("Register & connect", type="primary", key="hub_register_connect"):
+                try:
+                    _apply_hub_connection(
+                        mode=selected_mode,
+                        url=conn_url,
+                        org=reg_org or conn_org,
+                        display_name=reg_disp,
+                        server_role=server_role if profile == "company" else "",
+                        update_token=False,
+                    )
+                    if profile == "company" and is_server_admin:
+                        if not docker_status.get("hub_running") and docker_status.get("docker_available") and not is_running_in_docker():
+                            ok, msg = run_hub_compose("up")
+                            if not ok:
+                                st.error(msg)
+                                st.stop()
+                    ready, _, err = wait_for_hub_health(conn_url, timeout_sec=30.0)
+                    if not ready:
+                        st.error(f"Hub not ready: {err}")
+                        st.stop()
+                    res = HubClient(base_url=conn_url).register(
+                        reg_user, reg_disp, reg_org or conn_org, invite_token=reg_invite
+                    )
+                    token = res.get("token") or ""
+                    _apply_hub_connection(
+                        mode=selected_mode,
+                        url=conn_url,
+                        org=reg_org or conn_org,
+                        username=res.get("username") or reg_user,
+                        token=token,
+                        display_name=reg_disp or res.get("display_name") or reg_user,
+                        server_role=server_role if profile == "company" else "",
+                    )
+                    st.success("Registered and connected.")
+                    st.rerun()
+                except HubClientError as e:
+                    st.error(str(e))
+
+            st.markdown("##### Already registered?")
+            st.caption("Use this if you registered on another PC and kept your token.")
+            ex1, ex2 = st.columns(2)
+            with ex1:
+                existing_user = st.text_input("Username", key="hub_existing_user")
+            with ex2:
+                existing_token = st.text_input("Token", type="password", key="hub_existing_token")
+            if st.button("Connect with existing token", key="hub_existing_connect"):
+                if not existing_user or not existing_token:
+                    st.error("Enter both username and token.")
+                else:
+                    _apply_hub_connection(
+                        mode=selected_mode,
+                        url=conn_url,
+                        org=conn_org,
+                        username=existing_user,
+                        token=existing_token,
+                        display_name=_hub_env("HUB_DISPLAY_NAME"),
+                        server_role=server_role if profile == "company" else "",
+                    )
+                    st.success("Connected.")
+                    st.rerun()
+
+    # ── Catalog ────────────────────────────────────────────────────────
+    with tab_catalog:
+        if hub_mode not in ("local", "remote"):
+            st.warning(
+                "Hub connection not saved. Open **Connect & account**, set URL and org, "
+                "then click **Save connection**."
+            )
+        elif not hub_user or not hub_token:
+            st.warning(
+                "Account not signed in. In **Connect & account**, click **Register & connect** "
+                "(or **Connect with existing token**)."
+            )
+        else:
+            client = HubClient(base_url=hub_url, username=hub_user, token=hub_token)
+            try:
+                client.health()
+            except HubClientError as e:
+                st.error(f"Hub unreachable at `{hub_url}`: {e}")
+                st.stop()
+
+            def _hub_catalog_cache_key():
+                return f"{hub_url}|{hub_user}"
+
+            def _load_hub_catalog(force: bool = False):
+                ck = _hub_catalog_cache_key()
+                if force or st.session_state.get("hub_catalog_ck") != ck:
+                    st.session_state["hub_catalog_ck"] = ck
+                    st.session_state["hub_catalog_packages"] = client.search(q="", tag="")
+                return st.session_state.get("hub_catalog_packages") or []
+
+            def _filter_hub_packages(packages, query: str, tag_filter: str):
+                q = (query or "").strip().lower()
+                tag_l = (tag_filter or "").strip().lower()
+                out = []
+                for pkg in packages:
+                    if tag_l:
+                        tags = [str(t).lower() for t in (pkg.get("tags") or [])]
+                        if tag_l not in tags:
+                            continue
+                    if q:
+                        blob = " ".join(
+                            [
+                                str(pkg.get("title") or ""),
+                                str(pkg.get("description") or ""),
+                                str(pkg.get("slug") or ""),
+                                str(pkg.get("author_username") or ""),
+                                " ".join(str(t) for t in (pkg.get("tags") or [])),
+                            ]
+                        ).lower()
+                        if q not in blob:
+                            continue
+                    out.append(pkg)
+                return out
+
+            flash = st.session_state.get("hub_publish_flash")
+            if flash:
+                st.success(
+                    f"✅ **Publish confirmed** — **{flash.get('title')}** saved on the hub "
+                    f"(id **{flash.get('id')}**, slug `{flash.get('slug')}`, {flash.get('visibility')}). "
+                    f"Open **Browse & install** to verify."
+                )
+
+            pub_tab, browse_tab = st.tabs(["Publish", "Browse & install"])
+            with pub_tab:
+                st.caption(
+                    "**private** — you + named users · **org** — same organization slug · "
+                    "**public** — anyone on this hub (if allowed by server policy)"
+                )
+
+                def _sync_pub_fields_from_selection():
+                    sel = st.session_state.get("hub_pub_wf", "")
+                    if not sel:
+                        return
+                    name = sel.split(" (#")[0]
+                    st.session_state["hub_pub_title"] = name
+                    slug = name.lower().replace(" ", "-").replace("_", "-")
+                    while "--" in slug:
+                        slug = slug.replace("--", "-")
+                    st.session_state["hub_pub_slug"] = slug.strip("-")[:64]
+
+                if not wf_options:
+                    st.warning("No workflows to publish.")
+                else:
+                    pub_sel = st.selectbox(
+                        "Workflow",
+                        list(wf_options.keys()),
+                        key="hub_pub_wf",
+                        on_change=_sync_pub_fields_from_selection,
+                    )
+                    if st.session_state.get("hub_pub_wf_last") != pub_sel:
+                        _sync_pub_fields_from_selection()
+                        st.session_state["hub_pub_wf_last"] = pub_sel
+
+                    pub_title = st.text_input("Title", key="hub_pub_title")
+                    pub_slug = st.text_input(
+                        "Slug",
+                        key="hub_pub_slug",
+                        help="Unique per author + version. Change this when publishing a different workflow.",
+                    )
+                    pub_desc = st.text_area("Description", key="hub_pub_desc", height=70)
+                    pub_tags = st.text_input("Tags (comma-separated)", key="hub_pub_tags")
+                    pub_vis = st.selectbox("Visibility", ["private", "org", "public"], key="hub_pub_vis")
+                    pub_ver = st.text_input("Version", value="1.0.0", key="hub_pub_ver")
+                    pub_share = st.text_input(
+                        "Share with (private only, comma-separated usernames)",
+                        key="hub_pub_share",
+                    )
+                    if st.button("Publish to hub", type="primary", key="hub_pub_btn"):
+                        try:
+                            st.session_state.pop("hub_publish_error", None)
+                            wf_id = wf_options[st.session_state.get("hub_pub_wf") or pub_sel]
+                            pub_title_val = st.session_state.get("hub_pub_title", pub_title)
+                            pub_slug_val = st.session_state.get("hub_pub_slug", pub_slug)
+                            pkg = export_workflow(
+                                wf_id,
+                                description=pub_desc,
+                                tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
+                                author=client.username,
+                                db=db,
+                            )
+                            res = client.publish(
+                                pkg,
+                                slug=pub_slug_val,
+                                title=pub_title_val,
+                                description=pub_desc,
+                                tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
+                                visibility=pub_vis,
+                                package_version=pub_ver,
+                                share_with=[u.strip() for u in pub_share.split(",") if u.strip()],
+                            )
+                            pkg_id = res.get("id")
+                            st.session_state["hub_publish_flash"] = {
+                                "id": pkg_id,
+                                "title": pub_title_val,
+                                "slug": pub_slug_val,
+                                "visibility": pub_vis,
+                                "workflow": st.session_state.get("hub_pub_wf", pub_sel),
+                            }
+                            st.session_state.pop("hub_catalog_packages", None)
+                            st.session_state.pop("hub_catalog_ck", None)
+                            st.toast(f"✅ Published: {pub_title_val} (id={pkg_id})")
+                            st.rerun()
+                        except Exception as e:
+                            st.session_state["hub_publish_error"] = str(e)
+                            st.error(f"Publish failed: {e}")
+
+            @st.fragment
+            def _hub_browse_live():
+                try:
+                    all_packages = _load_hub_catalog(force=False)
+                except HubClientError as e:
+                    st.error(f"Could not load catalog: {e}")
+                    all_packages = []
+
+                bc1, bc2 = st.columns([4, 1])
+                with bc1:
+                    st.text_input(
+                        "Filter packages",
+                        key="hub_search_q",
+                        placeholder="Start typing — list updates live…",
+                    )
+                with bc2:
+                    st.write("")
+                    st.write("")
+                    if st.button("Refresh catalog", key="hub_search_refresh"):
+                        try:
+                            _load_hub_catalog(force=True)
+                            st.toast("Catalog refreshed")
+                        except HubClientError as e:
+                            st.error(str(e))
+
+                st.text_input("Tag filter (optional)", key="hub_search_tag")
+                q = (st.session_state.get("hub_search_q") or "").strip()
+                tag = (st.session_state.get("hub_search_tag") or "").strip()
+                results = _filter_hub_packages(all_packages, q, tag)
+                if q or tag:
+                    parts = []
+                    if q:
+                        parts.append(f"text `{q}`")
+                    if tag:
+                        parts.append(f"tag `{tag}`")
+                    st.caption(
+                        f"Live filter ({', '.join(parts)}) — **{len(results)}** of **{len(all_packages)}** packages."
+                    )
+                else:
+                    st.caption(f"Showing all **{len(all_packages)}** packages visible to you.")
+
+                if results:
+                    for pkg in results:
+                        with st.container(border=True):
+                            st.markdown(
+                                f"**{pkg.get('title')}** `v{pkg.get('package_version')}` — "
+                                f"@{pkg.get('author_username')} · **{pkg.get('visibility')}** · "
+                                f"⬇ {pkg.get('downloads', 0)}"
+                            )
+                            st.caption(pkg.get("description") or "")
+                            pkg_tags = pkg.get("tags") or []
+                            if pkg_tags:
+                                st.caption("Tags: " + ", ".join(pkg_tags))
+                            is_author = (
+                                str(pkg.get("author_username") or "").strip().lower()
+                                == str(hub_user or "").strip().lower()
+                            )
+                            if is_author:
+                                c_inst, c_share, c_del = st.columns(3)
+                            else:
+                                c_inst, c_share, c_del = st.columns([2, 2, 1])
+                                c_share = None
+                                c_del = None
+                            with c_inst:
+                                if st.button("Install", key=f"hub_inst_{pkg['id']}"):
+                                    try:
+                                        full = client.download(pkg["id"])
+                                        body = full.get("package_json")
+                                        if isinstance(body, str):
+                                            body = loads_package(body)
+                                        result = import_workflow(body, conflict_policy="rename", db=db)
+                                        st.success(f"Installed as **{result['workflow_name']}**")
+                                        for w in result.get("warnings") or []:
+                                            st.warning(w)
+                                    except Exception as e:
+                                        st.error(str(e))
+                            if is_author:
+                                with c_share:
+                                    share_user = st.text_input("Share with", key=f"hub_share_u_{pkg['id']}")
+                                    if st.button("Share", key=f"hub_share_b_{pkg['id']}"):
+                                        try:
+                                            client.share(pkg["id"], share_user)
+                                            st.toast(f"Shared with {share_user}")
+                                        except Exception as e:
+                                            st.error(str(e))
+                                with c_del:
+                                    with st.popover("Remove from hub", use_container_width=True):
+                                        st.caption(
+                                            f"Permanently remove **{pkg.get('title')}** "
+                                            f"`v{pkg.get('package_version')}` from the hub. "
+                                            "Colleagues will no longer see or install it."
+                                        )
+                                        if st.button(
+                                            "Confirm remove",
+                                            key=f"hub_del_{pkg['id']}",
+                                            type="primary",
+                                        ):
+                                            try:
+                                                client.delete(pkg["id"])
+                                                st.session_state.pop("hub_catalog_packages", None)
+                                                st.session_state.pop("hub_catalog_ck", None)
+                                                st.toast(f"Removed {pkg.get('title')} from hub")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(str(e))
+                elif all_packages:
+                    st.info("No packages match your filter. Clear the filter fields to see everything.")
+                else:
+                    st.info(
+                        "No packages visible with your account. Publish one in the **Publish** tab, "
+                        "or check that you share the same org slug as the publisher."
+                    )
+
+            with browse_tab:
+                _hub_browse_live()
+
+    # ── File transfer ────────────────────────────────────────────────────
+    with tab_files:
         st.markdown("#### Export")
         if not wf_options:
             st.warning("No workflows to export.")
@@ -2908,162 +3493,6 @@ then set Mode=`local` and URL=`http://<that-server>:8010`. Do not expose port 80
                         st.warning(w)
             except Exception as e:
                 st.error(f"Import failed: {e}")
-
-    with sub_hub:
-        client = HubClient(
-            base_url=hub_url,
-            username=_hub_env("HUB_USERNAME"),
-            token=_hub_env("HUB_TOKEN"),
-        )
-
-        # Health probe (always useful)
-        hub_up = False
-        try:
-            health = client.health()
-            hub_up = True
-            render_status_table("Hub reachable", health, kind="success")
-        except HubClientError as e:
-            st.error(
-                f"Hub not reachable at `{hub_url}`.\n\n"
-                f"{e}\n\n"
-                "**Fix:** start the hub, then retry.\n"
-                "```bash\ndocker compose --profile hub up -d\n```\n"
-                "Wait until http://localhost:8010/hub/health responds, "
-                "or set HUB_API_URL to your company hub host."
-            )
-
-        st.markdown("#### Register (first time)")
-        st.caption("Creates your hub user and returns a token. Save it with the settings expander above.")
-        ru = st.text_input("Username", value=_hub_env("HUB_USERNAME"), key="hub_reg_user")
-        rd = st.text_input("Display name", key="hub_reg_disp")
-        ro = st.text_input("Org slug", value=_hub_env("HUB_ORG") or "", key="hub_reg_org")
-        if st.button("Register on hub", key="hub_reg_btn"):
-            if not hub_up:
-                st.error("Cannot register: hub is offline. Start it first (see error above).")
-            else:
-                try:
-                    res = client.register(ru, rd, ro)
-                    token = res.get("token") or ""
-                    safe_set_key(env_path, "HUB_USERNAME", res.get("username") or ru)
-                    safe_set_key(env_path, "HUB_TOKEN", token)
-                    if ro:
-                        safe_set_key(env_path, "HUB_ORG", ro)
-                    if hub_mode == "off":
-                        safe_set_key(env_path, "HUB_MODE", "local")
-                    st.success("Registered. Token saved to `.env`. Reload this page / click Save if needed.")
-                    st.code(token)
-                    st.rerun()
-                except HubClientError as e:
-                    st.error(str(e))
-
-        if hub_mode == "off":
-            st.warning("HUB_MODE is `off`. Set it to `local` or `remote` in Hub connection settings to publish/browse.")
-            return
-
-        if not client.username or not client.token:
-            st.warning("Set HUB_USERNAME + HUB_TOKEN (register above or paste into settings).")
-            return
-
-        if not hub_up:
-            return
-
-        st.markdown("#### Publish")
-        st.caption(
-            "Upload workflow **logic** to the hub. Coworkers with access can Install it. "
-            "Use visibility **org** for the whole company, **private** + share for selected people, "
-            "**public** for everyone on this hub."
-        )
-        if wf_options:
-            pub_sel = st.selectbox("Workflow to publish", list(wf_options.keys()), key="hub_pub_wf")
-            pub_title = st.text_input("Title", value=pub_sel.split(" (#")[0], key="hub_pub_title")
-            pub_slug = st.text_input("Slug", value=pub_title.lower().replace(" ", "-")[:64], key="hub_pub_slug")
-            pub_desc = st.text_area("Description", key="hub_pub_desc", height=70)
-            pub_tags = st.text_input("Tags", key="hub_pub_tags")
-            pub_vis = st.selectbox(
-                "Visibility",
-                ["private", "org", "public"],
-                key="hub_pub_vis",
-                help="org = same HUB_ORG; private = you + Share with; public = all hub users",
-            )
-            pub_ver = st.text_input("Package version", value="1.0.0", key="hub_pub_ver")
-            pub_share = st.text_input(
-                "Share with usernames (comma-separated, for private)",
-                key="hub_pub_share",
-                help="Hub usernames of coworkers who should see a private package",
-            )
-            if st.button("Publish to hub", type="primary", key="hub_pub_btn"):
-                try:
-                    pkg = export_workflow(
-                        wf_options[pub_sel],
-                        description=pub_desc,
-                        tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
-                        author=client.username,
-                        db=db,
-                    )
-                    res = client.publish(
-                        pkg,
-                        slug=pub_slug,
-                        title=pub_title,
-                        description=pub_desc,
-                        tags=[t.strip() for t in pub_tags.split(",") if t.strip()],
-                        visibility=pub_vis,
-                        package_version=pub_ver,
-                        share_with=[u.strip() for u in pub_share.split(",") if u.strip()],
-                    )
-                    render_status_table("Package published", res, kind="success", extra_rows={"visibility": pub_vis})
-                except Exception as e:
-                    st.error(str(e))
-
-        st.markdown("---")
-        st.markdown("#### Browse / install")
-        st.caption(
-            "Search finds packages you are allowed to see (your private ones, org packages, "
-            "public ones, and packages shared with you). Install runs the same local import."
-        )
-        q = st.text_input("Search", key="hub_search_q")
-        tag = st.text_input("Filter tag", key="hub_search_tag")
-        if st.button("Search hub", key="hub_search_btn"):
-            try:
-                st.session_state["hub_search_results"] = client.search(q=q, tag=tag)
-            except HubClientError as e:
-                st.error(str(e))
-        results = st.session_state.get("hub_search_results") or []
-        if results:
-            for pkg in results:
-                with st.container(border=True):
-                    st.markdown(
-                        f"**{pkg.get('title')}** `v{pkg.get('package_version')}` — "
-                        f"@{pkg.get('author_username')} · {pkg.get('visibility')} · "
-                        f"⬇ {pkg.get('downloads', 0)}"
-                    )
-                    st.caption(pkg.get("description") or "")
-                    tags = pkg.get("tags") or []
-                    if tags:
-                        st.caption("Tags: " + ", ".join(tags))
-                    c_inst, c_share = st.columns(2)
-                    with c_inst:
-                        if st.button("Install", key=f"hub_inst_{pkg['id']}"):
-                            try:
-                                full = client.download(pkg["id"])
-                                body = full.get("package_json")
-                                if isinstance(body, str):
-                                    body = loads_package(body)
-                                result = import_workflow(body, conflict_policy="rename", db=db)
-                                st.success(f"Installed as **{result['workflow_name']}**")
-                                for w in result.get("warnings") or []:
-                                    st.warning(w)
-                            except Exception as e:
-                                st.error(str(e))
-                    with c_share:
-                        share_user = st.text_input("Share with", key=f"hub_share_u_{pkg['id']}")
-                        if st.button("Share", key=f"hub_share_b_{pkg['id']}"):
-                            try:
-                                client.share(pkg["id"], share_user)
-                                st.toast(f"Shared with {share_user}")
-                            except Exception as e:
-                                st.error(str(e))
-        elif st.session_state.get("hub_search_results") is not None:
-            st.info("No packages matched (or none visible with your credentials).")
 
 
 def render_workflow_assembler():

@@ -123,3 +123,6 @@ class HubClient:
             f"/hub/packages/{package_id}/share",
             json={"username": username},
         )
+
+    def delete(self, package_id: int) -> Dict[str, Any]:
+        return self._request("DELETE", f"/hub/packages/{package_id}") or {"ok": True}

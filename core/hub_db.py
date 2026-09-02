@@ -190,6 +190,7 @@ class HubDB:
         existing = self._execute("SELECT * FROM hub_users WHERE username = ?", (username,), fetch="one")
         if existing:
             raise ValueError("username already taken")
+        org_slug = (org_slug or "").strip().lower()
         token = secrets.token_urlsafe(32)
         if self._use_pg:
             row = self._execute(
@@ -247,7 +248,7 @@ class HubDB:
         visibility = (visibility or "private").lower()
         if visibility not in ("private", "org", "public"):
             raise ValueError("visibility must be private|org|public")
-        org_slug = author.get("org_slug") or ""
+        org_slug = (author.get("org_slug") or "").strip().lower()
         if visibility == "org" and not org_slug:
             raise ValueError("org visibility requires user org_slug")
 
@@ -349,6 +350,19 @@ class HubDB:
             pass
         return True
 
+    def delete_package(self, package_id: int, owner_id: int) -> bool:
+        pkg = self.get_package(package_id, include_body=False)
+        if not pkg:
+            raise ValueError("Package not found")
+        if pkg.get("author_id") != owner_id:
+            raise ValueError("Only the author can delete this package")
+        self._execute("DELETE FROM hub_shares WHERE package_id = ?", (package_id,))
+        self._execute(
+            "DELETE FROM hub_packages WHERE id = ? AND author_id = ?",
+            (package_id, owner_id),
+        )
+        return True
+
     def user_can_access(self, pkg: Dict[str, Any], user: Optional[Dict[str, Any]]) -> bool:
         if pkg.get("visibility") == "public":
             return True
@@ -356,7 +370,9 @@ class HubDB:
             return False
         if pkg.get("author_id") == user.get("id"):
             return True
-        if pkg.get("visibility") == "org" and pkg.get("org_slug") and pkg.get("org_slug") == user.get("org_slug"):
+        pkg_org = (pkg.get("org_slug") or "").strip().lower()
+        user_org = (user.get("org_slug") or "").strip().lower()
+        if pkg.get("visibility") == "org" and pkg_org and pkg_org == user_org:
             return True
         share = self._execute(
             "SELECT 1 AS ok FROM hub_shares WHERE package_id = ? AND shared_with_user_id = ?",
@@ -390,8 +406,9 @@ class HubDB:
                 if tag_l not in tags:
                     continue
             if q:
-                blob = f"{pkg.get('title','')} {pkg.get('description','')} {pkg.get('author_username','')}".lower()
-                if q not in blob and q not in (pkg.get("slug") or "").lower():
+                blob = f"{pkg.get('title','')} {pkg.get('description','')} {pkg.get('author_username','')} {pkg.get('slug','')}".lower()
+                tags_blob = " ".join(str(t) for t in (pkg.get("tags") or [])).lower()
+                if q not in blob and q not in tags_blob:
                     continue
             results.append(pkg)
             if len(results) >= limit:

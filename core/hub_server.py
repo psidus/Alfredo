@@ -248,6 +248,21 @@ def share(
     return {"ok": True, "shared_with": req.username}
 
 
+@app.delete("/hub/packages/{package_id}")
+def delete_package(
+    package_id: int,
+    user: Dict[str, Any] = Depends(_require_user),
+    hub: HubDB = Depends(get_hub),
+):
+    try:
+        hub.delete_package(package_id, user["id"])
+    except ValueError as e:
+        msg = str(e)
+        code = 404 if "not found" in msg.lower() else 403
+        raise HTTPException(status_code=code, detail=msg)
+    return {"ok": True, "deleted_id": package_id}
+
+
 def start_hub_server(host: str = "0.0.0.0", port: int = None):
     import uvicorn
     port = port or int(os.getenv("HUB_PORT", "8010"))
