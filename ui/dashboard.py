@@ -24,6 +24,8 @@ from core.workflow_graph import (
     NODE_TYPE_EXPORT,
     NODE_TYPE_HITL,
     NODE_TYPE_INPUT,
+    NODE_TYPE_LEVEL,
+    NODE_TYPE_LOOP,
     NODE_TYPE_TASK,
     canonicalize_graph,
     graph_to_dot,
@@ -3955,7 +3957,13 @@ def render_workflow_assembler():
                         t_name = (task.get('name') or f"Task #{task_id}") if task else "Unknown"
                         return f"{t_name} ({step.get('id')})"
 
-                    levels = sorted(list(set(step.get("execution_level", 1) for step in st.session_state.wf_selected_task_ids)))
+                    levels = sorted(
+                        {
+                            step.get("execution_level", 1)
+                            for step in st.session_state.wf_selected_task_ids
+                            if step.get("type") != NODE_TYPE_LEVEL
+                        }
+                    )
                     if not levels:
                         levels = [1]
 
@@ -3980,6 +3988,8 @@ def render_workflow_assembler():
                             st.markdown(f"### Level {lvl}")
 
                             for i, step in enumerate(st.session_state.wf_selected_task_ids):
+                                if step.get("type") == NODE_TYPE_LEVEL:
+                                    continue
                                 if step.get("execution_level", 1) != lvl:
                                     continue
 
@@ -4277,8 +4287,13 @@ def render_workflow_assembler():
                     # The db_manager processes task_ids_json into task_ids list automatically
                     task_ids = workflow.get('task_ids', [])
                     st.markdown(f"**Requires Human Check:** {'Yes' if workflow['requires_human_check'] else 'No'}")
-                    # Grouping by execution level
-                    levels = sorted(list(set(step.get("execution_level", 1) if isinstance(step, dict) else 1 for step in task_ids)))
+                    # Grouping by execution level (ignore canvas-only level column nodes)
+                    def _step_exec_level(step):
+                        if isinstance(step, dict) and step.get("type") == NODE_TYPE_LEVEL:
+                            return None
+                        return step.get("execution_level", 1) if isinstance(step, dict) else 1
+
+                    levels = sorted({lv for step in task_ids if (lv := _step_exec_level(step)) is not None})
                     if not levels:
                         levels = [1]
                     
@@ -4303,17 +4318,21 @@ def render_workflow_assembler():
                             st.markdown(f"### 📍 Livello {lvl}")
                         
                             for i, step in enumerate(task_ids):
+                                ntype = step.get("type") if isinstance(step, dict) else None
+                                # Level columns are canvas layout chrome — not executable tasks
+                                if ntype == NODE_TYPE_LEVEL:
+                                    continue
                                 exec_lvl = step.get("execution_level", 1) if isinstance(step, dict) else 1
                                 if exec_lvl != lvl:
                                     continue
                                 
                                 with st.container(border=True):
-                                    ntype = step.get("type") if isinstance(step, dict) else None
                                     is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
                                     is_seq = isinstance(step, dict) and step.get("type") == "sequential"
                                     is_hitl = ntype == "hitl"
                                     is_export = ntype == "export"
                                     is_input = ntype == "input"
+                                    is_loop = ntype == NODE_TYPE_LOOP
                                     if is_hitl:
                                         st.markdown(f"**HITL** `{step.get('id')}` — {step.get('message') or 'gate'}")
                                     elif is_export:
@@ -4325,6 +4344,11 @@ def render_workflow_assembler():
                                         st.markdown(
                                             f"**INPUT** `{step.get('id')}` — keys: "
                                             f"{', '.join(step.get('keys') or []) or 'user_input'}"
+                                        )
+                                    elif is_loop:
+                                        st.markdown(
+                                            f"**LOOP** `{step.get('id')}` — "
+                                            f"{step.get('loop_mode') or 'for_each'} / {step.get('scope') or 'nodes'}"
                                         )
                                     elif not is_batch and not is_seq:
                                         task_id = step if isinstance(step, int) else step.get("task_id")
