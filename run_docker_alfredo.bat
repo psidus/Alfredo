@@ -8,6 +8,19 @@ if not exist .env (
     copy .env.example .env
 )
 
+:: Ensure Docker Desktop is running
+docker info >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo Docker Desktop is not running. Starting Docker Desktop...
+    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    echo Waiting for Docker engine to initialize...
+    :wait_docker_ready
+    timeout /t 3 /nobreak >nul
+    docker info >nul 2>&1
+    if %ERRORLEVEL% NEQ 0 goto wait_docker_ready
+    echo Docker is ready!
+)
+
 :: Start containers in detached mode (smart mount allows code changes without rebuilding)
 docker compose up -d
 
