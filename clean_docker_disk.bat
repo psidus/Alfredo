@@ -7,9 +7,9 @@ echo    PULIZIA CACHE E DISCO DOCKER (Alfredo AI OS)
 echo ======================================================
 echo.
 echo Questa procedura eliminera':
-echo  - Build cache accumulata di Docker (BuildKit)
-echo  - Immagini vecchie non utilizzate
-echo  - Container e volumi orfani
+echo  - Build cache non utilizzata di Docker (BuildKit)
+echo  - Immagini vecchie/dangling e duplicati legacy
+echo  - Container e reti non utilizzati (i dati del database e l'immagine alfredo-app sono preservati)
 echo.
 echo Non verra' toccato nessun file di progetto o del tuo PC.
 echo.
@@ -35,12 +35,15 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [2/4] Pulizia Build Cache di Docker...
-docker builder prune -a -f
+echo [2/4] Pulizia Build Cache non utilizzata di Docker...
+docker builder prune -f
 
 echo.
-echo [3/4] Pulizia Immagini e Container inutilizzati...
-docker system prune -a --volumes -f
+echo [3/4] Pulizia Container terminati, Immagini orfane e duplicati legacy...
+docker rmi alfredo-api:latest alfredo-dashboard:latest alfredo-headroom_proxy:latest alfredo-hub:latest >nul 2>&1
+docker image prune -f
+docker container prune -f
+docker network prune -f
 
 echo.
 echo [4/4] Ottimizzazione disco WSL e rilascio spazio su C:...
