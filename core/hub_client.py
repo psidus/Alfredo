@@ -21,7 +21,10 @@ class HubClient:
         username: Optional[str] = None,
         token: Optional[str] = None,
     ):
-        self.base_url = (base_url or os.getenv("HUB_API_URL") or "http://localhost:8010").rstrip("/")
+        raw_url = (base_url or os.getenv("HUB_API_URL") or "http://localhost:8010").strip().rstrip("/")
+        if raw_url and not (raw_url.startswith("http://") or raw_url.startswith("https://")):
+            raw_url = f"http://{raw_url}"
+        self.base_url = raw_url
         self.username = username or os.getenv("HUB_USERNAME") or ""
         self.token = token or os.getenv("HUB_TOKEN") or ""
 

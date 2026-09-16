@@ -2967,12 +2967,13 @@ def render_workflow_share_hub(db):
                 update_token=False,
             )
             st.rerun()
-        try:
-            health = HubClient(base_url=test_url).health()
-            hub_up = health.get("status") == "ok"
-            render_status_table("Hub status", health, kind="success")
-        except HubClientError as e:
-            st.error(f"Cannot reach `{test_url}`: {e}")
+        if test_url and test_url.strip():
+            try:
+                health = HubClient(base_url=test_url.strip()).health()
+                hub_up = health.get("status") == "ok"
+                render_status_table("Hub status", health, kind="success")
+            except HubClientError as e:
+                st.error(f"Cannot reach `{test_url}`: {e}")
 
         if hub_mode in ("local", "remote") and hub_url == conn_url:
             st.caption(f"Saved: `{hub_mode}` · `{hub_url}` · org `{hub_org or '—'}`")

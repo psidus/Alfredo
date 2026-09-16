@@ -55,7 +55,8 @@ def seed_startapp_example():
     print("Creating tasks...")
     
     def get_or_create_task(desc, **kwargs):
-        db.cursor.execute("SELECT id FROM tasks WHERE description = ?", (desc,))
+        ph = "%s" if os.getenv("DATABASE_URL") else "?"
+        db.cursor.execute(f"SELECT id FROM tasks WHERE description = {ph}", (desc,))
         res = db.cursor.fetchone()
         if res:
             return res['id']
