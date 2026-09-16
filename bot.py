@@ -174,6 +174,54 @@ async def _send_workflow_list(chat_id: int, bot) -> None:
     )
 
 
+_WORKFLOW_MENU_PHRASES = (
+    "show workflows",
+    "show me the workflows",
+    "show me available workflows",
+    "show available workflows",
+    "show me the available workflows",
+    "show saved workflows",
+    "show me saved workflows",
+    "list workflows",
+    "list the workflows",
+    "list available workflows",
+    "available workflows",
+    "saved workflows",
+    "workflow list",
+    "workflows list",
+    "show me the list of workflows",
+    "mostrami i workflow",
+    "mostrami i workflows",
+    "mostra i workflow",
+    "mostra i workflows",
+    "mostrami i workflow disponibili",
+    "mostra i workflow disponibili",
+    "workflow disponibili",
+    "workflows disponibili",
+    "elenco workflow",
+    "elenco dei workflow",
+    "lista workflow",
+    "lista dei workflow",
+    "workflow salvati",
+    "workflows salvati",
+)
+
+
+def _wants_workflow_menu(text: str) -> bool:
+    """True when the user is asking to see the saved-workflow start menu."""
+    if not text:
+        return False
+    lowered = text.strip().lower()
+    return any(phrase in lowered for phrase in _WORKFLOW_MENU_PHRASES)
+
+
+async def _present_workflow_menu(chat_id: int, bot, user_data: dict) -> int:
+    """Show the /start dual-mode menu and end the current conversation."""
+    user_data.clear()
+    await _send_workflow_list(chat_id, bot)
+    return ConversationHandler.END
+
+
 def _resolve_db_placeholders(text: str, task_record: dict) -> str:
     """
     Resolves DB-set placeholder values in a text string for display purposes.
@@ -387,6 +435,9 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return ConversationHandler.END
 
+    if _wants_workflow_menu(user_input):
+        return await _present_workflow_menu(chat_id, context.bot, context.user_data)
+
     status_msg = await update.message.reply_text(
         "🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML
     )
@@ -398,6 +449,13 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
 
     result = await asyncio.to_thread(master_ai.chat_plan, user_input, saved_context=accumulated_context)
+
+    if result.get("status") == "show_workflows":
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        return await _present_workflow_menu(chat_id, context.bot, context.user_data)
 
     context.user_data["chat_history"].append({"role": "user", "content": user_input})
     context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
@@ -472,6 +530,9 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['execution_task'] = asyncio.create_task(execute_crew(update, context))
         return ConversationHandler.END
 
+    if _wants_workflow_menu(user_input) and not context.user_data.get("base_workflow"):
+        return await _present_workflow_menu(chat_id, context.bot, context.user_data)
+
     # If we have a decomposed plan waiting for confirmation:
     if context.user_data.get("final_plan") and not context.user_data.get("plan_confirmed"):
         user_input_lower = user_input.strip().lower()
@@ -492,6 +553,13 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
     accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
 
     result = await asyncio.to_thread(master_ai.chat_plan, user_input, chat_history, base_workflow, accumulated_context)
+
+    if result.get("status") == "show_workflows":
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        return await _present_workflow_menu(chat_id, context.bot, context.user_data)
 
     chat_history.append({"role": "user", "content": user_input})
     chat_history.append({"role": "assistant", "content": result["response"]})
@@ -1096,17 +1164,8 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             # Pass global context (all agents' outputs) to the refiner so the
             # polished report covers the ENTIRE workflow, not just the last task.
-            user_input_str = str(execution_context.get("user_input", "") or "")
-            topic_str = str(execution_context.get("topic", "") or "")
-            combined_user_text = f"{user_input_str} {topic_str}".lower()
-
-            target_lang = None
-            italian_cues = ["italiano", "in italiano", "ciao", "vorrei", "fammi", "crea", "cerca", "analizza", "riassumi", "per favore"]
-            if any(cue in combined_user_text for cue in italian_cues):
-                target_lang = "Italian"
-
             refiner_input = global_context if global_context else str(final_result)
-            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input, target_lang)
+            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input, "English")
             logger.info(f"User {user_id}: Output refinement complete.")
         except Exception as refine_err:
             logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
@@ -1336,10 +1395,12 @@ async def handle_context_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
     if choice == "context_new":
         db.clear_context(str(chat_id))
+        context.user_data.clear()
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(
-            chat_id=chat_id, text="Memory cleared. Let's start a new conversation! 🆕"
+            chat_id=chat_id, text="Memory cleared. Starting a new session."
         )
+        await _send_workflow_list(chat_id, context.bot)
     elif choice == "context_continue":
         await query.edit_message_reply_markup(reply_markup=None)
         await context.bot.send_message(

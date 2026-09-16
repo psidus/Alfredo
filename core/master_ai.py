@@ -76,9 +76,11 @@ Your goal is to help the user design a plan to achieve their objective using a t
 {saved_context_section}
 
 You must maintain a conversational tone in your 'response'.
+LANGUAGE: Your 'response' to the user MUST always be in English, even if the user writes in Italian or another language. You may still understand non-English input, including confirmations such as "procedi", "confermo", "vai".
 If the user asks for changes, acknowledge them, update your internal plan, and ask if they agree.
 If the user explicitly confirms the plan (e.g., saying "procedi", "confermo", "vai", "ok", "yes", "go", or any affirmative), you MUST set the "status" to "ready" and provide the fully fleshed out plan in the "plan" object.
 If the user asks to generate a specific file (e.g. "create a pdf", "write a word document with the resume") based on the SAVED GLOBAL CONTEXT, set "status" to "export", list the formats in "plan.expected_exports", and explain that you are extracting the files.
+If the user asks to see, list, or show the saved/available workflows (e.g. "show available workflows", "mostrami i workflow disponibili", "elenco workflow"), set "status" to "show_workflows", leave "plan" null, and put a short English acknowledgement in "response". The bot will display the workflow menu.
 Otherwise, set the "status" to "planning", provide your conversational response in "response" (e.g. answering questions using the SAVED GLOBAL CONTEXT), and you may leave "plan" null or provide a draft.
 
 *** CRITICAL — READ THIS BEFORE EVERYTHING ELSE ***
@@ -121,9 +123,9 @@ When creating or modifying workflows, you MUST enforce this dual-memory architec
 
 OUTPUT FORMAT (JSON ONLY):
 {
-  "status": "planning" | "ready" | "export",
+  "status": "planning" | "ready" | "export" | "show_workflows",
   "modified": false | true,
-  "response": "Your conversational reply to the user (use Markdown if needed, keep it concise and helpful). NEVER ask for required_inputs here.",
+  "response": "Your conversational reply to the user in English (use Markdown if needed, keep it concise and helpful). NEVER ask for required_inputs here.",
   "plan": {
     "expected_exports": ["python", "markdown", "json", "pdf", "docx"],
     "agents": [
@@ -205,7 +207,7 @@ Your job is to transform that raw output into a polished, clear, and user-friend
 
 YOUR RESPONSIBILITIES:
 1. **Formatting & Clarity**: Fix syntax, grammar, and structure. Use clear headings, bullet points, and numbered lists. Remove any agent-internal jargon, debugging notes, or redundant reasoning.
-2. **Translation & Natural Language**: The final report MUST be written in the user's conversational language. If the user interaction or target language is Italian (e.g., requested in Italian or user spoke Italian), translate and present the report in Italian even if the source papers or raw agent text are in English. Strip out "Vector DB jargon" like `# Topic:` or `[KEYWORDS: ...]` tags, and rewrite rigid bullet points into flowing, natural language.
+2. **Translation & Natural Language**: The final report MUST be written in English, even if the user wrote in another language or the raw agent text is not English. Do not mirror the user's language. Strip out "Vector DB jargon" like `# Topic:` or `[KEYWORDS: ...]` tags, and rewrite rigid bullet points into flowing, natural language.
 3. **Code vs Intermediate Data**: PRESERVE actual programming code (e.g. Python scripts, shell commands, SQL queries) inside code blocks with their language tags. However, do NOT output raw JSON dumps or agent-to-agent JSON dictionaries (`[{"title": ...}]`) as raw code blocks: parse and convert all intermediate JSON data into elegant Markdown bullet points, bibliographies, or tables.
 4. **Completeness & Synthesis**: Ensure ALL findings, articles, links, citations, explanations, and key details produced by the agents are fully preserved. Do NOT omit, drop, or truncate items from bibliographies, search results, or analysis sections. Merge overlapping sections and eliminate pure repetition, but ensure all distinct facts, links, and takeaways remain intact in full.
 5. **Source & Link Integrity**: Preserve all real URLs (such as https://doi.org/..., https://arxiv.org/...). If a paper does not have a verified URL, write 'URL not available'. NEVER invent fake citations or synthetic URLs (e.g. PMC12345678, 00123) and never output placeholder strings like '[Exact URL]'.
@@ -809,7 +811,7 @@ class MasterAI:
         
         Args:
             raw_output: The raw string output from crew.kickoff().
-            target_language: Optional language to force output (e.g. 'Italian', 'English').
+            target_language: Optional language to force output (defaults to English).
         Returns:
             str: The refined, polished report ready for the end user.
         """
@@ -817,7 +819,7 @@ class MasterAI:
         if not raw_str:
             return "The workflow completed but produced no output. Please try again with more specific instructions."
 
-        lang_instruction = ""
+        lang_instruction = "MANDATORY LANGUAGE REQUIREMENT: Translate and write the ENTIRE refined report in English."
         if target_language:
             lang_instruction = f"MANDATORY LANGUAGE REQUIREMENT: Translate and write the ENTIRE refined report in {target_language}."
 
