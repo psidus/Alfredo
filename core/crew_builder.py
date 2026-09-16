@@ -132,6 +132,7 @@ ALLOWED_TOOLS = {
     "search_files": local_tools.search_files,
     # Web & communication
     "search_web": local_tools.search_web,
+    "search_scientific_literature": local_tools.search_scientific_literature,
     "ask_operator": local_tools.ask_operator,
     # Terminal
     "execute_shell_command": terminal_executor.execute_shell_command,

@@ -10,8 +10,8 @@ def DBManager() -> Union[SQLiteManager, PostgresManager]:
     """
     db_url = os.environ.get("DATABASE_URL")
     if db_url:
-        print("🚀 DBManager Router: Connecting to PostgreSQL database...")
+        print("[DBManager Router] Connecting to PostgreSQL database...")
         return PostgresManager(db_url=db_url)
     else:
-        print("⚠️ DBManager Router: DATABASE_URL not found. Falling back to lightweight SQLite local database...")
+        print("[DBManager Router] DATABASE_URL not found. Falling back to lightweight SQLite local database...")
         return SQLiteManager()

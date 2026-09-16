@@ -103,11 +103,22 @@ def whitelist_check(func):
 # --- Shared Helpers ---
 
 async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, parse_mode=None, reply_markup=None):
-    """Sends a message, splitting it into chunks if it exceeds Telegram's limit."""
+    """Sends a message, splitting it into chunks if it exceeds Telegram's limit, with graceful plain text fallback."""
+    import re
     MAX_LEN = 3900
     if len(text) <= MAX_LEN:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-        return
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
+            return
+        except Exception as e:
+            if parse_mode:
+                logger.warning(f"send_long_message single chunk failed with parse_mode={parse_mode}: {e}. Retrying as plain text.")
+                plain_text = re.sub(r'<[^>]+>', '', text)
+                if not plain_text.strip():
+                    plain_text = text
+                await context.bot.send_message(chat_id=chat_id, text=plain_text, parse_mode=None, reply_markup=reply_markup)
+                return
+            raise
 
     chunks = []
     current_chunk = ""
@@ -124,13 +135,21 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
     if current_chunk:
         chunks.append(current_chunk)
 
-    for i, chunk in enumerate(chunks):
-        markup = reply_markup if i == len(chunks) - 1 else None
+    valid_chunks = [c for c in chunks if c.strip()]
+    if not valid_chunks:
+        return
+
+    for i, chunk in enumerate(valid_chunks):
+        markup = reply_markup if i == len(valid_chunks) - 1 else None
+        chunk_text = chunk.strip()
         try:
-            await context.bot.send_message(chat_id=chat_id, text=chunk.strip(), parse_mode=parse_mode, reply_markup=markup)
+            await context.bot.send_message(chat_id=chat_id, text=chunk_text, parse_mode=parse_mode, reply_markup=markup)
         except Exception as e:
             logger.warning(f"Failed to send chunk with parse_mode {parse_mode}. Falling back to plain text. Error: {e}")
-            await context.bot.send_message(chat_id=chat_id, text=chunk.strip(), reply_markup=markup)
+            plain_chunk = re.sub(r'<[^>]+>', '', chunk_text)
+            if not plain_chunk.strip():
+                plain_chunk = chunk_text
+            await context.bot.send_message(chat_id=chat_id, text=plain_chunk, parse_mode=None, reply_markup=markup)
 
 async def _send_workflow_list(chat_id: int, bot) -> None:
     """Sends the workflow selection menu to the given chat_id."""
@@ -171,46 +190,58 @@ def _resolve_db_placeholders(text: str, task_record: dict) -> str:
     return text
 
 
-def format_plan_summary(plan: dict) -> str:
-    """Formats the JSON plan into a human-readable summary for Telegram."""
+def format_plan_summary(plan: dict, as_html: bool = True) -> str:
+    """Formats the JSON plan into a comprehensive, human-readable summary for Telegram showing ALL tasks."""
     if not plan:
         return ""
     
     import html as html_module
-    def esc(text):
-        """Escape HTML entities in dynamic text to prevent Telegram parse errors."""
-        return html_module.escape(str(text)) if text else ""
+    import re
 
-    summary = "<b>📋 Proposed Workflow Plan:</b>\n\n"
+    def esc(text):
+        """Escape HTML entities in dynamic text if as_html is True."""
+        if not text:
+            return ""
+        if as_html:
+            return html_module.escape(str(text))
+        return str(text)
+
+    b_open, b_close = ("<b>", "</b>") if as_html else ("", "")
+    i_open, i_close = ("<i>", "</i>") if as_html else ("", "")
+    c_open, c_close = ("<code>", "</code>") if as_html else ("", "")
+
+    summary = f"{b_open}📋 Proposed Workflow Plan:{b_close}\n\n"
 
     # 1. Expected Exports
     expected_exports = plan.get("expected_exports", [])
     if expected_exports:
         exports_str = ", ".join([esc(x).upper() for x in expected_exports])
-        summary += f"<b>📁 Expected Files:</b> {exports_str}\n\n"
+        summary += f"{b_open}📁 Expected Files:{b_close} {exports_str}\n\n"
 
     # 2. Agents Section
-    summary += "<b>👥 Team Composition:</b>\n"
+    summary += f"{b_open}👥 Team Composition:{b_close}\n"
     agents = plan.get("agents", [])
     if not agents:
-        summary += "<i>No agents defined yet.</i>\n"
+        summary += f"{i_open}No agents defined yet.{i_close}\n"
     for i, agent in enumerate(agents):
         role_str = agent.get('role', '').replace(" specialized in {specialization}", "").replace("{specialization}", "").strip()
         goal_str = agent.get('goal', '').replace("{specialization}", "").strip()
         
         # Safeguard any other unreplaced brackets just in case
-        import re
         role_str = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[\1]', role_str)
         goal_str = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[\1]', goal_str)
         
-        summary += f"{i+1}. <b>{esc(role_str)}</b>\n   🎯 <i>Goal:</i> {esc(goal_str)}\n"
+        summary += f"{i+1}. {b_open}{esc(role_str)}{b_close}\n"
+        if goal_str:
+            summary += f"   🎯 {i_open}Goal:{i_close} {esc(goal_str)}\n"
 
-    # 2. Tasks Section
-    summary += "\n<b>📝 Execution Steps:</b>\n"
+    # 3. Tasks Section - Show ALL tasks completely
     tasks = plan.get("tasks", [])
+    summary += f"\n{b_open}📝 Execution Steps ({len(tasks)} tasks):{b_close}\n"
     if not tasks:
-        summary += "<i>No tasks defined yet.</i>\n"
+        summary += f"{i_open}No tasks defined yet.{i_close}\n"
     for i, task in enumerate(tasks):
+        task_name = task.get('name') or f"Task {i+1}"
         desc = task.get('description', '') or ''
         
         raw_role = task.get('agent_role', '')
@@ -220,24 +251,36 @@ def format_plan_summary(plan: dict) -> str:
         assignee_text = esc(clean_role)
         specialization = task.get('agent_specialization')
         if specialization:
-            assignee_text += f" <b>{{{esc(specialization)}}}</b>"
+            assignee_text += f" [{esc(specialization)}]"
             
-        # Full description (send_long_message splits across Telegram's 4096 limit)
-        summary += f"{i+1}. {esc(desc)}\n   👤 <i>Assignee:</i> {assignee_text}\n"
+        summary += f"\n{b_open}{i+1}. {esc(task_name)}{b_close}\n"
+        if desc and desc.strip() != task_name.strip():
+            summary += f"   📄 {esc(desc.strip())}\n"
+        if assignee_text:
+            summary += f"   👤 {i_open}Assignee:{i_close} {assignee_text}\n"
+
+        tools = task.get('tools') or []
+        if tools:
+            tools_str = ", ".join([f"{c_open}{esc(t)}{c_close}" for t in tools])
+            summary += f"   🛠 {i_open}Tools:{i_close} {tools_str}\n"
+
         # Show required inputs that will be collected before execution
         req_inputs = task.get('required_inputs') or []
         if req_inputs:
             keys = []
             for ri in req_inputs:
                 if isinstance(ri, dict):
-                    keys.append(f"<code>{esc(ri.get('key', '?'))}</code>")
+                    keys.append(f"{c_open}{esc(ri.get('key', '?'))}{c_close}")
                 elif isinstance(ri, str):
-                    keys.append(f"<code>{esc(ri)}</code>")
+                    keys.append(f"{c_open}{esc(ri)}{c_close}")
             if keys:
                 input_keys = ', '.join(keys)
-                summary += f"   📋 <i>Inputs needed:</i> {input_keys}\n"
+                summary += f"   📋 {i_open}Inputs needed:{i_close} {input_keys}\n"
 
-    summary += "\n<i>Do you want to proceed or make any changes?</i>"
+        if task.get('human_validation'):
+            summary += f"   ⚠️ {i_open}Requires Human Approval before proceeding{i_close}\n"
+
+    summary += f"\n{i_open}Do you want to proceed or make any changes?{i_close}"
     return summary
 
 
@@ -290,11 +333,18 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
         a_rec = db.read_agent(t_rec['agent_id']) if t_rec.get('agent_id') else None
         agent_role = a_rec.get('role', 'Unknown agent') if a_rec else 'Unknown agent'
         agent_display = _resolve_db_placeholders(agent_role, t_rec)
-        t_label = t_rec.get('name') or t_rec.get('description', '')[:60]
-        t_label = _resolve_db_placeholders(t_label, t_rec)
+        t_name = t_rec.get('name')
+        t_desc = t_rec.get('description') or ''
+        t_label = _resolve_db_placeholders(t_name or t_desc, t_rec)
         req_inputs = t_rec.get('required_inputs') or []
-        ri_hint = f" — <i>needs: {', '.join(ri.get('key', '?') for ri in req_inputs)}</i>" if req_inputs else ""
-        return f"{prefix}<b>{t_label}</b> — {agent_display}{ri_hint}"
+        ri_hint = f"\n   📋 <i>Inputs needed: {', '.join(ri.get('key', '?') for ri in req_inputs)}</i>" if req_inputs else ""
+        tools = t_rec.get('tools') or []
+        tools_hint = f"\n   🛠 <i>Tools: {', '.join(tools)}</i>" if tools else ""
+        desc_block = ""
+        if t_name and t_desc and t_desc.strip() != t_name.strip():
+            clean_desc = _resolve_db_placeholders(t_desc.strip(), t_rec)
+            desc_block = f"\n   📄 {clean_desc}"
+        return f"{prefix}<b>{t_label}</b> — <i>{agent_display}</i>{desc_block}{tools_hint}{ri_hint}"
 
     for i, step in enumerate(task_ids):
         is_batch = isinstance(step, dict) and step.get("type") == "batch_loop"
@@ -588,7 +638,7 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
             # --- Send expanded plan summary (robustly) ---
             # This MUST NOT crash, or collect_required_inputs will never be reached.
             try:
-                final_summary = format_plan_summary(plan)
+                final_summary = format_plan_summary(plan, as_html=True)
                 full_text = f"✅ <b>Plan Expanded!</b>\n\n{final_summary}"
                 
                 keyboard = [[InlineKeyboardButton("✅ Confirm & Proceed", callback_data="confirm_plan")]]
@@ -602,18 +652,20 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
                     reply_markup=reply_markup
                 )
             except Exception as summary_err:
-                logger.error(f"Failed to send plan summary: {summary_err}. Falling back to plain text.")
+                logger.error(f"Failed to send HTML plan summary: {summary_err}. Falling back to full plain text.")
                 try:
-                    # Fallback: send without HTML parse mode
-                    task_count = len(plan.get('tasks', []))
-                    agent_count = len(plan.get('agents', []))
+                    # Fallback: send the FULL plan in plain text so NO tasks are ever hidden or shortened!
+                    plain_summary = format_plan_summary(plan, as_html=False)
+                    fallback_text = f"✅ Plan Expanded!\n\n{plain_summary}"
                     
                     keyboard = [[InlineKeyboardButton("✅ Confirm & Proceed", callback_data="confirm_plan")]]
                     reply_markup = InlineKeyboardMarkup(keyboard)
 
-                    await context.bot.send_message(
+                    await send_long_message(
+                        context=context,
                         chat_id=chat_id,
-                        text=f"✅ Plan Expanded!\n\n{agent_count} agents, {task_count} tasks ready to execute.\n\nDo you want to proceed or make any changes?",
+                        text=fallback_text,
+                        parse_mode=None,
                         reply_markup=reply_markup
                     )
                 except Exception as fallback_err:
@@ -649,12 +701,19 @@ async def handle_planning_chat(update: Update, context: ContextTypes.DEFAULT_TYP
         draft_plan = result.get("plan")
         if draft_plan:
             try:
-                draft_summary = format_plan_summary(draft_plan)
+                draft_summary = format_plan_summary(draft_plan, as_html=True)
                 await send_long_message(
                     context=context, chat_id=chat_id, text=draft_summary, parse_mode=ParseMode.HTML
                 )
             except Exception as draft_err:
-                logger.error(f"Failed to send draft summary: {draft_err}")
+                logger.error(f"Failed to send HTML draft summary: {draft_err}. Falling back to plain text.")
+                try:
+                    plain_draft = format_plan_summary(draft_plan, as_html=False)
+                    await send_long_message(
+                        context=context, chat_id=chat_id, text=plain_draft, parse_mode=None
+                    )
+                except Exception as fallback_draft_err:
+                    logger.error(f"Failed to send plain draft summary: {fallback_draft_err}")
 
     return PLANNING_MODE
 
@@ -1037,8 +1096,17 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             # Pass global context (all agents' outputs) to the refiner so the
             # polished report covers the ENTIRE workflow, not just the last task.
+            user_input_str = str(execution_context.get("user_input", "") or "")
+            topic_str = str(execution_context.get("topic", "") or "")
+            combined_user_text = f"{user_input_str} {topic_str}".lower()
+
+            target_lang = None
+            italian_cues = ["italiano", "in italiano", "ciao", "vorrei", "fammi", "crea", "cerca", "analizza", "riassumi", "per favore"]
+            if any(cue in combined_user_text for cue in italian_cues):
+                target_lang = "Italian"
+
             refiner_input = global_context if global_context else str(final_result)
-            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input)
+            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input, target_lang)
             logger.info(f"User {user_id}: Output refinement complete.")
         except Exception as refine_err:
             logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
@@ -1108,7 +1176,9 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except (json.JSONDecodeError, ValueError):
                 expected_exports = [expected_exports] if expected_exports else []
 
-        notifier.notify_workflow_completion(wf_name, refined_result, chat_id=chat_id)
+        # Notify external operator only if configured and distinct from current chat
+        if notifier.default_chat_id and str(notifier.default_chat_id) != str(chat_id):
+            notifier.notify_workflow_completion(wf_name, refined_result)
 
         # --- GENERATE PHYSICAL FILES ---
         generated_files = []
@@ -1158,7 +1228,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             pass
 
         # Send the refined report — use Markdown for better formatting
-        # Send using chunked messages to avoid Telegram limit
+        # Send using chunked messages to avoid Telegram limit without any truncation
         report_text = refined_result
         final_caption = f"✅ *Execution Complete!*\n\n{report_text}\n\n_Choose how to proceed:_"
 
@@ -1170,37 +1240,30 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=reply_markup
             )
-            # SEND GENERATED DOCUMENTS
-            for file_path in generated_files:
-                if os.path.exists(file_path):
+        except Exception as e:
+            logger.warning(
+                f"Markdown parsing/sending failed for final report. Falling back to plain text chunked. Error: {e}"
+            )
+            fallback_text = f"✅ Execution Complete!\n\n{refined_result}\n\nChoose how to proceed:"
+            await send_long_message(
+                context=context,
+                chat_id=chat_id,
+                text=fallback_text,
+                parse_mode=None,
+                reply_markup=reply_markup
+            )
+
+        # SEND GENERATED DOCUMENTS
+        for file_path in generated_files:
+            if os.path.exists(file_path):
+                try:
                     with open(file_path, "rb") as f:
                         await context.bot.send_document(
                             chat_id=chat_id,
                             document=f
                         )
-        except Exception as e:
-            if "Can't parse entities" in str(e):
-                logger.warning(
-                    f"Markdown parsing failed for message. Falling back to plain text. Error: {e}"
-                )
-                fallback_text = f"✅ Execution Complete!\n\n{refined_result}\n\nChoose how to proceed:"
-                if len(fallback_text) > 4000:
-                    fallback_text = fallback_text[:4000] + "..."
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=fallback_text,
-                    reply_markup=reply_markup
-                )
-                # SEND GENERATED DOCUMENTS (fallback)
-                for file_path in generated_files:
-                    if os.path.exists(file_path):
-                        with open(file_path, "rb") as f:
-                            await context.bot.send_document(
-                                chat_id=chat_id,
-                                document=f
-                            )
-            else:
-                raise e
+                except Exception as doc_err:
+                    logger.error(f"Failed to send generated document {file_path}: {doc_err}")
 
     except Exception as e:
         logger.error(f"CrewAI execution failed: {e}", exc_info=True)

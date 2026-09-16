@@ -42,6 +42,12 @@ tools_registry:
     display_name: "Web: DuckDuckGo Search"
     description: "Performs free web searches via DuckDuckGo."
     required_secrets: []
+
+  search_scientific_literature:
+    display_name: "Research: Crossref Scientific Literature"
+    description: "Searches verified academic publications, preprints, and journals with DOIs via Crossref."
+    required_secrets: []
+
   execute_shell_command:
     display_name: "Local: Terminal Executor"
     description: "Executes safe commands in the OS terminal (active blacklist enforced)."

@@ -4920,27 +4920,64 @@ def render_history_monitoring():
         st.info("No workflow runs recorded yet.")
         return
 
+    valid_runs = []
     for run in runs:
         if auto_delete and run['status'] == 'completed':
             db.delete_run(run['id'])
             continue
-            
+        valid_runs.append(run)
+
+    if not valid_runs:
+        st.info("No workflow runs recorded yet.")
+        return
+
+    import datetime
+    today_prefix = datetime.date.today().isoformat()
+    today_runs = [r for r in valid_runs if str(r.get('started_at', '')).startswith(today_prefix)]
+    older_runs = [r for r in valid_runs if not str(r.get('started_at', '')).startswith(today_prefix)]
+
+    def _render_run_card(run):
         wf_name = wf_map.get(run['workflow_id'], f"Workflow {run['workflow_id']}")
         status = run['status']
         
         status_colors = {
             'running': '🔵 Running',
             'completed': '🟢 Completed',
-            'failed': '🔴 Failed'
+            'failed': '🔴 Failed',
+            'stopped': '⏹️ Stopped'
         }
         status_display = status_colors.get(status, status)
+
+        # Extract topic/user input snippet for the expander title
+        topic_snippet = ""
+        inputs_val = run.get('inputs')
+        if inputs_val:
+            if isinstance(inputs_val, str):
+                try:
+                    inputs_dict = json.loads(inputs_val)
+                except Exception:
+                    inputs_dict = {}
+            else:
+                inputs_dict = inputs_val or {}
+            raw_topic = inputs_dict.get('topic') or inputs_dict.get('idea') or inputs_dict.get('user_input')
+            if raw_topic:
+                raw_topic = str(raw_topic).strip()
+                topic_snippet = f" | 🎯 {raw_topic[:35]}..." if len(raw_topic) > 35 else f" | 🎯 {raw_topic}"
+
+        started_str = str(run.get('started_at') or '')
+        date_badge = "📅 Today" if started_str.startswith(today_prefix) else f"🗓️ {started_str.split(' ')[0]}"
+        time_part = started_str.split(' ')[-1][:8] if ' ' in started_str else started_str
+
+        expander_title = f"{status_display} | {wf_name}{topic_snippet} | {date_badge} {time_part}"
         
-        with st.expander(f"{status_display} | {wf_name} | {run['started_at']}"):
+        with st.expander(expander_title):
             col_data, col_actions = st.columns([8, 1])
             with col_data:
                 st.markdown(f"**Started At:** {run['started_at']}")
                 if run['finished_at']:
                     st.markdown(f"**Finished At:** {run['finished_at']}")
+                if run.get('source'):
+                    st.caption(f"Source: `{run['source']}`")
                 
                 if status == 'running':
                     in_flight_json = run.get('in_flight_tasks')
@@ -4959,7 +4996,6 @@ def render_history_monitoring():
                     else:
                         current_idx = run.get('current_task_idx', 0)
                         st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
-
 
                 st.markdown("**Result / Error:**")
                 if run['result']:
@@ -4991,6 +5027,16 @@ def render_history_monitoring():
                     db.delete_run(run['id'])
                     st.toast(f"Run {run['id']} deleted")
                     st.rerun()
+
+    if today_runs:
+        st.subheader(f"⚡ Today's Executions ({len(today_runs)})")
+        for run in today_runs:
+            _render_run_card(run)
+
+    if older_runs:
+        st.subheader(f"📁 Past History ({len(older_runs)})")
+        for run in older_runs:
+            _render_run_card(run)
 
 
 def render_local_training():

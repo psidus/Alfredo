@@ -205,17 +205,21 @@ Your job is to transform that raw output into a polished, clear, and user-friend
 
 YOUR RESPONSIBILITIES:
 1. **Formatting & Clarity**: Fix syntax, grammar, and structure. Use clear headings, bullet points, and numbered lists. Remove any agent-internal jargon, debugging notes, or redundant reasoning.
-2. **Translation & Natural Language**: The final report MUST be written in the user's native conversational language (e.g., Italian if they requested it in Italian). Strip out "Vector DB jargon" like `# Topic:` or `[KEYWORDS: ...]` tags, and rewrite rigid bullet points into flowing, natural language.
-3. **Code & Tool Outputs**: If the raw output contains code blocks, scripts, or direct tool outputs, PRESERVE the code blocks exactly as they are. Adapt and expand the surrounding explanations to provide clear context for the code.
-4. **Synthesis**: Merge overlapping sections. Remove duplicate information. Ensure the report flows logically from analysis to conclusions to recommendations.
-5. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
-6. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
+2. **Translation & Natural Language**: The final report MUST be written in the user's conversational language. If the user interaction or target language is Italian (e.g., requested in Italian or user spoke Italian), translate and present the report in Italian even if the source papers or raw agent text are in English. Strip out "Vector DB jargon" like `# Topic:` or `[KEYWORDS: ...]` tags, and rewrite rigid bullet points into flowing, natural language.
+3. **Code vs Intermediate Data**: PRESERVE actual programming code (e.g. Python scripts, shell commands, SQL queries) inside code blocks with their language tags. However, do NOT output raw JSON dumps or agent-to-agent JSON dictionaries (`[{"title": ...}]`) as raw code blocks: parse and convert all intermediate JSON data into elegant Markdown bullet points, bibliographies, or tables.
+4. **Completeness & Synthesis**: Ensure ALL findings, articles, links, citations, explanations, and key details produced by the agents are fully preserved. Do NOT omit, drop, or truncate items from bibliographies, search results, or analysis sections. Merge overlapping sections and eliminate pure repetition, but ensure all distinct facts, links, and takeaways remain intact in full.
+5. **Source & Link Integrity**: Preserve all real URLs (such as https://doi.org/..., https://arxiv.org/...). If a paper does not have a verified URL, write 'URL not available'. NEVER invent fake citations or synthetic URLs (e.g. PMC12345678, 00123) and never output placeholder strings like '[Exact URL]'.
+6. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
+7. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
 
 RULES:
 - Do NOT invent new data or analysis. Only restructure and clarify what the agents produced.
-- Use Markdown formatting for the output (headings, bold, lists).
-- Keep the total output under 3000 characters when possible.
+- Use Markdown formatting for the output (headings, bold, lists, links).
+- Do NOT truncate, shorten, summarize away, or omit any articles, papers, links, citations, sections, data, or details produced by the agents. The output MUST contain all findings, references, URLs, and descriptions in full.
+- Never enforce arbitrary character limits or drop content to save space. Full reporting is required.
 - If the raw output is very short or empty, acknowledge that the agents did not produce substantial results and suggest the user try again with more specific instructions.
+
+{language_instruction}
 
 RAW AGENT OUTPUT:
 ---
@@ -794,27 +798,30 @@ class MasterAI:
                 "extracted_params": {}
             }
 
-    def refine_output(self, raw_output: str) -> str:
+    def refine_output(self, raw_output: str, target_language: str = None) -> str:
         """
         Post-processing pipeline: takes the raw output from a CrewAI execution
         and refines it through the Master AI for:
         1. Formatting & clarity cleanup
-        2. Ethical review
-        3. Synthesis into a user-friendly report
-        
-        This runs automatically after every crew execution — no need to add 
-        it as a task in the workflow.
+        2. Converting raw intermediate JSON dumps into clean Markdown
+        3. Preserving genuine links and stripping hallucinated placeholders
+        4. Ethical review & synthesis into a user-friendly report
         
         Args:
             raw_output: The raw string output from crew.kickoff().
+            target_language: Optional language to force output (e.g. 'Italian', 'English').
         Returns:
             str: The refined, polished report ready for the end user.
         """
         raw_str = str(raw_output).strip()
         if not raw_str:
-            return "⚠️ The workflow completed but produced no output. Please try again with more specific instructions."
+            return "The workflow completed but produced no output. Please try again with more specific instructions."
 
-        system_prompt = OUTPUT_REFINER_PROMPT.replace("{raw_output}", raw_str)
+        lang_instruction = ""
+        if target_language:
+            lang_instruction = f"MANDATORY LANGUAGE REQUIREMENT: Translate and write the ENTIRE refined report in {target_language}."
+
+        system_prompt = OUTPUT_REFINER_PROMPT.replace("{raw_output}", raw_str).replace("{language_instruction}", lang_instruction)
         
         model_string = self._get_model_string()
 

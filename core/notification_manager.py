@@ -125,14 +125,16 @@ class NotificationManager:
         return ok
 
     def notify_workflow_completion(self, workflow_name, result, chat_id=None):
-        """Specific helper for workflow completion."""
-        # Truncate result for notification if too long
-        display_result = (str(result)[:500] + '...') if len(str(result)) > 500 else str(result)
+        """Specific helper for workflow completion without truncating the report."""
+        import html
+        display_result = str(result).strip()
+        safe_wf = html.escape(str(workflow_name))
+        safe_result = html.escape(display_result)
         
         message = (
             f"✅ <b>Workflow Completed!</b>\n\n"
-            f"🎯 <b>Workflow:</b> {workflow_name}\n"
-            f"📝 <b>Result:</b>\n<pre>{display_result}</pre>"
+            f"🎯 <b>Workflow:</b> {safe_wf}\n\n"
+            f"📝 <b>Result:</b>\n{safe_result}"
         )
         return self.send_telegram_notification(message, chat_id)
 
