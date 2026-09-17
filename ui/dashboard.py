@@ -5760,15 +5760,31 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
     with st.sidebar:
         st.markdown("""
         <style>
+        [data-testid="stSidebar"] [data-testid="stSidebarHeader"] {
+            display: flex !important;
+            justify-content: flex-end !important;
+            align-items: center !important;
+            height: auto !important;
+            min-height: 0 !important;
+            margin-top: 1rem !important;
+            margin-bottom: 0.25rem !important;
+            padding: 0 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] {
+            visibility: visible !important;
+            display: inline-flex !important;
+        }
         [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
             display: flex;
             flex-direction: column;
+            padding-top: 0 !important;
         }
         [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
             order: 0;
             flex-shrink: 0;
             padding-top: 0 !important;
             padding-bottom: 0 !important;
+            margin-top: 0 !important;
         }
         [data-testid="stSidebar"] [data-testid="stSidebarNav"] {
             order: 1;
@@ -5799,6 +5815,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             border-radius: 8px !important;
         }
         [data-testid="stSidebar"] .sidebar-brand-block {
+            margin-top: 0 !important;
             margin-bottom: 0;
         }
         [data-testid="stSidebar"] .sidebar-brand-title {
@@ -5835,14 +5852,26 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
     # --- Main toolbar: Telegram actions (left, above page titles) ---
     st.markdown("""
     <style>
+    .stMainBlockContainer,
+    [data-testid="stMainBlockContainer"],
+    [data-testid="stMain"] .block-container {
+        padding-top: 1.25rem !important;
+    }
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+    }
+    [data-testid="stMain"] .st-key-telegram_toolbar,
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) {
+        margin-top: 2rem !important;
+        padding-top: 0 !important;
         gap: 0.85rem !important;
         width: 50% !important;
         max-width: 50% !important;
-        margin-bottom: 1.25rem !important;
+        margin-bottom: 1rem !important;
         align-items: center !important;
         justify-content: flex-start !important;
     }
+    [data-testid="stMain"] .st-key-telegram_toolbar > [data-testid="stLayoutWrapper"],
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) > [data-testid="stLayoutWrapper"] {
         flex: 1 1 0 !important;
         width: auto !important;
@@ -5851,16 +5880,21 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         height: auto !important;
         overflow: visible !important;
         margin: 0 !important;
-        padding-top: 0.5rem !important;
-        padding-bottom: 0.5rem !important;
+        padding-top: 0 !important;
+        padding-bottom: 0.25rem !important;
         box-sizing: border-box !important;
     }
+    [data-testid="stMain"] .st-key-telegram_toolbar .stButton,
+    [data-testid="stMain"] .st-key-telegram_toolbar [data-testid="stPopover"],
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .stButton,
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) [data-testid="stPopover"] {
         width: 100% !important;
         margin: 0 !important;
         padding: 0 !important;
     }
+    [data-testid="stMain"] .st-key-telegram_toolbar .stButton > button,
+    [data-testid="stMain"] .st-key-telegram_toolbar [data-testid="stPopover"] > button,
+    [data-testid="stMain"] .st-key-telegram_toolbar button[data-testid="stPopoverButton"],
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .stButton > button,
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) [data-testid="stPopover"] > button,
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) button[data-testid="stPopoverButton"] {

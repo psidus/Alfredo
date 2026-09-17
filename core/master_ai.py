@@ -16,29 +16,31 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # --- Headroom AI: Context Compression ---
-# If HEADROOM_ENABLED=true in .env, the _compress_messages helper will compress
-# prompts before every LiteLLM call, reducing token usage by 60-95%.
-# If HEADROOM_PROXY_URL is set, we route traffic to the proxy instead.
+# Headroom is a Gemini-oriented proxy. NEVER assign it to the global LiteLLM
+# api_base — that hijacks Ollama/LM Studio calls and surfaces Gemini 503s.
 _headroom_compress = None
 if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
-    proxy_url = os.getenv("HEADROOM_PROXY_URL")
-    if proxy_url:
-        # Gemini requires v1beta for system_instruction. If proxy specifies /v1, adjust it.
-        if proxy_url.endswith("/v1"):
-            proxy_url = proxy_url[:-3] + "/v1beta"
-        if litellm:
-            litellm.api_base = proxy_url
-        logger.info(f"Headroom AI Proxy Mode enabled at {proxy_url}")
-    else:
-        try:
-            from headroom import compress as _headroom_compress_fn
-            _headroom_compress = _headroom_compress_fn
-            logger.info("Headroom AI context compression enabled (inline compress).")
-        except ImportError:
-            logger.warning(
-                "HEADROOM_ENABLED=true but headroom-ai is not installed. "
-                "Run: pip install headroom-ai[all]"
-            )
+    try:
+        from headroom import compress as _headroom_compress_fn
+        _headroom_compress = _headroom_compress_fn
+        logger.info("Headroom AI inline compression enabled (cloud providers only).")
+    except ImportError:
+        logger.info("Headroom inline compress not installed; proxy will be used per-call for Gemini only.")
+
+
+def _headroom_proxy_for_cloud(model_string: str) -> Optional[str]:
+    """Return Headroom proxy URL only for Gemini/Google models."""
+    if os.getenv("HEADROOM_ENABLED", "").lower() != "true":
+        return None
+    prefix = (model_string.split("/")[0] if "/" in model_string else model_string).lower()
+    if prefix not in ("gemini", "google"):
+        return None
+    proxy_url = (os.getenv("HEADROOM_PROXY_URL") or "").strip()
+    if not proxy_url:
+        return None
+    if proxy_url.endswith("/v1"):
+        proxy_url = proxy_url[:-3] + "/v1beta"
+    return proxy_url
 
 
 def _compress_messages(messages: list, model: str) -> list:
@@ -483,42 +485,57 @@ class MasterAI:
                 from dotenv import dotenv_values, find_dotenv
                 env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
                 current_env = dotenv_values(env_path)
-                env_model_name = current_env.get("MASTER_AI_MODEL_NAME")
+                env_model_name = (current_env.get("MASTER_AI_MODEL_NAME") or "").strip().strip('"').strip("'")
                 if env_model_name:
                     model_data = self.db_manager.read_model_by_name(env_model_name)
                     if model_data:
                         model_id = model_data['id']
+                if model_id is None:
+                    env_model_id = (current_env.get("MASTER_AI_MODEL_ID") or "").strip().strip('"').strip("'")
+                    if env_model_id:
+                        model_id = int(env_model_id)
             except Exception as e:
                 logger.warning(f"Error loading MASTER_AI_MODEL_NAME from environment: {e}")
-        
-        # Default Robust Configuration (Simple vs Complex)
-        # Source: https://ai.google.dev/gemini-api/docs/models (May 2026)
-        # Cascade: primary → gemini-2.5-flash → gemini-3.5-flash (latest GA model)
+
+        def _is_local_record(m: dict) -> bool:
+            if not m:
+                return False
+            if m.get("is_local"):
+                return True
+            return str(m.get("provider") or "").lower() in (
+                "ollama", "lmstudio", "lm_studio", "bionic", "vllm", "llama.cpp"
+            )
+
+        all_models = []
+        try:
+            all_models = self.db_manager.read_all_models() or []
+        except Exception as e:
+            logger.warning(f"Could not list models for MasterAI defaults: {e}")
+        local_models = [m for m in all_models if _is_local_record(m)]
+
+        # Cloud defaults are used ONLY when no local/configured model is available.
         if complexity == "complex":
-            self.model_name = "gemini-2.5-pro"           # Best reasoning, for complex tasks
+            self.model_name = "gemini-2.5-pro"
             self.model_provider = "gemini"
             self.fallback_chain = [
-                "gemini/gemini-2.5-flash",               # Tier-2: stable Flash
-                "gemini/gemini-3.5-flash",               # Tier-3: latest GA model
+                "gemini/gemini-2.5-flash",
+                "gemini/gemini-3.5-flash",
             ]
         else:
-            self.model_name = "gemini-2.5-flash-lite"    # Fastest, lowest traffic, stable
+            self.model_name = "gemini-2.5-flash-lite"
             self.model_provider = "gemini"
             self.fallback_chain = [
-                "gemini/gemini-2.5-flash",               # Tier-2: stronger Flash
-                "gemini/gemini-3.5-flash",               # Tier-3: latest GA model
+                "gemini/gemini-2.5-flash",
+                "gemini/gemini-3.5-flash",
             ]
-        # Keep self.fallback_model for backward compat (first in chain)
-        self.fallback_model = self.fallback_chain[0] if self.fallback_chain else None
+        self.is_local = False
 
-        # Attempt to get model details from DB if model_id is provided
         if model_id:
             model_data = self.db_manager.read_model(model_id)
             if model_data:
                 self.model_name = model_data['model_name']
                 self.model_provider = model_data['provider'].lower()
                 
-                # --- PROVIDER & MODEL NORMALIZATION ---
                 provider_mapping = {
                     'google': 'gemini',
                     'mistralai': 'mistral',
@@ -528,17 +545,43 @@ class MasterAI:
                 }
                 self.model_provider = provider_mapping.get(self.model_provider, self.model_provider)
 
-                # Clean 'models/' prefix common in Google/Gemini models
                 if self.model_provider == 'gemini' and self.model_name.startswith('models/'):
                     self.model_name = self.model_name.replace('models/', '')
                 
-                self.is_local = model_data.get('is_local', False)
+                self.is_local = _is_local_record(model_data)
             else:
                 logger.warning(f"Model ID {model_id} not found in DB. Using default model {self.model_name}.")
-                self.is_local = False
+        elif local_models:
+            chosen = local_models[0]
+            self.model_name = chosen["model_name"]
+            self.model_provider = str(chosen.get("provider") or "ollama").lower()
+            self.is_local = True
+            logger.info(
+                f"No Master AI model configured; preferring local model "
+                f"{self.model_provider}/{self.model_name} over Gemini."
+            )
         else:
             logger.info(f"No model_id provided for MasterAI. Using default model {self.model_name}.")
-            self.is_local = False
+
+        # Local runtimes must NEVER fall back to Gemini (high-demand 503s).
+        if self.is_local or self.model_provider in (
+            "ollama", "lmstudio", "lm_studio", "bionic", "vllm", "llama.cpp"
+        ):
+            local_fallbacks = []
+            primary = f"{self.model_provider}/{self.model_name}"
+            for m in local_models:
+                provider = str(m.get("provider") or "ollama").lower()
+                if provider == "google":
+                    provider = "gemini"
+                candidate = f"{provider}/{m.get('model_name')}"
+                if candidate != primary and candidate not in local_fallbacks:
+                    local_fallbacks.append(candidate)
+                if len(local_fallbacks) >= 2:
+                    break
+            self.fallback_chain = local_fallbacks
+            logger.info(f"MasterAI local fallback chain: {self.fallback_chain or '(none)'}")
+
+        self.fallback_model = self.fallback_chain[0] if self.fallback_chain else None
 
         # Securely retrieve API key via DataManager
         self.api_key = self.data_manager.load_api_key(f"{self.model_provider.upper()}_API_KEY")
@@ -565,6 +608,8 @@ class MasterAI:
             env_var_name = provider_key_env_map.get(self.model_provider, f"{self.model_provider.upper()}_API_KEY")
             os.environ[env_var_name] = self.api_key
             logger.info(f"API key for provider '{self.model_provider}' injected into environment as '{env_var_name}'.")
+        elif self.model_provider == "ollama":
+            os.environ.pop("OLLAMA_API_KEY", None)
 
         # Initialize LLM routing via LiteLLM
         if not litellm:
@@ -572,6 +617,9 @@ class MasterAI:
             raise ImportError("Please install litellm.")
             
         logger.info(f"MasterAI initialized with model: {self.model_provider}/{self.model_name}")
+        # Never keep a leftover global Gemini proxy on LiteLLM.
+        if litellm is not None and getattr(litellm, "api_base", None):
+            litellm.api_base = None
 
     def _get_model_string(self) -> str:
         """Returns the correctly formatted model string for LiteLLM calls."""
@@ -589,10 +637,25 @@ class MasterAI:
         prefix = model_string.split("/")[0] if "/" in model_string else ""
         if prefix == "ollama":
             base = os.environ.get("OLLAMA_API_BASE")
+            # If running inside Docker and base points to localhost/127.0.0.1, convert to host.docker.internal
+            if os.path.exists("/.dockerenv") and base and ("localhost" in base or "127.0.0.1" in base):
+                base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
             if base:
                 call_kwargs["api_base"] = base
+            
+            # Ollama does not require an API key when running locally/LAN.
+            # Never pass an empty API key or let an empty OLLAMA_API_KEY remain in os.environ,
+            # which causes LiteLLM to send an invalid 'Authorization: Bearer ' header.
+            ollama_key = (os.environ.get("OLLAMA_API_KEY") or "").strip()
+            if not ollama_key:
+                os.environ.pop("OLLAMA_API_KEY", None)
+                call_kwargs.pop("api_key", None)
+            else:
+                call_kwargs["api_key"] = ollama_key
         elif prefix in ("lm_studio", "lmstudio"):
             base = os.environ.get("LMSTUDIO_API_BASE") or os.environ.get("LM_STUDIO_API_BASE")
+            if os.path.exists("/.dockerenv") and base and ("localhost" in base or "127.0.0.1" in base):
+                base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
             if base:
                 call_kwargs["api_base"] = base
             call_kwargs["api_key"] = os.environ.get("LMSTUDIO_API_KEY") or "lm-studio"
@@ -665,7 +728,7 @@ class MasterAI:
             
         return text.strip()
 
-    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True) -> str:
+    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True, allow_fallback: bool = True) -> str:
         """
         Robust LLM call with exponential backoff retry and a multi-tier fallback cascade.
 
@@ -690,6 +753,11 @@ class MasterAI:
         def _try_model(m: str, use_json_mode: bool = True) -> str:
             """Attempt a single model with retry on transient errors."""
             last_err = None
+            provider_prefix = (m.split('/')[0] if '/' in m else m).lower()
+            is_local_model = provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]
+            # Ollama/LM Studio often reject OpenAI json_object mode — skip it locally.
+            effective_json = use_json_mode and not is_local_model
+            call_timeout = 90 if is_local_model else 45
             for attempt, wait in enumerate([0] + RETRY_WAITS):
                 if wait > 0:
                     logger.warning(
@@ -702,13 +770,16 @@ class MasterAI:
                         model=m,
                         messages=messages,
                         temperature=temperature,
-                        timeout=45, # Prevent hanging indefinitely
+                        timeout=call_timeout,
                     )
                     
-                    provider_prefix = m.split('/')[0] if '/' in m else m
-                    if provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]:
+                    if is_local_model:
                         self._apply_local_runtime(call_kwargs, m)
-                    if use_json_mode:
+                    else:
+                        proxy = _headroom_proxy_for_cloud(m)
+                        if proxy:
+                            call_kwargs["api_base"] = proxy
+                    if effective_json:
                         call_kwargs["response_format"] = {"type": "json_object"}
                     # Compress messages before sending to the LLM
                     call_kwargs["messages"] = _compress_messages(call_kwargs["messages"], model=m)
@@ -728,7 +799,7 @@ class MasterAI:
             raise last_err
 
         # Build the full ordered list: primary + fallback chain
-        fallback_chain = getattr(self, 'fallback_chain', [])
+        fallback_chain = getattr(self, 'fallback_chain', []) if allow_fallback else []
         all_models = [model] + [fb for fb in fallback_chain if fb != model]
 
         last_exception = None
@@ -1430,52 +1501,79 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             logger.error(f"Failed to decompose task '{name}': {e}. Returning original.")
             return [task]
 
-    def decompose_workflow_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def review_workflow_plan(self, plan: Dict[str, Any], lightweight: bool = False) -> Dict[str, Any]:
         """
-        Takes a full workflow plan (agents and tasks), evaluates each task,
-        decomposes the complex ones, and returns an expanded/atomized plan.
+        Review a workflow plan with a single LLM call (or no call for predefined plans).
+
+        lightweight=True: return the original plan immediately. Used for unmodified
+        DB workflows that are already atomic — avoids N+1 14B calls.
+        lightweight=False: one-shot review of the whole plan; never falls back to Gemini.
+        Preserves model_id / tools / required_inputs when present.
         """
-        if not plan or 'tasks' not in plan:
+        if not plan or not isinstance(plan, dict) or "tasks" not in plan:
             return plan
 
-        agents = plan.get('agents') or []
-        
-        # If agents list is empty, try to fetch all agents from the database as fallback
-        if not agents:
-            try:
-                db_agents = self.db_manager.read_all_agents()
-                for a in db_agents:
-                    agents.append({
-                        "role": a.get("role"),
-                        "goal": a.get("goal"),
-                        "backstory": a.get("backstory"),
-                        "tools": a.get("tools") or []
-                    })
-                logger.info(f"Workflow plan had no agents. Loaded {len(agents)} agents from DB as fallback.")
-            except Exception as e:
-                logger.error(f"Failed to load fallback agents from DB: {e}")
+        if lightweight:
+            logger.info(
+                f"MasterAI lightweight review: keeping original {len(plan.get('tasks') or [])} tasks "
+                f"(no decompose, no coherence optimizer, no Gemini)."
+            )
+            return plan
 
-        # Ensure we have a list of available agents
-        available_agents = agents
-
-        expanded_tasks = []
-        for task in plan.get('tasks', []):
-            decomposed = self.decompose_task_if_complex(task, available_agents)
-            expanded_tasks.extend(decomposed)
-
-        expanded_plan = {
-            "agents": agents,
-            "tasks": expanded_tasks,
-            "expected_exports": plan.get("expected_exports", []),
-            "export_instructions": plan.get("export_instructions", ""),
+        model_string = self._get_model_string()
+        compact_plan = {
+            "agents": plan.get("agents") or [],
+            "tasks": plan.get("tasks") or [],
+            "expected_exports": plan.get("expected_exports") or [],
         }
-        logger.info(f"Workflow expansion complete. Total tasks: {len(plan.get('tasks', []))} -> {len(expanded_tasks)}. Starting Coherence Optimizer...")
-        
-        # Apply Coherence Optimizer
-        optimized_plan = self.optimize_workflow_coherence(expanded_plan)
-        optimized_plan = self._enforce_hitl_preservation(plan.get("tasks", []), optimized_plan)
-        
-        return optimized_plan
+        system_prompt = (
+            "You are Alfredo reviewing a workflow plan before execution.\n"
+            "Return JSON with the SAME structure: agents, tasks, expected_exports.\n"
+            "Rules:\n"
+            "- Keep tasks atomic. Only split a task if it clearly does two unrelated jobs.\n"
+            "- Copy model_id, tools, required_inputs, human_validation, vector_dbs onto every task "
+            "(including any new subtasks derived from an original task).\n"
+            "- Do not add cloud/Gemini models. Do not invent model names.\n"
+            "- Preserve curly-brace placeholders like {topic}.\n"
+            "- Keep agent_role values matching the agents list.\n"
+            f"PLAN:\n{json.dumps(compact_plan, ensure_ascii=False, indent=2)}"
+        )
+        logger.info(f"MasterAI single-pass plan review with {model_string} (no Gemini fallback).")
+        try:
+            raw_output = self._call_llm_with_retry(
+                model=model_string,
+                messages=[{"role": "user", "content": system_prompt}],
+                temperature=0.1,
+                allow_fallback=False,
+            )
+            clean_json = self._sanitize_json(raw_output)
+            reviewed = json.loads(clean_json)
+            if not isinstance(reviewed, dict) or not reviewed.get("tasks"):
+                logger.warning("MasterAI review returned empty tasks. Keeping original plan.")
+                return plan
+            for key in ("expected_exports", "export_instructions"):
+                if key in plan and key not in reviewed:
+                    reviewed[key] = plan[key]
+            if not reviewed.get("agents"):
+                reviewed["agents"] = plan.get("agents") or []
+            # Restore model_id if the LLM dropped it
+            orig_tasks = plan.get("tasks") or []
+            for i, t in enumerate(reviewed.get("tasks") or []):
+                if t.get("model_id"):
+                    continue
+                if i < len(orig_tasks) and orig_tasks[i].get("model_id"):
+                    t["model_id"] = orig_tasks[i]["model_id"]
+            logger.info(
+                f"MasterAI review complete: {len(orig_tasks)} -> {len(reviewed.get('tasks') or [])} tasks."
+            )
+            return reviewed
+        except Exception as e:
+            logger.error(f"MasterAI single-pass review failed: {e}. Keeping original plan.")
+            return plan
+
+    def decompose_workflow_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Backward-compatible wrapper: single-pass review instead of N+1 LLM calls."""
+        return self.review_workflow_plan(plan, lightweight=False)
 
     def _enforce_hitl_preservation(self, original_tasks: list, plan: Dict[str, Any]) -> Dict[str, Any]:
         """

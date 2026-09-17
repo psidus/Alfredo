@@ -190,6 +190,8 @@ class VectorManager:
         elif provider == 'ollama':
             kwargs = {"model": model_name}
             base_url = os.getenv("OLLAMA_API_BASE")
+            if os.path.exists("/.dockerenv") and base_url and ("localhost" in base_url or "127.0.0.1" in base_url):
+                base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
             if base_url:
                 kwargs["base_url"] = base_url
                 
@@ -216,6 +218,45 @@ class VectorManager:
                 raise ImportError("Please install langchain-google-genai to use Gemini embeddings.")
         else:
             raise ValueError(f"Unsupported embedding provider: {provider}")
+
+    @staticmethod
+    def resolve_runtime_embedding_function():
+        """
+        Local-first embeddings. Gemini is used only when EMBEDDING_PROVIDER=gemini
+        or when no Ollama endpoint is configured.
+        """
+        DataManager.load_env()
+        vm = VectorManager()
+        force = (os.getenv("EMBEDDING_PROVIDER") or "").strip().lower()
+        ollama_model = (os.getenv("OLLAMA_EMBEDDING_MODEL") or "").strip().strip('"').strip("'") or "nomic-embed-text"
+        ollama_base = (os.getenv("OLLAMA_API_BASE") or "").strip()
+
+        if force in ("gemini", "google"):
+            logging.info("Embeddings: forced Gemini via EMBEDDING_PROVIDER")
+            return vm._get_embedding_function("gemini", "models/gemini-embedding-001")
+        if force == "openai":
+            return vm._get_embedding_function("openai", "text-embedding-3-small")
+        if force == "ollama":
+            logging.info(f"Embeddings: forced Ollama model {ollama_model}")
+            return vm._get_embedding_function("ollama", ollama_model)
+
+        if ollama_base or os.getenv("OLLAMA_EMBEDDING_MODEL"):
+            logging.info(f"Embeddings: local Ollama first ({ollama_model})")
+            return vm._get_embedding_function("ollama", ollama_model)
+
+        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if gemini_key:
+            logging.info("Embeddings: Gemini (no Ollama endpoint configured)")
+            return vm._get_embedding_function("gemini", "models/gemini-embedding-001")
+
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key:
+            return vm._get_embedding_function("openai", "text-embedding-3-small")
+
+        raise ValueError(
+            "No embedding backend found. Set OLLAMA_API_BASE + OLLAMA_EMBEDDING_MODEL "
+            "or EMBEDDING_PROVIDER=gemini."
+        )
 
     @staticmethod
     def _is_retryable_error(error: Exception) -> bool:

@@ -55,10 +55,11 @@ class DataManager:
         load_dotenv(dotenv_path=env_path, override=True)
         
         api_key = os.getenv(api_name)
-        if not api_key:
-            logging.warning(f"'{api_name}' not found in the environment or .env file.")
+        if not api_key or not api_key.strip():
+            logging.warning(f"'{api_name}' not found or empty in the environment or .env file.")
+            return None
         
-        return api_key
+        return api_key.strip()
 
     get_api_key = load_api_key
 

@@ -76,23 +76,7 @@ class LearningMemoryManager:
     def _resolve_embedding_function() -> Any:
         DataManager.load_env()
         from core.vector_manager import VectorManager
-        vm = VectorManager()
-
-        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if gemini_key:
-            return vm._get_embedding_function("gemini", "models/gemini-embedding-001")
-
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            return vm._get_embedding_function("openai", "text-embedding-3-small")
-
-        ollama_model = os.getenv("OLLAMA_EMBEDDING_MODEL")
-        if ollama_model:
-            return vm._get_embedding_function("ollama", ollama_model)
-
-        raise ValueError(
-            "No embedding API key found in .env. Cannot initialise learning memory."
-        )
+        return VectorManager.resolve_runtime_embedding_function()
 
     # ------------------------------------------------------------------
     # Write — save user feedback

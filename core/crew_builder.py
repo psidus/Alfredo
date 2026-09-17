@@ -9,10 +9,11 @@ class PauseExecution(Exception):
 
 class RateLimitError(Exception):
     """Exception raised when an LLM returns a 503 or rate limit error."""
-    def __init__(self, message, current_task_idx, task_outputs):
+    def __init__(self, message, current_task_idx, task_outputs, is_cloud=False):
         super().__init__(message)
         self.current_task_idx = current_task_idx
         self.task_outputs = task_outputs
+        self.is_cloud = is_cloud
 
 from crewai import Agent, Task, Crew
 
@@ -66,16 +67,19 @@ from core.schema_loader import get_schema_class
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Headroom AI: Context Compression ---
-# If HEADROOM_ENABLED=true in .env, compress prompts before CrewAI/LiteLLM calls.
-# If HEADROOM_PROXY_URL is set, we route traffic to the proxy instead.
+# Headroom is Gemini-oriented. Do NOT set global LITELLM_API_BASE / OPENAI_BASE_URL
+# or every CrewAI/Ollama call is hijacked onto the Gemini proxy (503 high demand).
 if os.getenv("HEADROOM_ENABLED", "").lower() == "true":
-    proxy_url = os.getenv("HEADROOM_PROXY_URL")
-    if proxy_url:
-        os.environ["LITELLM_API_BASE"] = proxy_url
-        os.environ["OPENAI_BASE_URL"] = proxy_url
-        logging.info(f"Headroom AI Proxy Mode enabled for CrewAI at {proxy_url}")
+    if os.getenv("HEADROOM_PROXY_URL"):
+        logging.info("Headroom AI enabled: proxy will be applied only to Gemini/Google models.")
+        # Undo any leftover global hijack from previous versions of this module.
+        hr = os.getenv("HEADROOM_PROXY_URL", "")
+        if os.getenv("LITELLM_API_BASE") == hr:
+            os.environ.pop("LITELLM_API_BASE", None)
+        if os.getenv("OPENAI_BASE_URL") == hr:
+            os.environ.pop("OPENAI_BASE_URL", None)
     else:
-        logging.info("Headroom AI inline compression enabled for CrewAI (note: inline compress is not currently wired up to CrewAI's internal LangChain LLMs, use proxy mode for full coverage).")
+        logging.info("Headroom AI inline compression enabled for CrewAI (cloud providers).")
 
 
 # Initialize DB using a Thread-Local Proxy to ensure thread safety
@@ -233,12 +237,15 @@ def _instantiate_llm(model_id, task_record=None):
     if env_var_name:
         api_key = DataManager.load_api_key(env_var_name)
         if not api_key:
-            # Generic fallback to GEMINI_API_KEY for Google models
-            api_key = DataManager.load_api_key("GEMINI_API_KEY")
+            # Generic fallback to GEMINI_API_KEY for Google models only
+            if provider in ("gemini", "google"):
+                api_key = DataManager.load_api_key("GEMINI_API_KEY")
         if api_key:
             os.environ[env_var_name] = api_key
             logging.info(f"API key for '{provider}' injected as '{env_var_name}'.")
         else:
+            if provider == "ollama":
+                os.environ.pop("OLLAMA_API_KEY", None)
             logging.warning(f"No API key found for provider '{provider}' (expected '{env_var_name}').")
 
     # --- Extract Task Overrides ---
@@ -258,6 +265,8 @@ def _instantiate_llm(model_id, task_record=None):
         return ChatOpenAI(**kwargs)
     elif provider == 'ollama':
         base_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+        if os.path.exists("/.dockerenv") and ("localhost" in base_url or "127.0.0.1" in base_url):
+            base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
         ctx_limit = max_input_context if max_input_context > 0 else 8192
         try:
             from crewai import LLM
@@ -298,12 +307,21 @@ def _instantiate_llm(model_id, task_record=None):
     else:
         # Standard LiteLLM format: provider/model_name (e.g. gemini/gemini-2.5-flash-lite)
         model_string = f"{provider}/{model_name}"
-        if max_output_tokens > 0:
-            try:
-                from crewai import LLM
-                return LLM(model=model_string, max_tokens=max_output_tokens)
-            except ImportError:
-                pass
+        headroom_base = ""
+        if os.getenv("HEADROOM_ENABLED", "").lower() == "true" and provider in ("gemini", "google"):
+            headroom_base = (os.getenv("HEADROOM_PROXY_URL") or "").strip()
+            if headroom_base.endswith("/v1"):
+                headroom_base = headroom_base[:-3] + "/v1beta"
+        try:
+            from crewai import LLM
+            kwargs = {"model": model_string}
+            if max_output_tokens > 0:
+                kwargs["max_tokens"] = max_output_tokens
+            if headroom_base:
+                kwargs["base_url"] = headroom_base
+            return LLM(**kwargs)
+        except ImportError:
+            pass
         logging.info(f"LLM instantiated: {model_string}")
         return model_string
 
@@ -334,6 +352,66 @@ def _map_tools(tool_names):
             logging.warning(f"Attempted to use unknown or disallowed tool: '{tool_name}'. Skipping.")
 
     return instantiated_tools
+
+def _resolve_default_model_id():
+    """
+    Resolve the default agent model: named Ollama model from .env first,
+    then DEFAULT_AGENT_MODEL_ID, then first local model — never Gemini by accident.
+    """
+    DataManager.load_env()
+    env_id = (os.getenv("DEFAULT_AGENT_MODEL_ID") or "").strip().strip('"').strip("'")
+    if env_id:
+        try:
+            return int(env_id)
+        except ValueError:
+            pass
+    env_name = (os.getenv("DEFAULT_AGENT_MODEL_NAME") or "").strip().strip('"').strip("'")
+    if env_name:
+        rec = db.read_model_by_name(env_name)
+        if rec:
+            return rec["id"]
+    models = db.read_all_models() or []
+    local = [
+        m for m in models
+        if m.get("is_local") or str(m.get("provider") or "").lower() in ("ollama", "lmstudio", "lm_studio", "bionic")
+    ]
+    if local:
+        logging.info(f"Using first local model as default: {local[0].get('provider')}/{local[0].get('model_name')}")
+        return local[0]["id"]
+    if models:
+        logging.warning(f"No local default model found; falling back to {models[0].get('provider')}/{models[0].get('model_name')}")
+        return models[0]["id"]
+    return None
+
+
+def _model_label(model_id) -> str:
+    if not model_id:
+        return ""
+    try:
+        m = db.read_model(int(model_id))
+    except Exception:
+        return ""
+    if not m:
+        return ""
+    return f"{m.get('provider')}/{m.get('model_name')}"
+
+
+def _provider_is_cloud(model_id=None, err: Exception = None) -> bool:
+    blob = str(err or "").lower()
+    if any(k in blob for k in ("gemini", "google generative", "generativelanguage")):
+        return True
+    if model_id:
+        try:
+            m = db.read_model(int(model_id))
+            prov = str((m or {}).get("provider") or "").lower()
+            if prov in ("gemini", "google", "openai", "anthropic", "groq"):
+                return True
+            if m and (m.get("is_local") or prov in ("ollama", "lmstudio", "lm_studio", "bionic")):
+                return False
+        except Exception:
+            pass
+    return False
+
 
 def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
     """
@@ -444,22 +522,10 @@ def _build_agent(agent_id, specialization=None, model_id_override=None, task_rec
     # Determine which model to use: override first, then agent record, then default fallback.
     model_id = model_id_override if model_id_override is not None else agent_record.get('model_id')
     
-    # If neither is set, check the global default model from .env!
     if not model_id:
-        DataManager.load_env()
-        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
-        if env_model_id:
-            try:
-                model_id = int(env_model_id)
-            except ValueError:
-                pass
-                
-    # If still not set, let's find the first available model in the database as fallback
-    if not model_id:
-        models = db.read_all_models()
-        if models:
-            model_id = models[0]['id']
-            logging.info(f"No model set for agent/task. Using first model as fallback: {models[0]['model_name']}")
+        model_id = _resolve_default_model_id()
+        if model_id:
+            logging.info(f"No model set for agent/task. Using default model_id={model_id}")
 
     model_record = db.read_model(model_id) if model_id else None
     llm_instance = _instantiate_llm(model_id, task_record=task_record) if model_id else None
@@ -563,12 +629,17 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
     if effective_tier == MODEL_TIER_SIMPLE:
         DataManager.load_env()
         simple_id = os.getenv("SIMPLE_AGENT_MODEL_ID") or os.getenv("DEFAULT_AGENT_MODEL_ID")
+        resolved = None
         if simple_id:
             try:
-                task_model_id = int(simple_id)
-                logging.info(f"Task {task_id}: using simple model tier → model_id={task_model_id}")
+                resolved = int(simple_id)
             except ValueError:
-                pass
+                resolved = None
+        if resolved is None:
+            resolved = _resolve_default_model_id()
+        if resolved:
+            task_model_id = resolved
+            logging.info(f"Task {task_id}: using simple model tier → model_id={task_model_id}")
 
     tool_profile = resolve_tool_profile(task_record, step_def)
 
@@ -597,16 +668,7 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
     execution_model_id = task_model_id if task_model_id is not None else (agent_record.get('model_id') if agent_record else None)
     
     if not execution_model_id:
-        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
-        if env_model_id:
-            try:
-                execution_model_id = int(env_model_id)
-            except ValueError:
-                pass
-    if not execution_model_id:
-        models = db.read_all_models()
-        if models:
-            execution_model_id = models[0]['id']
+        execution_model_id = _resolve_default_model_id()
 
     model_record = db.read_model(execution_model_id) if execution_model_id else None
     supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
@@ -1101,7 +1163,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         if status_callback and task_idx is not None:
             try:
                 agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
-                status_callback(task_idx, len(task_ids), agent_role, "running")
+                t_rec = db.read_task(task_id)
+                a_rec = db.read_agent(t_rec["agent_id"]) if t_rec and t_rec.get("agent_id") else None
+                mid = (t_rec or {}).get("model_id") or (a_rec or {}).get("model_id")
+                status_callback(task_idx, len(task_ids), agent_role, "running", _model_label(mid))
             except Exception:
                 pass
 
@@ -1113,14 +1178,21 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             err_str = str(e).lower()
             if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
                 logging.warning(f"Rate limit / 503 encountered: {e}")
-                raise RateLimitError(f"Model high demand error (503): {e}", 0, task_outputs)
+                t_rec = db.read_task(task_id) if task_id else None
+                mid = (t_rec or {}).get("model_id")
+                raise RateLimitError(
+                    f"Model 503/unavailable: {e}",
+                    0,
+                    task_outputs,
+                    is_cloud=_provider_is_cloud(mid, e),
+                )
             elif "none or empty" in err_str:
                 raise RuntimeError(f"Agent failed to generate a valid output: {e}")
             elif "connect" in err_str or "network" in err_str or "timeout" in err_str:
                 logging.warning(f"Connection error with primary model: {e}. Attempting fallback to default model.")
                 # Load default model ID from .env
                 DataManager.load_env()
-                fallback_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
+                fallback_model_id = _resolve_default_model_id()
                 if fallback_model_id:
                     try:
                         fallback_llm = _instantiate_llm(int(fallback_model_id), task_record=None)
@@ -1587,19 +1659,8 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
         
     # Pick a default model if not provided
     if not default_model_id:
-        DataManager.load_env()
-        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
-        if env_model_id:
-            try:
-                default_model_id = int(env_model_id)
-            except ValueError:
-                pass
-
-    if not default_model_id:
-        models = db.read_all_models()
-        if models:
-            default_model_id = models[0]['id']
-        else:
+        default_model_id = _resolve_default_model_id()
+        if not default_model_id:
             raise ValueError("No models found in the database. Please configure a model first.")
             
     llm_instance = _instantiate_llm(default_model_id)
@@ -1757,19 +1818,8 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     execution_context = execution_context or {}
 
     if not default_model_id:
-        DataManager.load_env()
-        env_model_id = os.getenv("DEFAULT_AGENT_MODEL_ID")
-        if env_model_id:
-            try:
-                default_model_id = int(env_model_id)
-            except ValueError:
-                pass
-
-    if not default_model_id:
-        models = db.read_all_models()
-        if models:
-            default_model_id = models[0]['id']
-        else:
+        default_model_id = _resolve_default_model_id()
+        if not default_model_id:
             raise ValueError("No models found in the database.")
 
     llm_instance = _instantiate_llm(default_model_id)
@@ -1925,24 +1975,33 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             effective_backstory = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_backstory)
             effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'<\1>', effective_goal)
 
-            if not specialization and agent_role in agents_cache:
-                agent_instance = agents_cache[agent_role]
+            task_model_id = task_data.get("model_id") or agent_info.get("model_id") or default_model_id
+            try:
+                task_model_id = int(task_model_id) if task_model_id is not None else None
+            except (TypeError, ValueError):
+                task_model_id = default_model_id
+            node_llm = _instantiate_llm(task_model_id) if task_model_id else llm_instance
+            node_model = db.read_model(task_model_id) if task_model_id else model_record
+            node_supports_tools = bool(node_model.get("supports_tools", 1)) if node_model else supports_tools
+
+            cache_key = f"{agent_role}::{task_model_id}::{specialization or ''}"
+            if cache_key in agents_cache:
+                agent_instance = agents_cache[cache_key]
             else:
-                agent_tools = [] if not supports_tools else _map_tools(agent_info.get('tools', []))
+                agent_tools = [] if not node_supports_tools else _map_tools(agent_info.get('tools', []))
                 enhanced_backstory = effective_backstory + conciseness_trait
                 agent_instance = Agent(
                     role=effective_role,
                     backstory=enhanced_backstory,
                     goal=effective_goal,
-                    llm=llm_instance,
+                    llm=node_llm,
                     tools=agent_tools,
                     verbose=True,
                     allow_delegation=False,
                     max_iter=5,
                     step_callback=check_abort
                 )
-                if not specialization:
-                    agents_cache[agent_role] = agent_instance
+                agents_cache[cache_key] = agent_instance
 
             combined_tools = list(set((agent_info.get('tools') or []) + (task_data.get('tools') or [])))
             # LEVEL-BASED MEMORY ARCHITECTURE:
@@ -1953,7 +2012,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             if "write_atomic_memory" not in combined_tools:
                 combined_tools.append("write_atomic_memory")
                 
-            task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], strip_tools=not supports_tools)
+            task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], strip_tools=not node_supports_tools)
             task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
             for k, v in execution_context.items():
@@ -2025,7 +2084,13 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
             if progress_callback:
                 try:
-                    progress_callback(task_idx, len(plan['tasks']), effective_role, "running")
+                    progress_callback(
+                        task_idx,
+                        len(plan['tasks']),
+                        effective_role,
+                        "running",
+                        _model_label(task_model_id),
+                    )
                 except Exception:
                     pass
 
@@ -2047,7 +2112,13 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                         continue
                     elif is_transient:
                         if run_id: db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
-                        raise RateLimitError(f"Model transient error after retries: {e}", task_idx, task_outputs)
+                        mid = task_data.get("model_id") or agent_info.get("model_id") or default_model_id
+                        raise RateLimitError(
+                            f"Model transient error after retries: {e}",
+                            task_idx,
+                            task_outputs,
+                            is_cloud=_provider_is_cloud(mid, e),
+                        )
                     else:
                         raise e
 
@@ -2072,7 +2143,13 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             
             if progress_callback:
                 try:
-                    progress_callback(task_idx, len(plan['tasks']), effective_role, "completed")
+                    progress_callback(
+                        task_idx,
+                        len(plan['tasks']),
+                        effective_role,
+                        "completed",
+                        _model_label(task_model_id),
+                    )
                 except Exception:
                     pass
             

@@ -49,13 +49,22 @@ class EphemeralMemoryManager:
         self._lock = threading.RLock()
 
         if chromadb is not None and Chroma is not None:
-            self.chroma_client = chromadb.EphemeralClient()
-            self.embedding_function = self._resolve_embedding_function()
-            self.vector_store = Chroma(
-                client=self.chroma_client,
-                collection_name=f"run_memory_{run_id}",
-                embedding_function=self.embedding_function,
-            )
+            try:
+                self.chroma_client = chromadb.EphemeralClient()
+                self.embedding_function = self._resolve_embedding_function()
+                self.vector_store = Chroma(
+                    client=self.chroma_client,
+                    collection_name=f"run_memory_{run_id}",
+                    embedding_function=self.embedding_function,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[EphemeralMemory] Embedding init failed ({e}). "
+                    "Using key-based in-memory fallback (no Gemini)."
+                )
+                self.chroma_client = None
+                self.vector_store = None
+                self.embedding_function = None
         else:
             self.chroma_client = None
             self.embedding_function = None
@@ -79,30 +88,8 @@ class EphemeralMemoryManager:
         databases is reused here.
         """
         DataManager.load_env()
-
-        # Lazy import: VectorManager pulls optional LangChain dependencies.
         from core.vector_manager import VectorManager
-        vm = VectorManager()  # lightweight — only sets up a directory path
-
-        # 1. Gemini / Google (Alfredo's default provider)
-        gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if gemini_key:
-            return vm._get_embedding_function("gemini", "models/gemini-embedding-001")
-
-        # 2. OpenAI
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            return vm._get_embedding_function("openai", "text-embedding-3-small")
-
-        # 3. Ollama (local)
-        ollama_model = os.getenv("OLLAMA_EMBEDDING_MODEL")
-        if ollama_model:
-            return vm._get_embedding_function("ollama", ollama_model)
-
-        raise ValueError(
-            "No embedding API key found in .env (GEMINI_API_KEY, OPENAI_API_KEY, "
-            "or OLLAMA_EMBEDDING_MODEL). Cannot initialise ephemeral memory."
-        )
+        return VectorManager.resolve_runtime_embedding_function()
 
     # ------------------------------------------------------------------
     # Write
