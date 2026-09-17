@@ -733,9 +733,8 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict = None) -> int:
     """
-    Master AI quality-check, then show the reviewed plan for user approval.
-    Predefined unmodified workflows skip the slow per-task decompose (N+1 LLM calls).
-    Custom plans get a single-pass review. Required inputs are collected after approval.
+    Master AI quality-check on a local Ollama model, then show the reviewed plan.
+    Always a single pass (no Gemini). Required inputs are collected after approval.
     """
     chat_id = update.effective_chat.id
     base_workflow = context.user_data.get("base_workflow")
@@ -762,82 +761,106 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
     if base_workflow:
         context.user_data["current_workflow_id"] = base_workflow["id"]
 
-    lightweight = bool(base_workflow) and not context.user_data.get("plan_customized")
-    n_tasks = len(plan.get("tasks") or [])
+    original_n = len(plan.get("tasks") or [])
     model_label = f"{getattr(master_ai, 'model_provider', '?')}/{getattr(master_ai, 'model_name', '?')}"
+    is_local = bool(getattr(master_ai, "is_local", False)) or str(
+        getattr(master_ai, "model_provider", "")
+    ).lower() in ("ollama", "lmstudio", "lm_studio", "bionic", "vllm", "llama.cpp")
 
-    if lightweight:
-        decomp_msg = await context.bot.send_message(
+    if not is_local:
+        logger.error(f"Master AI review refused: model is not local ({model_label}).")
+        await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                "🔄 <b>Master AI review</b>\n"
-                f"<i>Checking the predefined plan ({n_tasks} tasks) on {model_label}. "
-                "No per-task split — this stays on local Ollama.</i>"
+                f"⚠️ Master AI is set to <code>{model_label}</code>, which is not a local model. "
+                "Review skipped to avoid Gemini/cloud. Showing the original plan. "
+                "Set MASTER_AI_MODEL_NAME to an Ollama model and restart the bot."
             ),
             parse_mode=ParseMode.HTML,
         )
+        context.user_data["final_plan"] = plan
+        context.user_data["plan_reviewed"] = True
+        context.user_data["plan_confirmed"] = False
+        context.user_data["review_model"] = model_label
+        keyboard = [[InlineKeyboardButton("✅ Approve original plan", callback_data="confirm_plan")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            reviewed = await asyncio.to_thread(master_ai.review_workflow_plan, plan, True)
-            if reviewed:
-                plan = reviewed
-        except Exception as decomp_err:
-            logger.error(f"Lightweight review failed: {decomp_err}. Using original plan.")
+            summary = format_plan_summary(plan, as_html=True)
+            await send_long_message(
+                context=context,
+                chat_id=chat_id,
+                text=f"📋 <b>Original plan (review skipped)</b>\n\n{summary}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Original plan. Click below to approve.",
+                reply_markup=reply_markup,
+            )
+        return PLANNING_MODE
+
+    decomp_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🔄 <b>Master AI is reviewing the plan...</b>\n"
+            f"<i>Local model: <code>{model_label}</code> · {original_n} starting tasks · "
+            "one pass, no Gemini.</i>"
+        ),
+        parse_mode=ParseMode.HTML,
+    )
+
+    async def typing_indicator():
+        while True:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+            await asyncio.sleep(4)
+
+    typing_task = asyncio.create_task(typing_indicator())
+    context.user_data["typing_task"] = typing_task
+    try:
+        reviewed = await asyncio.to_thread(master_ai.review_workflow_plan, plan, False)
+        if reviewed:
+            plan = reviewed
+        new_n = len(plan.get("tasks") or [])
+        if new_n != original_n:
+            context.user_data["plan_customized"] = True
+            logger.info(f"Review expanded plan {original_n} → {new_n} tasks; execution will use reviewed plan.")
+    except Exception as decomp_err:
+        logger.error(f"Plan review failed: {decomp_err}. Using original plan.")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Master AI review had an issue. Showing the original plan so you can still approve it.",
+        )
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
         try:
             await decomp_msg.delete()
         except Exception:
             pass
-    else:
-        decomp_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "🔄 <b>Master AI is reviewing the custom plan...</b>\n"
-                f"<i>Single pass on {model_label} ({n_tasks} tasks). Not using Gemini.</i>"
-            ),
-            parse_mode=ParseMode.HTML,
-        )
 
-        async def typing_indicator():
-            while True:
-                try:
-                    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-                except Exception:
-                    pass
-                await asyncio.sleep(4)
-
-        typing_task = asyncio.create_task(typing_indicator())
-        context.user_data["typing_task"] = typing_task
-        try:
-            reviewed = await asyncio.to_thread(master_ai.review_workflow_plan, plan, False)
-            if reviewed:
-                plan = reviewed
-                orig_n = n_tasks
-                new_n = len(plan.get("tasks") or [])
-                if new_n != orig_n:
-                    context.user_data["plan_customized"] = True
-        except Exception as decomp_err:
-            logger.error(f"Custom plan review failed: {decomp_err}. Using original plan.")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Master AI review had an issue. Showing the original plan so you can still approve it.",
-            )
-        finally:
-            typing_task.cancel()
-            try:
-                await typing_task
-            except asyncio.CancelledError:
-                pass
-            try:
-                await decomp_msg.delete()
-            except Exception:
-                pass
+    context.user_data["review_model"] = model_label
 
     keyboard = [[InlineKeyboardButton("✅ Approve reviewed plan", callback_data="confirm_plan")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     summary_sent = False
+    n_final = len(plan.get("tasks") or [])
+    review_header = (
+        f"✅ <b>Master AI review complete</b>\n"
+        f"🧠 Model: <code>{model_label}</code> (local)\n"
+        f"📝 Execution steps: <b>{n_final}</b>\n\n"
+    )
 
     try:
         final_summary = format_plan_summary(plan, as_html=True)
-        full_text = f"✅ <b>Master AI review complete</b>\n\n{final_summary}"
+        full_text = f"{review_header}{final_summary}"
         await send_long_message(
             context=context,
             chat_id=chat_id,
@@ -850,7 +873,11 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Failed to send HTML plan summary: {summary_err}. Falling back to full plain text.")
         try:
             plain_summary = format_plan_summary(plan, as_html=False)
-            fallback_text = f"✅ Master AI review complete\n\n{plain_summary}"
+            fallback_text = (
+                f"✅ Master AI review complete\n"
+                f"Model: {model_label} (local)\n"
+                f"Execution steps: {n_final}\n\n{plain_summary}"
+            )
             await send_long_message(
                 context=context,
                 chat_id=chat_id,
@@ -1279,6 +1306,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id
     workflow_id = context.user_data.get("current_workflow_id")
     final_plan = context.user_data.get("final_plan")
+    plan_reviewed = bool(context.user_data.get("plan_reviewed"))
     execution_context = context.user_data.get("execution_context", {})
 
     paused_state = context.user_data.get("dynamic_run_state", {})
@@ -1319,8 +1347,12 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
         # Update message to show execution started
+        n_plan = len((final_plan or {}).get("tasks") or [])
         await status_msg.edit_text(
-            text="🚀 <b>Execution in progress...</b>\n<i>My agents are working for you (Memory-Centric mode).</i>",
+            text=(
+                f"🚀 <b>Execution in progress...</b>\n"
+                f"<i>Running the reviewed plan ({n_plan or '?'} steps), local models only.</i>"
+            ),
             parse_mode=ParseMode.HTML
         )
 
@@ -1415,20 +1447,21 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         try:
             # CRITICAL ARCHITECTURE FIX: Execute CrewAI in a separate thread
             # to prevent blocking the Telegram bot's event loop.
-            if final_plan and context.user_data.get("plan_customized"):
-                logger.info(f"User {user_id}: Kicking off Memory-Centric Dynamic Crew with context: {execution_context}")
-                logger.info(f"User {user_id}: Starting execution of Dynamic Workflow.")
+            # Always execute the reviewed/final plan when it has tasks.
+            # The DB DAG is the original (e.g. 2 tasks) and must not override a 4-step review.
+            plan_tasks = (final_plan or {}).get("tasks") or []
+            if plan_tasks:
+                n_steps = len(plan_tasks)
+                logger.info(
+                    f"User {user_id}: Executing {'reviewed ' if plan_reviewed else ''}plan "
+                    f"({n_steps} steps) dynamically — not the original DB DAG."
+                )
                 result_tuple = await asyncio.to_thread(
                     execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id), on_task_progress, on_flight_change
                 )
             elif workflow_id:
                 logger.info(f"User {user_id}: Starting execution of Workflow ID {workflow_id} (resume from {start_idx}) on DB task models.")
                 result_tuple = await asyncio.to_thread(execute_run_with_resume, run_id, on_task_progress, accumulated_context, str(chat_id), on_flight_change)
-            elif final_plan:
-                logger.info(f"User {user_id}: No workflow_id — falling back to dynamic crew.")
-                result_tuple = await asyncio.to_thread(
-                    execute_dynamic_crew_with_memory, final_plan, execution_context, None, run_id, start_idx, initial_outputs, accumulated_context, str(chat_id), on_task_progress, on_flight_change
-                )
             else:
                 raise ValueError("No workflow_id or final_plan available for execution.")
 

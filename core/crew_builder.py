@@ -1845,14 +1845,18 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     dag_nodes = {}
     level_nodes = {}
     tasks = plan['tasks']
+    used_node_ids = set()
     for i, task_data in enumerate(tasks):
-        node_id = task_data.get("id", f"node_{i}")
-        depends_on = task_data.get("depends_on", [])
+        node_id = str(task_data.get("id") or f"node_{i}")
+        if node_id in used_node_ids or node_id in dag_nodes:
+            node_id = f"{node_id}__{i}"
+        task_data["id"] = node_id
+        used_node_ids.add(node_id)
+        depends_on = list(task_data.get("depends_on") or [])
         execution_level = task_data.get("execution_level", 1)
-        if "id" not in task_data:
-            # Legacy tasks without ID keep sequential dependency if empty
-            if i > 0 and not depends_on:
-                depends_on = [f"node_{i-1}"]
+        if i > 0 and not depends_on:
+            prev_id = str(tasks[i - 1].get("id") or f"node_{i-1}")
+            depends_on = [prev_id]
             
         if execution_level not in level_nodes:
             level_nodes[execution_level] = []
@@ -1943,8 +1947,14 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             specialization = task_data.get('agent_specialization')
 
             if agent_role not in agents_data_by_role:
-                logging.warning(f"Task specifies unknown agent role '{agent_role}'. Skipping.")
-                return ""
+                fallback_role = next(iter(agents_data_by_role), None)
+                logging.warning(
+                    f"Task specifies unknown agent role '{agent_role}'. "
+                    f"Using '{fallback_role}' instead of skipping."
+                )
+                if not fallback_role:
+                    return ""
+                agent_role = fallback_role
 
             agent_info = agents_data_by_role[agent_role]
             base_role = agent_info['role']

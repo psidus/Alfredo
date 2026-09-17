@@ -1554,15 +1554,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             for key in ("expected_exports", "export_instructions"):
                 if key in plan and key not in reviewed:
                     reviewed[key] = plan[key]
-            if not reviewed.get("agents"):
-                reviewed["agents"] = plan.get("agents") or []
-            # Restore model_id if the LLM dropped it
             orig_tasks = plan.get("tasks") or []
-            for i, t in enumerate(reviewed.get("tasks") or []):
-                if t.get("model_id"):
-                    continue
-                if i < len(orig_tasks) and orig_tasks[i].get("model_id"):
-                    t["model_id"] = orig_tasks[i]["model_id"]
+            reviewed = self._finalize_reviewed_plan(plan, reviewed)
             logger.info(
                 f"MasterAI review complete: {len(orig_tasks)} -> {len(reviewed.get('tasks') or [])} tasks."
             )
@@ -1570,6 +1563,89 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         except Exception as e:
             logger.error(f"MasterAI single-pass review failed: {e}. Keeping original plan.")
             return plan
+
+    def _finalize_reviewed_plan(self, original: Dict[str, Any], reviewed: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep execution fields after review: unique step ids, models, agents, HITL."""
+        orig_tasks = original.get("tasks") or []
+        orig_agents = original.get("agents") or []
+        orig_by_role = {}
+        orig_roles = []
+        for ot in orig_tasks:
+            role = ot.get("agent_role") or ""
+            if role and role not in orig_roles:
+                orig_roles.append(role)
+            if role and ot.get("model_id") and role not in orig_by_role:
+                orig_by_role[role] = ot.get("model_id")
+
+        if not reviewed.get("agents"):
+            reviewed["agents"] = orig_agents
+        known_roles = [a.get("role") for a in (reviewed.get("agents") or []) if a.get("role")]
+        if not known_roles:
+            known_roles = orig_roles[:]
+
+        last_mid = None
+        for i, t in enumerate(reviewed.get("tasks") or []):
+            if not isinstance(t, dict):
+                continue
+            role = t.get("agent_role") or ""
+            if role not in known_roles:
+                fallback_role = None
+                if i < len(orig_tasks):
+                    fallback_role = orig_tasks[i].get("agent_role")
+                t["agent_role"] = fallback_role or (known_roles[0] if known_roles else role)
+                role = t.get("agent_role") or ""
+            if t.get("model_id"):
+                last_mid = t.get("model_id")
+            else:
+                inherited = orig_by_role.get(role)
+                if inherited is None and i < len(orig_tasks):
+                    inherited = orig_tasks[i].get("model_id")
+                if inherited is None:
+                    inherited = last_mid
+                if inherited is not None:
+                    t["model_id"] = inherited
+                    last_mid = inherited
+            for extra_key in ("tools", "required_inputs", "vector_dbs", "human_validation"):
+                if extra_key not in t and i < len(orig_tasks) and extra_key in orig_tasks[i]:
+                    t[extra_key] = orig_tasks[i].get(extra_key)
+
+        reviewed = self._enforce_hitl_preservation(orig_tasks, reviewed)
+        return self._normalize_reviewed_task_graph(reviewed)
+
+    def _normalize_reviewed_task_graph(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Give every reviewed task a unique id so the DAG cannot collapse back to 2 nodes."""
+        tasks = plan.get("tasks") or []
+        if not tasks:
+            return plan
+        old_to_new = {}
+        for i, t in enumerate(tasks):
+            if not isinstance(t, dict):
+                continue
+            old = t.get("id")
+            new_id = f"step_{i}"
+            if old is not None and str(old) not in old_to_new:
+                old_to_new[str(old)] = new_id
+            t["id"] = new_id
+        for i, t in enumerate(tasks):
+            if not isinstance(t, dict):
+                continue
+            mapped = []
+            for d in (t.get("depends_on") or []):
+                nd = old_to_new.get(str(d))
+                if nd and nd != t["id"] and nd not in mapped:
+                    mapped.append(nd)
+            if not mapped and i > 0:
+                prev = tasks[i - 1]
+                if isinstance(prev, dict) and prev.get("id"):
+                    mapped = [prev["id"]]
+            t["depends_on"] = mapped
+            try:
+                lvl = int(t.get("execution_level") or 0)
+            except (TypeError, ValueError):
+                lvl = 0
+            if lvl <= 0:
+                t["execution_level"] = i + 1
+        return plan
 
     def decompose_workflow_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Backward-compatible wrapper: single-pass review instead of N+1 LLM calls."""
