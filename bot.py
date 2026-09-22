@@ -58,11 +58,12 @@ master_ai = MasterAI()
 notifier = NotificationManager()
 
 # --- Post-processing watchdog (seconds) ---
-# Hard bounds on the final-output LLM phases so a workflow can never hang forever
-# at "Refining output..." / "Compressing context..." / "Generating files...".
-REFINE_TIMEOUT = int(os.getenv("ALFREDO_REFINE_TIMEOUT", "300"))
-SUMMARIZE_TIMEOUT = int(os.getenv("ALFREDO_SUMMARIZE_TIMEOUT", "180"))
-EXPORT_TIMEOUT = int(os.getenv("ALFREDO_EXPORT_TIMEOUT", "300"))
+# Hard bounds so a workflow cannot sit forever on review or before the final message.
+# Inner Master AI calls are shorter; these are the last safety net.
+REVIEW_TIMEOUT = int(os.getenv("ALFREDO_REVIEW_TIMEOUT", "60"))
+REFINE_TIMEOUT = int(os.getenv("ALFREDO_REFINE_TIMEOUT", "110"))
+SUMMARIZE_TIMEOUT = int(os.getenv("ALFREDO_SUMMARIZE_TIMEOUT", "60"))
+EXPORT_TIMEOUT = int(os.getenv("ALFREDO_EXPORT_TIMEOUT", "180"))
 
 # --- Configuration from .env ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -829,7 +830,11 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
     typing_task = asyncio.create_task(typing_indicator())
     context.user_data["typing_task"] = typing_task
     try:
-        reviewed = await asyncio.to_thread(master_ai.review_workflow_plan, plan, False)
+        keep_saved_plan = not context.user_data.get("plan_customized")
+        reviewed = await asyncio.wait_for(
+            asyncio.to_thread(master_ai.review_workflow_plan, plan, keep_saved_plan),
+            timeout=REVIEW_TIMEOUT,
+        )
         if reviewed:
             plan = reviewed
         new_n = len(plan.get("tasks") or [])
@@ -1558,10 +1563,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         _refine_start = time.monotonic()
         try:
-            # Refine the FINAL task output rather than the whole global_context,
-            # which can be enormous and stall the LLM for minutes. Fall back to the
-            # capped global context only when no final output exists.
-            _refiner_input = str(final_result) if final_result else (global_context or "")
+            # Prefer whichever step actually contains papers. The last step is often
+            # only a tool trace, while the search step holds the DOIs.
+            from core.master_ai import select_refine_source
+            _refiner_input = select_refine_source(
+                str(final_result) if final_result else "",
+                global_context if isinstance(global_context, str) else None,
+            )
             refined_result = await asyncio.wait_for(
                 asyncio.to_thread(master_ai.refine_output, _refiner_input, "English", _max_tokens or None),
                 timeout=REFINE_TIMEOUT,
@@ -1598,31 +1606,8 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except Exception:
                 db.update_run(run_id, status='completed', result=refined_result)
 
-        # Save refined output and summarize global context for conversational continuation
-        try:
-            await status_msg.edit_text(
-                text="🧠 <b>Compressing context...</b>\n<i>Master AI is summarizing memory for follow-up chats.</i>",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass  # status_msg may have been deleted/replaced by on_task_progress
-        _summarize_start = time.monotonic()
-        try:
-            accumulated_context_str = await asyncio.wait_for(
-                asyncio.to_thread(master_ai.summarize_global_context, global_context, _max_tokens or None),
-                timeout=SUMMARIZE_TIMEOUT,
-            )
-            logger.info(f"User {user_id}: Context summarization complete ({time.monotonic() - _summarize_start:.1f}s).")
-        except asyncio.TimeoutError:
-            logger.error(f"User {user_id}: Context summarization timed out after {SUMMARIZE_TIMEOUT}s. Using raw context.")
-            accumulated_context_str = global_context if isinstance(global_context, str) else ""
-        except Exception as summarize_err:
-            logger.error(f"Context summarization failed: {summarize_err}. Using raw context.")
-            accumulated_context_str = global_context if isinstance(global_context, str) else ""
-
-        db.update_context(str(chat_id), last_output=refined_result, accumulated_context=accumulated_context_str)
-
-        # Send completion notification
+        # Deliver the report before memory compression and file export.
+        # Those extra LLM calls must not keep the chat waiting on the final message.
         wf_name = "Dynamic Workflow"
         expected_exports = []
         if workflow_id:
@@ -1632,11 +1617,9 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         elif final_plan:
             expected_exports = final_plan.get("expected_exports", [])
 
-        # Save run metadata for potential feedback submission
         context.user_data["last_run_id"] = run_id
         context.user_data["last_workflow_name"] = wf_name
 
-        # Safeguard: ensure expected_exports is always a list, never a bare string
         if isinstance(expected_exports, str):
             try:
                 expected_exports = json.loads(expected_exports)
@@ -1644,49 +1627,6 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     expected_exports = [expected_exports]
             except (json.JSONDecodeError, ValueError):
                 expected_exports = [expected_exports] if expected_exports else []
-
-        # Notify external operator only if configured and distinct from current chat
-        if notifier.default_chat_id and str(notifier.default_chat_id) != str(chat_id):
-            notifier.notify_workflow_completion(wf_name, refined_result)
-
-        # --- GENERATE PHYSICAL FILES ---
-        generated_files = []
-        export_instructions = None
-        if workflow_id:
-            workflow_for_instructions = db.read_workflow(workflow_id)
-            if workflow_for_instructions:
-                export_instructions = workflow_for_instructions.get("export_instructions", "")
-        elif final_plan:
-            export_instructions = final_plan.get("export_instructions", "")
-
-        if expected_exports:
-            try:
-                await status_msg.edit_text(
-                    text="📁 <b>Generating requested files...</b>\n<i>Master AI is building your documents from the global context.</i>",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass  # status_msg may have been deleted/replaced by on_task_progress
-            try:
-                export_dir = os.path.join("exports", str(run_id) if run_id else f"chat_{chat_id}")
-                _export_start = time.monotonic()
-                generated_files = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        master_ai.generate_export_files,
-                        str(final_result),
-                        expected_exports,
-                        export_dir,
-                        global_context,
-                        export_instructions,
-                        _max_tokens or None,
-                    ),
-                    timeout=EXPORT_TIMEOUT,
-                )
-                logger.info(f"Generated {len(generated_files)} files for User {user_id} ({time.monotonic() - _export_start:.1f}s)")
-            except asyncio.TimeoutError:
-                logger.error(f"File generation timed out after {EXPORT_TIMEOUT}s.")
-            except Exception as e:
-                logger.error(f"File generation failed for User {user_id}: {e}")
 
         keyboard = [
             [
@@ -1697,17 +1637,13 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Delete the status message now that we have the final result
         try:
             await status_msg.delete()
         except Exception:
             pass
 
-        # Send the refined report — use Markdown for better formatting
-        # Send using chunked messages to avoid Telegram limit without any truncation
         report_text = refined_result
         final_caption = f"✅ *Execution Complete!*\n\n{report_text}\n\n_Choose how to proceed:_"
-
         try:
             await send_long_message(
                 context=context,
@@ -1729,7 +1665,63 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 reply_markup=reply_markup
             )
 
-        # SEND GENERATED DOCUMENTS
+        if notifier.default_chat_id and str(notifier.default_chat_id) != str(chat_id):
+            notifier.notify_workflow_completion(wf_name, refined_result)
+
+        _summarize_start = time.monotonic()
+        try:
+            accumulated_context_str = await asyncio.wait_for(
+                asyncio.to_thread(master_ai.summarize_global_context, global_context, _max_tokens or None),
+                timeout=SUMMARIZE_TIMEOUT,
+            )
+            logger.info(f"User {user_id}: Context summarization complete ({time.monotonic() - _summarize_start:.1f}s).")
+        except asyncio.TimeoutError:
+            logger.error(f"User {user_id}: Context summarization timed out after {SUMMARIZE_TIMEOUT}s. Using raw context.")
+            accumulated_context_str = global_context if isinstance(global_context, str) else ""
+        except Exception as summarize_err:
+            logger.error(f"Context summarization failed: {summarize_err}. Using raw context.")
+            accumulated_context_str = global_context if isinstance(global_context, str) else ""
+
+        db.update_context(str(chat_id), last_output=refined_result, accumulated_context=accumulated_context_str)
+
+        generated_files = []
+        export_instructions = None
+        if workflow_id:
+            workflow_for_instructions = db.read_workflow(workflow_id)
+            if workflow_for_instructions:
+                export_instructions = workflow_for_instructions.get("export_instructions", "")
+        elif final_plan:
+            export_instructions = final_plan.get("export_instructions", "")
+
+        if expected_exports:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="📁 Generating the requested files...",
+                )
+            except Exception:
+                pass
+            try:
+                export_dir = os.path.join("exports", str(run_id) if run_id else f"chat_{chat_id}")
+                _export_start = time.monotonic()
+                generated_files = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        master_ai.generate_export_files,
+                        str(final_result),
+                        expected_exports,
+                        export_dir,
+                        global_context,
+                        export_instructions,
+                        _max_tokens or None,
+                    ),
+                    timeout=EXPORT_TIMEOUT,
+                )
+                logger.info(f"Generated {len(generated_files)} files for User {user_id} ({time.monotonic() - _export_start:.1f}s)")
+            except asyncio.TimeoutError:
+                logger.error(f"File generation timed out after {EXPORT_TIMEOUT}s.")
+            except Exception as e:
+                logger.error(f"File generation failed for User {user_id}: {e}")
+
         for file_path in generated_files:
             if os.path.exists(file_path):
                 try:

@@ -167,22 +167,24 @@ def setup_scientific_research_workflow():
         db,
         name="Search Scientific Literature",
         description=(
-            "Perform an in-depth scientific literature search on the topic: '{topic}'.\n\n"
-            "Use the search_scientific_literature tool to retrieve verified peer-reviewed articles, "
-            "academic publications, and conference proceedings from Crossref.\n\n"
-            "Collect at least 6 to 8 strong candidate scientific papers directly relevant to '{topic}'. For each paper found, extract:\n"
+            "Perform a scientific literature search on the topic: '{topic}'.\n\n"
+            "Call search_scientific_literature exactly once with the topic as query and max_results=8. "
+            "The tool returns Crossref records: title, authors, journal, year, DOI, URL, and an abstract only when Crossref provides one.\n\n"
+            "Copy 6 to 8 papers from that tool result. For each paper write:\n"
             "1. Full Article Title\n"
             "2. Authors and Publication Year\n"
-            "3. Direct Verified Link (e.g. https://doi.org/... or publisher URL)\n"
-            "4. Core Findings & Methodology snippet\n\n"
+            "3. Journal\n"
+            "4. Direct Verified Link (https://doi.org/... or the URL returned by the tool)\n"
+            "5. Abstract, only if the tool included one. Otherwise write 'Not stated in the retrieved record'.\n\n"
             "STRICT INTEGRITY RULES:\n"
             "- Only include papers actually returned by the search_scientific_literature tool.\n"
-            "- NEVER fabricate, invent, or hallucinate titles, authors, DOIs, or URLs.\n"
-            "- If a paper has no accessible link, state 'URL not available'. Never output synthetic placeholder numbers (e.g. '00123' or 'PMC12345678')."
+            "- NEVER fabricate, invent, or hallucinate titles, authors, DOIs, URLs, methods, or findings.\n"
+            "- If a paper has no accessible link, state 'URL not available'. Never output synthetic placeholder numbers (e.g. '00123' or 'PMC12345678').\n"
+            "- Your final message is the paper list itself. Do not describe the tool call."
         ),
         expected_output=(
             "A structured collection of 6-8 retrieved scientific papers, each with exact Title, "
-            "Authors, Year, verified DOI Link/URL, and key Abstract/Findings."
+            "Authors, Year, Journal, and verified DOI Link/URL. Abstract only when the tool returned one."
         ),
         agent_id=dora_id,
         tools=["search_scientific_literature"],
@@ -205,20 +207,19 @@ def setup_scientific_research_workflow():
             "Your task is to select and curate the TOP 5 most relevant, impactful, and rigorous "
             "scientific papers from the collected material, and format them into a clean bibliographic digest.\n\n"
             "Strict Rules:\n"
-            "1. Select exactly 5 distinct, high-quality papers from the gathered research.\n"
-            "2. Use ONLY the real URLs and paper titles provided in the research material—do NOT hallucinate or invent links.\n"
+            "1. Select exactly 5 distinct papers from the gathered research.\n"
+            "2. Use ONLY titles, authors, years, journals, and URLs that appear in the research material. Do NOT invent links, methods, or findings.\n"
             "3. Format each of the 5 papers as follows:\n\n"
             "### [Number]. [Article Title]\n"
+            "- **Authors / Year**: [from the research material]\n"
             "- **Link / Source**: [Verified URL from research material, or 'URL not available']\n"
-            "- **Core Question**: [1 clear sentence describing what specific question, mechanism, or problem the study investigates]\n"
-            "- **Summary & Findings**: [2-3 concise sentences covering the methods, main findings, and why this paper is critical to '{topic}']\n\n"
-            "4. Conclude with a brief (2-3 sentences) synthesis of the overall state of current research on '{topic}' "
-            "emerging from these 5 papers.\n"
-            "5. Do NOT output placeholder strings like '[Exact URL]'. If no URL was provided, write 'URL not available'."
+            "- **What the record says**: [1-2 sentences using only the title, journal, and abstract if one was retrieved. If the abstract is missing, write 'Not stated in the retrieved record'.]\n\n"
+            "4. Conclude with 2-3 sentences on how these 5 titles relate to '{topic}', without adding facts that are not in the records.\n"
+            "5. Do NOT output placeholder strings like '[Exact URL]' or tables of Method 1 / Finding 1. If no URL was provided, write 'URL not available'."
         ),
         expected_output=(
-            "A clean Markdown document presenting exactly 5 curated scientific papers with verified links, "
-            "core research questions, and concise summaries, followed by a brief research synthesis."
+            "A clean Markdown document presenting exactly 5 curated scientific papers with verified links "
+            "and only the facts present in the retrieved records, followed by a brief synthesis."
         ),
         agent_id=writer_id,
         tools=[],

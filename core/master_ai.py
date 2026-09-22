@@ -2,6 +2,8 @@ import json
 import logging
 import os
 import re
+import threading
+import concurrent.futures
 from typing import Optional, Dict, Any
 
 
@@ -14,6 +16,10 @@ except ImportError:
     litellm = None
 
 logger = logging.getLogger(__name__)
+
+# One local Master AI call at a time. A timed-out request must not keep the
+# next review/refine/export queued behind it on Ollama.
+_local_llm_slot = threading.BoundedSemaphore(1)
 
 # --- Headroom AI: Context Compression ---
 # Headroom is a Gemini-oriented proxy. NEVER assign it to the global LiteLLM
@@ -67,6 +73,10 @@ DEFAULT_EXPORT_MAX_TOKENS = 6000
 MAX_LLM_INPUT_CHARS = 120_000  # Hard cap on any single prompt built for post-processing
 
 
+_SOURCE_MARKER = re.compile(r"https?://|10\.\d{4,}/", re.IGNORECASE)
+_PLACEHOLDER_MATRIX = re.compile(r"method\s*1|finding\s*1", re.IGNORECASE)
+
+
 def _cap_text(text: str, max_chars: int = MAX_LLM_INPUT_CHARS) -> str:
     """Truncate oversized prompts to keep post-processing LLM calls fast and bounded."""
     if not text:
@@ -74,6 +84,58 @@ def _cap_text(text: str, max_chars: int = MAX_LLM_INPUT_CHARS) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n\n...[TRUNCATED FOR LENGTH]..."
+
+
+def literature_output_is_placeholder(text: str) -> bool:
+    """True when the text is a tool trace or an invented matrix, with no real sources."""
+    raw = text or ""
+    if _SOURCE_MARKER.search(raw):
+        return False
+    low = raw.lower()
+    if _PLACEHOLDER_MATRIX.search(raw):
+        return True
+    if "structured evidence matrix highlighting key findings" in low:
+        return True
+    if "write_atomic_memory" in low and "content_summary" in low:
+        return True
+    return False
+
+
+def select_refine_source(final_result: str, global_context: str = None) -> str:
+    """Prefer the step that actually contains papers over the last tool-call trace."""
+    candidates = []
+    if global_context:
+        try:
+            records = json.loads(global_context)
+        except (TypeError, json.JSONDecodeError):
+            records = None
+        if isinstance(records, list):
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                data = rec.get("data") if isinstance(rec.get("data"), dict) else {}
+                raw = str(data.get("raw_output") or rec.get("summary") or "").strip()
+                if raw:
+                    candidates.append(raw)
+    if final_result and str(final_result).strip():
+        candidates.append(str(final_result).strip())
+    if not candidates:
+        return str(final_result or "")
+
+    def _score(text: str) -> tuple:
+        sources = len(_SOURCE_MARKER.findall(text))
+        placeholder = 1 if literature_output_is_placeholder(text) else 0
+        return (sources, -placeholder, min(len(text), 8000))
+
+    return max(candidates, key=_score)
+
+
+MISSING_LITERATURE_MESSAGE = (
+    "The workflow finished without a verified literature digest.\n\n"
+    "No DOI or source URL was present in the agent output, so no paper list was produced. "
+    "The search step has to call search_scientific_literature and copy the returned titles, "
+    "authors, years, and links. Placeholder rows such as Method 1 / Finding 1 are not a result."
+)
 
 
 MASTER_PROMPT = """
@@ -232,10 +294,13 @@ YOUR RESPONSIBILITIES:
 4. **Completeness & Synthesis**: Ensure ALL findings, articles, links, citations, explanations, and key details produced by the agents are fully preserved. Do NOT omit, drop, or truncate items from bibliographies, search results, or analysis sections. Merge overlapping sections and eliminate pure repetition, but ensure all distinct facts, links, and takeaways remain intact in full.
 5. **Source & Link Integrity**: Preserve all real URLs (such as https://doi.org/..., https://arxiv.org/...). If a paper does not have a verified URL, write 'URL not available'. NEVER invent fake citations or synthetic URLs (e.g. PMC12345678, 00123) and never output placeholder strings like '[Exact URL]'.
 6. **Ethical Review**: Flag any content that is unethical, illegal, harmful, or promotes deceptive practices. If you find issues, add a clearly visible "⚠️ Ethical Note" section at the end.
-7. **Actionability**: Ensure the report ends with concrete, prioritized next steps the user can act on.
+7. **Actionability**: When the raw output contains real findings, end with concrete next steps. If it does not, do not invent next steps.
 
 RULES:
 - Do NOT invent new data or analysis. Only restructure and clarify what the agents produced.
+- NEVER write a report about a function call, tool name, or arguments such as write_atomic_memory / content_summary. Those are internal traces, not the deliverable.
+- NEVER create placeholder rows such as "Method 1" or "Finding 1". If the raw output has no papers, say that no verified literature was retrieved.
+- When papers are present, list each one with its title, authors, year, and URL. Do not replace them with a generic evidence matrix.
 - Use Markdown formatting for the output (headings, bold, lists, links).
 - Do NOT truncate, shorten, summarize away, or omit any articles, papers, links, citations, sections, data, or details produced by the agents. The output MUST contain all findings, references, URLs, and descriptions in full.
 - Never enforce arbitrary character limits or drop content to save space. Full reporting is required.
@@ -632,12 +697,20 @@ class MasterAI:
                             )
                             self.model_name = preferred
 
-                        valid_fallbacks = []
-                        for p in available_pulled:
-                            cand_str = f"ollama/{p}"
-                            if p != self.model_name and cand_str not in valid_fallbacks:
-                                valid_fallbacks.append(cand_str)
-                        self.fallback_chain = valid_fallbacks
+                        # Keep a single verified fallback. Walking every pulled model
+                        # turns one slow call into a multi-minute stall before the chat replies.
+                        verified_fallbacks = []
+                        for cand in list(self.fallback_chain or []):
+                            name = cand.split("/", 1)[-1]
+                            matched = _matches_pulled(name)
+                            if not matched or matched == self.model_name:
+                                continue
+                            verified = f"ollama/{matched}"
+                            if verified not in verified_fallbacks:
+                                verified_fallbacks.append(verified)
+                            if len(verified_fallbacks) >= 1:
+                                break
+                        self.fallback_chain = verified_fallbacks
                         logger.info(f"MasterAI verified Ollama models: active={self.model_name}, fallbacks={self.fallback_chain}")
             except Exception as e:
                 logger.warning(f"Could not dynamically verify Ollama models: {e}")
@@ -837,14 +910,115 @@ class MasterAI:
             msg = str(err).lower()
             return any(kw in msg for kw in TRANSIENT_KEYWORDS)
 
+        def _build_call_kwargs(m: str, use_json_mode: bool, is_local_model: bool, call_timeout: int) -> dict:
+            call_kwargs = dict(
+                model=m,
+                messages=messages,
+                temperature=temperature,
+                timeout=call_timeout,
+            )
+            if max_tokens is not None:
+                call_kwargs["max_tokens"] = max_tokens
+            if is_local_model:
+                self._apply_local_runtime(call_kwargs, m)
+            else:
+                proxy = _headroom_proxy_for_cloud(m)
+                if proxy:
+                    call_kwargs["api_base"] = proxy
+                if use_json_mode:
+                    call_kwargs["response_format"] = {"type": "json_object"}
+            call_kwargs["messages"] = _compress_messages(call_kwargs["messages"], model=m)
+            return call_kwargs
+
+        def _complete_ollama(call_kwargs: dict) -> str:
+            """Native Ollama chat with a hard read timeout that closes the socket."""
+            import requests
+
+            base = (call_kwargs.get("api_base") or "http://127.0.0.1:11434").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[:-3]
+            model_name = call_kwargs["model"]
+            if model_name.startswith("ollama/"):
+                model_name = model_name[len("ollama/"):]
+            options = {"temperature": call_kwargs.get("temperature", 0.1)}
+            if call_kwargs.get("max_tokens"):
+                options["num_predict"] = int(call_kwargs["max_tokens"])
+            payload = {
+                "model": model_name,
+                "messages": call_kwargs["messages"],
+                "stream": False,
+                "options": options,
+            }
+            timeout_s = int(call_kwargs.get("timeout") or 60)
+            resp = requests.post(
+                f"{base}/api/chat",
+                json=payload,
+                timeout=(5, timeout_s),
+            )
+            resp.raise_for_status()
+            content = ((resp.json() or {}).get("message") or {}).get("content") or ""
+            if not str(content).strip():
+                raise RuntimeError(f"Ollama model '{model_name}' returned an empty response.")
+            return content
+
+        def _complete_litellm(call_kwargs: dict) -> str:
+            if litellm is None:
+                raise RuntimeError("litellm is not installed.")
+            response = litellm.completion(**call_kwargs)
+            content = response.choices[0].message.content
+            if not str(content or "").strip():
+                raise RuntimeError("Model returned an empty response.")
+            return content
+
+        def _run_local_once(m: str, call_kwargs: dict, call_timeout: int) -> str:
+            """One local attempt. If Ollama is still busy, fail immediately."""
+            if not _local_llm_slot.acquire(blocking=False):
+                raise TimeoutError(
+                    "Local model is still busy with a previous Master AI call."
+                )
+
+            def _invoke():
+                prefix = (m.split("/")[0] if "/" in m else m).lower()
+                if prefix == "ollama":
+                    return _complete_ollama(call_kwargs)
+                return _complete_litellm(call_kwargs)
+
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="master-llm")
+            fut = pool.submit(_invoke)
+            try:
+                return fut.result(timeout=call_timeout + 5)
+            except concurrent.futures.TimeoutError as exc:
+                raise TimeoutError(f"Local model '{m}' exceeded {call_timeout}s.") from exc
+            finally:
+                pool.shutdown(wait=False)
+                if fut.done():
+                    _local_llm_slot.release()
+                else:
+                    def _release_when_done(done_fut):
+                        try:
+                            done_fut.result()
+                        except Exception:
+                            pass
+                        finally:
+                            _local_llm_slot.release()
+
+                    threading.Thread(
+                        target=_release_when_done, args=(fut,), daemon=True
+                    ).start()
+
         def _try_model(m: str, use_json_mode: bool = True) -> str:
-            """Attempt a single model with retry on transient errors."""
+            """Attempt a single model. Local models get one hard-deadline attempt."""
             last_err = None
             provider_prefix = (m.split('/')[0] if '/' in m else m).lower()
             is_local_model = provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]
             # Ollama/LM Studio often reject OpenAI json_object mode — skip it locally.
             effective_json = use_json_mode and not is_local_model
-            call_timeout = timeout_override or (180 if is_local_model else 60)
+            call_timeout = timeout_override or (90 if is_local_model else 60)
+            call_kwargs = _build_call_kwargs(m, effective_json, is_local_model, call_timeout)
+
+            if is_local_model:
+                return _run_local_once(m, call_kwargs, call_timeout)
+
             for attempt, wait in enumerate([0] + RETRY_WAITS):
                 if wait > 0:
                     logger.warning(
@@ -853,31 +1027,7 @@ class MasterAI:
                     )
                     time.sleep(wait)
                 try:
-                    call_kwargs = dict(
-                        model=m,
-                        messages=messages,
-                        temperature=temperature,
-                        timeout=call_timeout,
-                    )
-<<<<<<< Updated upstream
-                    if max_tokens:
-=======
-                    if max_tokens is not None:
->>>>>>> Stashed changes
-                        call_kwargs["max_tokens"] = max_tokens
-                    
-                    if is_local_model:
-                        self._apply_local_runtime(call_kwargs, m)
-                    else:
-                        proxy = _headroom_proxy_for_cloud(m)
-                        if proxy:
-                            call_kwargs["api_base"] = proxy
-                    if effective_json:
-                        call_kwargs["response_format"] = {"type": "json_object"}
-                    # Compress messages before sending to the LLM
-                    call_kwargs["messages"] = _compress_messages(call_kwargs["messages"], model=m)
-                    response = litellm.completion(**call_kwargs)
-                    return response.choices[0].message.content
+                    return _complete_litellm(call_kwargs)
                 except Exception as e:
                     last_err = e
                     if _is_transient(e) and attempt < len(RETRY_WAITS):
@@ -885,10 +1035,8 @@ class MasterAI:
                             f"MasterAI [{m}] Transient error (attempt {attempt+1}): "
                             f"{str(e)[:80]}"
                         )
-                        continue  # retry with wait
-                    else:
-                        # Non-transient or budget exhausted — stop retrying this model
-                        break
+                        continue
+                    break
             raise last_err
 
         # Build the full ordered list: primary + fallback chain
@@ -983,6 +1131,9 @@ class MasterAI:
         raw_str = _cap_text(str(raw_output).strip())
         if not raw_str:
             return "The workflow completed but produced no output. Please try again with more specific instructions."
+        if literature_output_is_placeholder(raw_str):
+            logger.warning("MasterAI refine skipped: agent output has no verified sources.")
+            return MISSING_LITERATURE_MESSAGE
 
         lang_instruction = "MANDATORY LANGUAGE REQUIREMENT: Translate and write the ENTIRE refined report in English."
         if target_language:
@@ -1005,7 +1156,9 @@ class MasterAI:
                 ],
                 temperature=0.1,  # Low creativity — focus on restructuring, not inventing
                 force_json_mode=False,
-                max_tokens=effective_max_tokens
+                allow_fallback=False,
+                max_tokens=effective_max_tokens,
+                timeout_override=90,
             )
             logger.info(f"MasterAI Output refinement complete ({len(refined)} chars).")
             return refined
@@ -1039,7 +1192,9 @@ class MasterAI:
                 ],
                 temperature=0.1,
                 force_json_mode=False,
-                max_tokens=effective_max_tokens
+                allow_fallback=False,
+                max_tokens=effective_max_tokens,
+                timeout_override=45,
             )
             logger.info(f"MasterAI Context summary complete ({len(summary)} chars).")
             return summary
@@ -1507,7 +1662,9 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                         {"role": "user", "content": system_prompt}
                     ],
                     temperature=0.1,
-                    max_tokens=effective_max_tokens
+                    allow_fallback=False,
+                    max_tokens=effective_max_tokens,
+                    timeout_override=60,
                 )
                 
                 # Strip leading/trailing markdown blocks if the LLM ignored instructions
@@ -1603,101 +1760,57 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             logger.error(f"Failed to decompose task '{name}': {e}. Returning original.")
             return [task]
 
-    def _heuristic_decompose_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        """Atomize complex tasks into sequential focused steps if LLM is slow or unexpanded."""
+    def _plan_should_stay_intact(self, plan: Dict[str, Any]) -> bool:
+        """Predefined literature plans already say what to deliver. Do not rewrite them."""
         tasks = plan.get("tasks") or []
-        agents = plan.get("agents") or []
-        if len(tasks) >= 4:
-            return dict(plan)
+        if not tasks:
+            return False
+        for task in tasks:
+            tools = [str(tool) for tool in (task.get("tools") or []) if tool]
+            if "search_scientific_literature" in tools:
+                return True
+            blob = " ".join([
+                str(task.get("name") or ""),
+                str(task.get("description") or ""),
+                str(task.get("expected_output") or ""),
+            ]).lower()
+            if any(marker in blob for marker in ("doi", "peer-reviewed", "scientific paper", "never fabricate")):
+                return True
+        detailed = 0
+        for task in tasks:
+            if len((task.get("description") or "").strip()) >= 180 and len((task.get("expected_output") or "").strip()) >= 60:
+                detailed += 1
+        return detailed == len(tasks)
 
+    def _review_drops_required_tools(self, original: Dict[str, Any], reviewed: Dict[str, Any]) -> bool:
+        required = set()
+        for task in original.get("tasks") or []:
+            for tool in task.get("tools") or []:
+                if tool and "search" in str(tool):
+                    required.add(str(tool))
+        if not required:
+            return False
+        kept = set()
+        for task in reviewed.get("tasks") or []:
+            for tool in task.get("tools") or []:
+                if tool:
+                    kept.add(str(tool))
+        return not required.issubset(kept)
+
+    def _heuristic_decompose_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep authored tasks. A generic matrix pipeline drops the real search contract."""
+        tasks = plan.get("tasks") or []
         new_tasks = []
-        step_num = 1
-
-        for t in tasks:
-            t_name = (t.get("name") or "").lower()
-            t_desc = (t.get("description") or "").lower()
-            agent_role = t.get("agent_role") or (agents[0]["role"] if agents else "Agent")
-            tools = list(t.get("tools") or [])
-            req_inputs = t.get("required_inputs") or []
-            model_id = t.get("model_id")
-
-            if any(w in t_name or w in t_desc for w in ["search", "literature", "scout", "research"]):
-                search_tools = [tool for tool in tools if "search" in tool] or ["search_scientific_literature"]
-                new_tasks.append({
-                    "id": f"step_{step_num}",
-                    "name": "Formulate Search Queries & Strategy",
-                    "description": "Analyze {topic} and formulate targeted academic search queries for arXiv and PubMed.",
-                    "expected_output": "Optimized query strings and research domain filters for {topic}",
-                    "agent_role": agent_role,
-                    "tools": search_tools,
-                    "required_inputs": req_inputs,
-                    "depends_on": [],
-                    "model_id": model_id
-                })
-                step_num += 1
-
-                new_tasks.append({
-                    "id": f"step_{step_num}",
-                    "name": "Execute Academic Literature Search",
-                    "description": "Search scientific databases (arXiv, PubMed) for {topic} and collect candidate papers.",
-                    "expected_output": "List of candidate scientific publications with titles, authors, DOIs, and abstracts",
-                    "agent_role": agent_role,
-                    "tools": search_tools,
-                    "required_inputs": [],
-                    "depends_on": [f"step_{step_num-1}"],
-                    "model_id": model_id
-                })
-                step_num += 1
-
-                new_tasks.append({
-                    "id": f"step_{step_num}",
-                    "name": "Extract Insights & Synthesize Matrix",
-                    "description": "Extract methodologies, key findings, and comparative results from collected papers into memory.",
-                    "expected_output": "Structured evidence matrix highlighting key findings and methodology comparisons",
-                    "agent_role": agent_role,
-                    "tools": ["read_atomic_memory", "write_atomic_memory"],
-                    "required_inputs": [],
-                    "depends_on": [f"step_{step_num-1}"],
-                    "model_id": model_id
-                })
-                step_num += 1
-
-            elif any(w in t_name or w in t_desc for w in ["synthesize", "report", "writer", "document"]):
-                prev_id = f"step_{step_num-1}" if step_num > 1 else ""
-                new_tasks.append({
-                    "id": f"step_{step_num}",
-                    "name": "Draft Technical Analysis Report",
-                    "description": "Draft comprehensive technical synthesis on {topic} using evidence from memory.",
-                    "expected_output": "Draft report covering methodologies, findings, and discussions",
-                    "agent_role": agent_role,
-                    "tools": ["read_atomic_memory", "write_atomic_memory"],
-                    "required_inputs": [],
-                    "depends_on": [prev_id] if prev_id else [],
-                    "model_id": model_id
-                })
-                step_num += 1
-
-                new_tasks.append({
-                    "id": f"step_{step_num}",
-                    "name": "Final Review & Polishing",
-                    "description": "Refine the report on {topic} for academic clarity, coherence, and professional formatting.",
-                    "expected_output": "Polished, publication-ready report in Markdown format",
-                    "agent_role": agent_role,
-                    "tools": [],
-                    "required_inputs": [],
-                    "depends_on": [f"step_{step_num-1}"],
-                    "model_id": model_id
-                })
-                step_num += 1
-            else:
-                prev_id = f"step_{step_num-1}" if step_num > 1 else ""
-                t_copy = dict(t)
-                t_copy["id"] = f"step_{step_num}"
-                if prev_id and not t_copy.get("depends_on"):
-                    t_copy["depends_on"] = [prev_id]
-                new_tasks.append(t_copy)
-                step_num += 1
-
+        for index, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                continue
+            copied = dict(task)
+            copied["id"] = copied.get("id") or f"step_{index + 1}"
+            if index > 0 and not copied.get("depends_on"):
+                prev = new_tasks[-1]
+                if isinstance(prev, dict) and prev.get("id"):
+                    copied["depends_on"] = [prev["id"]]
+            new_tasks.append(copied)
         result = dict(plan)
         result["tasks"] = new_tasks
         return result
@@ -1712,9 +1825,9 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         if not plan or not isinstance(plan, dict) or "tasks" not in plan:
             return plan
 
-        if lightweight:
+        if lightweight or self._plan_should_stay_intact(plan):
             logger.info(
-                f"MasterAI lightweight review: keeping original {len(plan.get('tasks') or [])} tasks."
+                f"MasterAI review: keeping original {len(plan.get('tasks') or [])} tasks."
             )
             return plan
 
@@ -1736,16 +1849,18 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         ]
 
         system_prompt = (
-            "You are Alfredo, Master AI optimizing a workflow plan.\n"
-            "Decompose multi-phase tasks into sequential, atomic subtasks (total 3 to 5 steps).\n"
+            "You are Alfredo, Master AI checking a workflow plan.\n"
+            "Keep tasks that already have a concrete expected output. Do not replace a literature search with a generic evidence matrix.\n"
             "Rules:\n"
             "- Output strictly valid JSON with top-level key 'tasks': [ ... ]. No conversational text.\n"
             f"- Allowed agent_roles: {json.dumps(agent_roles)}.\n"
-            "- Each task object MUST have: 'id', 'name', 'description' (concise 1 sentence), 'expected_output', 'agent_role', 'tools', 'depends_on' (list of previous ids).\n"
+            "- Each task object MUST have: 'id', 'name', 'description', 'expected_output', 'agent_role', 'tools', 'depends_on' (list of previous ids).\n"
+            "- Preserve search_scientific_literature on any task that already has it.\n"
             "- Preserve variables like {topic} exactly as written.\n"
+            "- Do not invent extra polishing or matrix steps.\n"
             f"INPUT TASKS:\n{json.dumps(compact_tasks, ensure_ascii=False, indent=2)}"
         )
-        logger.info(f"MasterAI plan review starting with {model_string} (capped at 35s).")
+        logger.info(f"MasterAI plan review starting with {model_string} (capped at 45s).")
         reviewed = None
         try:
             raw_output = self._call_llm_with_retry(
@@ -1753,19 +1868,25 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 messages=[{"role": "user", "content": system_prompt}],
                 temperature=0.1,
                 max_tokens=400,
-                timeout_override=35,
+                timeout_override=45,
                 allow_fallback=False,
             )
             clean_json = self._sanitize_json(raw_output)
             parsed = json.loads(clean_json)
-            if isinstance(parsed, dict) and parsed.get("tasks") and len(parsed["tasks"]) >= 3:
+            if (
+                isinstance(parsed, dict)
+                and parsed.get("tasks")
+                and not self._review_drops_required_tools(plan, parsed)
+            ):
                 reviewed = parsed
                 logger.info(f"MasterAI LLM review produced {len(reviewed['tasks'])} tasks.")
+            elif isinstance(parsed, dict) and parsed.get("tasks"):
+                logger.warning("MasterAI LLM review dropped required search tools. Keeping the original plan.")
         except Exception as e:
-            logger.warning(f"MasterAI LLM review did not complete in time ({e}). Applying smart decomposition.")
+            logger.warning(f"MasterAI LLM review did not complete in time ({e}). Keeping the authored tasks.")
 
-        if not reviewed or len(reviewed.get("tasks") or []) < 3:
-            logger.info("Applying smart decomposition to ensure 4-5 atomic execution steps.")
+        if not reviewed or not reviewed.get("tasks"):
+            logger.info("MasterAI review fallback: keeping the authored tasks.")
             reviewed = self._heuristic_decompose_plan(plan)
 
         for key in ("agents", "expected_exports", "export_instructions"):

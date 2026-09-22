@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 import logging
 import requests
@@ -191,7 +192,7 @@ def is_hallucinated_or_dummy_url(url: str) -> bool:
 
 
 @tool
-def search_scientific_literature(query: str, max_results: int = 5) -> str:
+def search_scientific_literature(query: str, max_results: int = 8) -> str:
     """
     Searches peer-reviewed academic literature and preprints via Crossref API.
     Returns verified scientific papers with authentic titles, authors, publication years, DOIs, and direct links.
@@ -209,7 +210,7 @@ def search_scientific_literature(query: str, max_results: int = 5) -> str:
     params = {
         "query": clean_query,
         "rows": max(1, min(int(max_results), 10)),
-        "select": "title,DOI,URL,author,created,container-title"
+        "select": "title,DOI,URL,author,created,container-title,abstract"
     }
 
     try:
@@ -240,6 +241,12 @@ def search_scientific_literature(query: str, max_results: int = 5) -> str:
 
                     container = item.get("container-title", [])
                     journal = container[0] if container else "Academic Publication"
+                    abstract = item.get("abstract") or ""
+                    abstract = re.sub(r"<[^>]+>", " ", str(abstract))
+                    abstract = re.sub(r"\s+", " ", abstract).strip()
+                    if len(abstract) > 500:
+                        abstract = abstract[:500] + "..."
+                    abstract_line = abstract or "Not stated in the retrieved record"
 
                     results.append(
                         f"Paper {i}:\n"
@@ -248,6 +255,7 @@ def search_scientific_literature(query: str, max_results: int = 5) -> str:
                         f"- Journal/Source: {journal} ({year})\n"
                         f"- DOI: {doi}\n"
                         f"- Verified URL: {article_url}\n"
+                        f"- Abstract: {abstract_line}\n"
                     )
 
                 return "\n".join(results)

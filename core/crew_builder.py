@@ -151,6 +151,36 @@ OUTPUT RULES (OPTIMIZED FOR VECTOR RETRIEVAL):
 7. NO preamble, NO "In conclusion...", NO filler phrases.
 """
 
+def _is_bibliographic_deliverable(task_data: dict) -> bool:
+    """True when the task must return real papers, not a vector-memory summary."""
+    if not isinstance(task_data, dict):
+        return False
+    tools = [str(t).lower() for t in (task_data.get("tools") or []) if t]
+    if "search_scientific_literature" in tools:
+        return True
+    blob = " ".join([
+        str(task_data.get("name") or ""),
+        str(task_data.get("description") or ""),
+        str(task_data.get("expected_output") or ""),
+    ]).lower()
+    markers = ("doi", "peer-reviewed", "scientific paper", "verified url", "bibliographic")
+    return any(marker in blob for marker in markers)
+
+
+BIBLIOGRAPHIC_DELIVERABLE_DIRECTIVE = """
+
+--- BIBLIOGRAPHIC DELIVERABLE ---
+Your final message IS the deliverable. Write it directly in Markdown.
+- Call search_scientific_literature when this task lists that tool. Use max_results=8.
+  The tool returns title, authors, journal, year, DOI, URL, and an abstract only when Crossref has one.
+- After the tool returns, stop calling tools. Copy the papers into the answer.
+- Use only titles, authors, years, journals, DOIs, and URLs that appear in the tool result or in the previous step.
+- If abstract or findings are missing, write "Not stated in the retrieved record". Do not invent them.
+- Do not call write_atomic_memory. The system stores your text automatically.
+- Do not describe the tool call. Do not output a "Task Completion Report".
+- If the search returned nothing, say that no verified papers were retrieved. Never fill a table with Method 1 / Finding 1.
+"""
+
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
 # Write tools are strictly sandboxed into the workspace/ folder.
@@ -717,9 +747,20 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
             if getattr(t, "name", None) not in WRITE_TOOLS
         ]
 
+    bibliographic = _is_bibliographic_deliverable(task_record)
+    if bibliographic:
+        raw_tools = [
+            t for t in raw_tools
+            if str(t) not in ("write_atomic_memory", "read_atomic_memory")
+        ]
+        if supports_tools:
+            task_tools = _get_task_tools(raw_tools, task_record.get('vector_dbs', []), strip_tools=not supports_tools)
+
     # --- INTER-AGENT COMMUNICATION GUARDRAIL ---
     if task_record.get('output_pydantic'):
         task_description = task_record['description']
+    elif bibliographic:
+        task_description = task_record['description'] + BIBLIOGRAPHIC_DELIVERABLE_DIRECTIVE
     else:
         task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
 
@@ -745,9 +786,16 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
     )
     
     task_tools_list = raw_tools
-    if "write_atomic_memory" in task_tools_list and "vector" not in base_expected.lower() and "header" not in base_expected.lower():
+    if (
+        not bibliographic
+        and "write_atomic_memory" in task_tools_list
+        and "vector" not in base_expected.lower()
+        and "header" not in base_expected.lower()
+    ):
         if not task_record.get('output_pydantic'):
             base_expected += vector_format_directive
+    if bibliographic and agent_instance is not None:
+        agent_instance.tools = list(task_tools) if task_tools else []
 
     pydantic_kwargs = resolve_pydantic_kwargs(task_record.get('output_pydantic'))
 
@@ -2045,17 +2093,29 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 )
                 agents_cache[cache_key] = agent_instance
 
-            combined_tools = list(set((agent_info.get('tools') or []) + (task_data.get('tools') or [])))
-            # LEVEL-BASED MEMORY ARCHITECTURE:
-            # If execution_level > 1, auto-inject read_atomic_memory so the agent can read ANY previous level's data.
-            # Also auto-inject write_atomic_memory for all tasks so they can persist their output.
-            if data["execution_level"] > 1 and "read_atomic_memory" not in combined_tools:
-                combined_tools.append("read_atomic_memory")
-            if "write_atomic_memory" not in combined_tools:
-                combined_tools.append("write_atomic_memory")
+            bibliographic = _is_bibliographic_deliverable(task_data)
+            if bibliographic:
+                combined_tools = [
+                    t for t in (task_data.get("tools") or [])
+                    if t and str(t) not in ("write_atomic_memory", "read_atomic_memory")
+                ]
+            else:
+                combined_tools = list(set((agent_info.get('tools') or []) + (task_data.get('tools') or [])))
+                # LEVEL-BASED MEMORY ARCHITECTURE:
+                # If execution_level > 1, auto-inject read_atomic_memory so the agent can read ANY previous level's data.
+                # Also auto-inject write_atomic_memory for all tasks so they can persist their output.
+                if data["execution_level"] > 1 and "read_atomic_memory" not in combined_tools:
+                    combined_tools.append("read_atomic_memory")
+                if "write_atomic_memory" not in combined_tools:
+                    combined_tools.append("write_atomic_memory")
                 
             task_tools = _get_task_tools(combined_tools, task_data.get('vector_dbs') or [], strip_tools=not node_supports_tools)
-            task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
+            if bibliographic and agent_instance is not None:
+                agent_instance.tools = list(task_tools) if task_tools else []
+            if bibliographic:
+                task_description = task_data['description'] + BIBLIOGRAPHIC_DELIVERABLE_DIRECTIVE
+            else:
+                task_description = task_data['description'] + AGENT_COMMS_DIRECTIVE
 
             for k, v in execution_context.items():
                 task_description = task_description.replace(f"{{{k}}}", str(v))
@@ -2063,19 +2123,26 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             task_description = task_description.replace("{previous_result}", parent_output)
             task_description = task_description.replace("{context}", parent_output)
 
-            index_table = memory_manager.get_memory_index_table()
-            task_description += (
-                "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
-                "Results from previous steps are stored in the ephemeral in-memory database.\n"
-                "Use the 'read_atomic_memory' tool with the exact 'key' to retrieve data.\n"
-                "Use 'write_atomic_memory' to store YOUR output for downstream agents.\n\n"
-                f"{index_table}\n"
-                "--- [END MEMORY INDEX] ---\n"
-            )
+            if not bibliographic:
+                index_table = memory_manager.get_memory_index_table()
+                task_description += (
+                    "\n\n--- [EPHEMERAL WORKSPACE MEMORY INDEX] ---\n"
+                    "Results from previous steps are stored in the ephemeral in-memory database.\n"
+                    "Use the 'read_atomic_memory' tool with the exact 'key' to retrieve data.\n"
+                    "Use 'write_atomic_memory' to store YOUR output for downstream agents.\n\n"
+                    f"{index_table}\n"
+                    "--- [END MEMORY INDEX] ---\n"
+                )
 
             base_expected = task_data.get('expected_output', 'Task Output')
             vector_format_directive = " FORMAT CRITERIA (For Vector DB): Begin with a clear '# Topic: <Subject>' header, a 1-line summary, a '[KEYWORDS: ...]' block, and then self-contained, noun-heavy bullet points."
-            if "write_atomic_memory" in combined_tools and "vector" not in base_expected.lower() and "header" not in base_expected.lower() and not task_data.get('output_pydantic'):
+            if (
+                not bibliographic
+                and "write_atomic_memory" in combined_tools
+                and "vector" not in base_expected.lower()
+                and "header" not in base_expected.lower()
+                and not task_data.get('output_pydantic')
+            ):
                 base_expected += vector_format_directive
 
             for k, v in execution_context.items():
