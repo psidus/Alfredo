@@ -3635,6 +3635,7 @@ def render_workflow_assembler():
         raw_exports = editing_workflow.get('expected_exports', []) if editing_workflow else []
         default_wf_expected_exports = raw_exports if isinstance(raw_exports, list) else []
         default_export_instructions = (editing_workflow.get("export_instructions", "") or "") if editing_workflow else ""
+        default_wf_max_tokens = int(editing_workflow.get("max_tokens") or 0) if editing_workflow else 0
 
         default_wf_task_ids = normalize_graph(
             raw_task_ids,
@@ -3649,6 +3650,7 @@ def render_workflow_assembler():
             st.session_state.wf_human_check = default_wf_human_check
             st.session_state.wf_expected_exports = default_wf_expected_exports
             st.session_state.wf_export_instructions = default_export_instructions
+            st.session_state.wf_max_tokens = default_wf_max_tokens
             # Rebuild canvas structure (Level columns + stacked cards) for this draft
             try:
                 from core.workflow_canvas import hydrate_graph_for_canvas
@@ -3731,6 +3733,15 @@ def render_workflow_assembler():
                 placeholder="e.g., For Python: extract the simulation model from the Developer agent. For Excel: use the metrics from the Analyst agent. For Word: write a full report.",
                 help="Guide the Master AI on what to extract from each agent's output for each file format. Leave empty to let the AI decide automatically.",
                 height=100
+            )
+
+            max_tokens = st.number_input(
+                "Max Output Tokens (0 = auto)",
+                min_value=0,
+                max_value=100000,
+                step=256,
+                key="wf_max_tokens",
+                help="Cap on tokens for the Master AI final-report generation (refinement, context summary, and file exports). 0 lets Alfredo pick a safe default.",
             )
 
         
@@ -4212,11 +4223,11 @@ def render_workflow_assembler():
                     instr = export_instructions or ""
                 if workflow_id is not None:
                     db.update_workflow(
-                        workflow_id, name, graph, requires_human_check, exports, instr
+                        workflow_id, name, graph, requires_human_check, exports, instr, max_tokens=max_tokens
                     )
                 else:
                     db.create_workflow(
-                        name, graph, requires_human_check, exports, instr
+                        name, graph, requires_human_check, exports, instr, max_tokens=max_tokens
                     )
                 return True
 
@@ -4229,6 +4240,7 @@ def render_workflow_assembler():
                     "wf_human_check",
                     "wf_expected_exports",
                     "wf_export_instructions",
+                    "wf_max_tokens",
                     "wf_flow_state",
                     "wf_loop_select_mode",
                     "wf_loop_select_ids",

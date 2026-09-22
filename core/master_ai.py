@@ -58,6 +58,24 @@ def _compress_messages(messages: list, model: str) -> list:
         return messages
 
 
+# --- Output-size guardrails (prevent unbounded final-output generation) ---
+# These bound the post-processing LLM calls so a workflow can't hang at the
+# "Refining output..." / "Compressing context..." / "Generating files..." stage.
+DEFAULT_REFINE_MAX_TOKENS = 4000
+DEFAULT_SUMMARIZE_MAX_TOKENS = 800
+DEFAULT_EXPORT_MAX_TOKENS = 6000
+MAX_LLM_INPUT_CHARS = 120_000  # Hard cap on any single prompt built for post-processing
+
+
+def _cap_text(text: str, max_chars: int = MAX_LLM_INPUT_CHARS) -> str:
+    """Truncate oversized prompts to keep post-processing LLM calls fast and bounded."""
+    if not text:
+        return text
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n...[TRUNCATED FOR LENGTH]..."
+
+
 MASTER_PROMPT = """
 You are the Master AI Router. Your job is to analyze user requests and route them to the correct Workflow ID.
 Available Workflows:
@@ -728,7 +746,7 @@ class MasterAI:
             
         return text.strip()
 
-    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True, allow_fallback: bool = True) -> str:
+    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True, allow_fallback: bool = True, max_tokens: int = None) -> str:
         """
         Robust LLM call with exponential backoff retry and a multi-tier fallback cascade.
 
@@ -772,6 +790,8 @@ class MasterAI:
                         temperature=temperature,
                         timeout=call_timeout,
                     )
+                    if max_tokens:
+                        call_kwargs["max_tokens"] = max_tokens
                     
                     if is_local_model:
                         self._apply_local_runtime(call_kwargs, m)
@@ -871,7 +891,7 @@ class MasterAI:
                 "extracted_params": {}
             }
 
-    def refine_output(self, raw_output: str, target_language: str = None) -> str:
+    def refine_output(self, raw_output: str, target_language: str = None, max_tokens: int = None) -> str:
         """
         Post-processing pipeline: takes the raw output from a CrewAI execution
         and refines it through the Master AI for:
@@ -883,10 +903,11 @@ class MasterAI:
         Args:
             raw_output: The raw string output from crew.kickoff().
             target_language: Optional language to force output (defaults to English).
+            max_tokens: Optional cap on generated tokens (defaults to a bounded value).
         Returns:
             str: The refined, polished report ready for the end user.
         """
-        raw_str = str(raw_output).strip()
+        raw_str = _cap_text(str(raw_output).strip())
         if not raw_str:
             return "The workflow completed but produced no output. Please try again with more specific instructions."
 
@@ -897,8 +918,9 @@ class MasterAI:
         system_prompt = OUTPUT_REFINER_PROMPT.replace("{raw_output}", raw_str).replace("{language_instruction}", lang_instruction)
         
         model_string = self._get_model_string()
+        effective_max_tokens = max_tokens if max_tokens else DEFAULT_REFINE_MAX_TOKENS
 
-        logger.info(f"MasterAI Refining output ({len(raw_str)} chars) with: {model_string}")
+        logger.info(f"MasterAI Refining output ({len(raw_str)} chars, max_tokens={effective_max_tokens}) with: {model_string}")
         
         try:
             # Use plain text completion (no JSON mode) for the refiner
@@ -909,7 +931,8 @@ class MasterAI:
                     {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease refine the above raw output into a clear, polished report."}
                 ],
                 temperature=0.1,  # Low creativity — focus on restructuring, not inventing
-                force_json_mode=False
+                force_json_mode=False,
+                max_tokens=effective_max_tokens
             )
             logger.info(f"MasterAI Output refinement complete ({len(refined)} chars).")
             return refined
@@ -918,7 +941,7 @@ class MasterAI:
             # Graceful fallback: return the raw output if refinement fails
             return raw_str
 
-    def summarize_global_context(self, global_context: str) -> str:
+    def summarize_global_context(self, global_context: str, max_tokens: int = None) -> str:
         """
         Compresses the full global context (JSON array of all agents' outputs)
         into a very brief, dense summary. This prevents massive token consumption
@@ -927,11 +950,13 @@ class MasterAI:
         if not global_context or len(global_context.strip()) < 100:
             return global_context
 
+        global_context = _cap_text(global_context)
         system_prompt = CONTEXT_SUMMARIZER_PROMPT.replace("{global_context}", global_context)
         
         model_string = self._get_model_string()
+        effective_max_tokens = max_tokens if max_tokens else DEFAULT_SUMMARIZE_MAX_TOKENS
 
-        logger.info(f"MasterAI Summarizing context ({len(global_context)} chars) with: {model_string}")
+        logger.info(f"MasterAI Summarizing context ({len(global_context)} chars, max_tokens={effective_max_tokens}) with: {model_string}")
         
         try:
             summary = self._call_llm_with_retry(
@@ -940,7 +965,8 @@ class MasterAI:
                     {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nPlease produce the concise summary of the global context."}
                 ],
                 temperature=0.1,
-                force_json_mode=False
+                force_json_mode=False,
+                max_tokens=effective_max_tokens
             )
             logger.info(f"MasterAI Context summary complete ({len(summary)} chars).")
             return summary
@@ -1347,7 +1373,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         logger.error(f"Failed to stream task optimization after retries: {last_err}")
         raise last_err
 
-    def generate_export_files(self, final_text: str, expected_exports: list, output_dir: str, global_context: str = None, export_instructions: str = None) -> list:
+    def generate_export_files(self, final_text: str, expected_exports: list, output_dir: str, global_context: str = None, export_instructions: str = None, max_tokens: int = None) -> list:
         """
         Reads the accumulated global context (or falls back to final_text) and
         generates physical files for each format requested in `expected_exports`.
@@ -1358,6 +1384,7 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             output_dir:          Directory where files will be written.
             global_context:      JSON string with the full memory dump from all agents.
             export_instructions: Optional user instructions for the Master AI.
+            max_tokens:          Optional cap on generated tokens per file.
 
         Returns a list of generated file paths.
         """
@@ -1384,8 +1411,9 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         model_string = self._get_model_string()
 
         # Use global context if available, otherwise fall back to final_text
-        context_for_export = global_context if global_context else final_text
+        context_for_export = _cap_text(global_context if global_context else final_text)
         instructions_text = export_instructions.strip() if export_instructions else "No specific instructions provided. Use your best judgement."
+        effective_max_tokens = max_tokens if max_tokens else DEFAULT_EXPORT_MAX_TOKENS
 
         for ext in expected_exports:
             ext = ext.strip().lower()
@@ -1405,7 +1433,8 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                     messages=[
                         {"role": "user", "content": system_prompt}
                     ],
-                    temperature=0.1
+                    temperature=0.1,
+                    max_tokens=effective_max_tokens
                 )
                 
                 # Strip leading/trailing markdown blocks if the LLM ignored instructions

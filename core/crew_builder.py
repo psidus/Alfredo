@@ -19,6 +19,34 @@ from crewai import Agent, Task, Crew
 
 ABORT_FLAGS = {}
 
+# Cap on the raw task output stored in ephemeral memory. The full output is kept
+# for the current run's final report, but the memory dump (used as global_context)
+# must stay bounded or post-processing LLM calls will stall on huge prompts.
+MAX_MEMORY_RAW_CHARS = 12_000
+
+
+def _result_to_text(result) -> str:
+    """Extract a plain string from a CrewAI kickoff() result.
+
+    Newer CrewAI versions return a CrewOutput object whose payload lives in the
+    ``.raw`` attribute; older versions return a plain string. ``str(result)`` is
+    not always reliable, so prefer ``.raw`` when present.
+    """
+    if result is None:
+        return ""
+    raw = getattr(result, "raw", None)
+    if raw is not None:
+        return str(raw)
+    return str(result)
+
+
+def _cap_raw_output(text: str) -> str:
+    if not text:
+        return text
+    if len(text) <= MAX_MEMORY_RAW_CHARS:
+        return text
+    return text[:MAX_MEMORY_RAW_CHARS] + "\n...[TRUNCATED]"
+
 class ExecutionCancelledError(Exception):
     pass
 
@@ -838,6 +866,10 @@ def _auto_save_to_memory(memory_manager, task_id, last_output, agent_role):
     except Exception:
         structured_data = {"raw_output": last_output}
 
+    # Bound the stored raw output so the memory dump (global_context) stays small.
+    if isinstance(structured_data, dict) and "raw_output" in structured_data:
+        structured_data["raw_output"] = _cap_raw_output(str(structured_data["raw_output"]))
+
     task_rec = db.read_task(task_id)
     task_name = task_rec.get('name') if task_rec else None
     key_name = f"task_{task_id}"
@@ -1229,7 +1261,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             else:
                 raise e
         
-        task_out = str(result)
+        task_out = _result_to_text(result)
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
@@ -2135,10 +2167,10 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             if last_exception is not None:
                 raise last_exception
                     
-            task_out = str(result)
+            task_out = _result_to_text(result)
             key_name = f"dynamic_task_{task_idx}"
             summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {task_out[:500]}"
-            memory_manager.write_record(key=key_name, content_summary=summary_text, structured_data={"raw_output": task_out}, agent_role=effective_role)
+            memory_manager.write_record(key=key_name, content_summary=summary_text, structured_data={"raw_output": _cap_raw_output(task_out)}, agent_role=effective_role)
 
             if chat_id and task_data.get('human_validation'):
                 from core.master_ai import MasterAI
@@ -2149,7 +2181,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 
                 if user_feedback and user_feedback != "SYSTEM_ABORT":
                     task_out = master_ai.process_validation_feedback(task_out, user_feedback)
-                    memory_manager.write_record(key=key_name, content_summary=f"Output of dynamic task {task_idx + 1} by agent '{effective_role} (Human Edited)': {task_out[:500]}", structured_data={"raw_output": task_out}, agent_role=f"{effective_role} (Human Edited)")
+                    memory_manager.write_record(key=key_name, content_summary=f"Output of dynamic task {task_idx + 1} by agent '{effective_role} (Human Edited)': {task_out[:500]}", structured_data={"raw_output": _cap_raw_output(task_out)}, agent_role=f"{effective_role} (Human Edited)")
             
             if progress_callback:
                 try:

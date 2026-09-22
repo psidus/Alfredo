@@ -134,7 +134,8 @@ class PostgresManager:
                 expected_exports TEXT DEFAULT '[]', -- List of output formats as JSON
                 requires_human_check INTEGER DEFAULT 0,
                 has_deletion_warning INTEGER DEFAULT 0,
-                export_instructions TEXT DEFAULT '' -- Optional guidance for Master AI export generation
+                export_instructions TEXT DEFAULT '', -- Optional guidance for Master AI export generation
+                max_tokens INTEGER DEFAULT 0 -- Cap on final-report generation tokens (0 = auto)
             );
             """,
             """
@@ -355,6 +356,13 @@ class PostgresManager:
             # Migration to add app_id to workflows (for external app integration)
             try:
                 self.cursor.execute("ALTER TABLE workflows ADD COLUMN app_id INTEGER DEFAULT NULL REFERENCES apps(id) ON DELETE SET NULL;")
+                self.conn.commit()
+            except psycopg2.Error:
+                self.conn.rollback()
+
+            # Migration to add max_tokens to workflows (cap on final-report generation)
+            try:
+                self.cursor.execute("ALTER TABLE workflows ADD COLUMN max_tokens INTEGER DEFAULT 0;")
                 self.conn.commit()
             except psycopg2.Error:
                 self.conn.rollback()
@@ -676,12 +684,13 @@ class PostgresManager:
         self.conn.commit()
 
     # --- Workflows CRUD ---
-    def create_workflow(self, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None, app_id: Optional[int] = None) -> int:
+    def create_workflow(self, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None, app_id: Optional[int] = None, max_tokens: int = None) -> int:
         task_ids_json = json.dumps(task_ids)
         expected_exports_json = json.dumps(expected_exports or [])
         export_instructions_str = export_instructions or ""
-        sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions, app_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"
-        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, int(requires_human_check), export_instructions_str, app_id))
+        max_tokens_int = int(max_tokens or 0)
+        sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions, app_id, max_tokens) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id"
+        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, int(requires_human_check), export_instructions_str, app_id, max_tokens_int))
         self.conn.commit()
         return self.cursor.fetchone()['id']
 
@@ -704,16 +713,17 @@ class PostgresManager:
             processed_rows.append(self._process_json_fields(workflow_dict))
         return processed_rows
 
-    def update_workflow(self, workflow_id: int, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None) -> int:
+    def update_workflow(self, workflow_id: int, name: str, task_ids: list, requires_human_check: bool, expected_exports: List[str] = None, export_instructions: str = None, max_tokens: int = None) -> int:
         task_ids_json = json.dumps(task_ids)
         expected_exports_json = json.dumps(expected_exports or [])
         export_instructions_str = export_instructions or ""
+        max_tokens_int = int(max_tokens or 0)
         sql = """
         UPDATE workflows 
-        SET name = %s, task_ids_json = %s, expected_exports = %s, requires_human_check = %s, export_instructions = %s 
+        SET name = %s, task_ids_json = %s, expected_exports = %s, requires_human_check = %s, export_instructions = %s, max_tokens = %s
         WHERE id = %s
         """
-        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, int(requires_human_check), export_instructions_str, workflow_id))
+        self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, int(requires_human_check), export_instructions_str, max_tokens_int, workflow_id))
         self.conn.commit()
         return self.cursor.rowcount
 

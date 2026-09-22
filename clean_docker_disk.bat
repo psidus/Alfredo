@@ -53,7 +53,10 @@ timeout /t 2 /nobreak >nul
 echo.
 echo ======================================================
 echo Pulizia completata con successo!
-echo Lo spazio e' stato liberato sul tuo disco C:.
+echo.
+echo [SUGGERIMENTO] Per compattare il file disco virtuale di Docker
+echo (docker_data.vhdx) e recuperare fino a 40-50 GB fisici su C:,
+echo esegui "compact_docker_disk.bat" come Amministratore!
 echo ======================================================
 echo.
 pause

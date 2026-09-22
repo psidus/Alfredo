@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import io
+import time
 
 # Force UTF-8 encoding for stdout/stderr to prevent CrewAI emoji crashes
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -55,6 +56,13 @@ logger = logging.getLogger(__name__)
 db = DBManager()
 master_ai = MasterAI()
 notifier = NotificationManager()
+
+# --- Post-processing watchdog (seconds) ---
+# Hard bounds on the final-output LLM phases so a workflow can never hang forever
+# at "Refining output..." / "Compressing context..." / "Generating files...".
+REFINE_TIMEOUT = int(os.getenv("ALFREDO_REFINE_TIMEOUT", "300"))
+SUMMARIZE_TIMEOUT = int(os.getenv("ALFREDO_SUMMARIZE_TIMEOUT", "180"))
+EXPORT_TIMEOUT = int(os.getenv("ALFREDO_EXPORT_TIMEOUT", "300"))
 
 # --- Configuration from .env ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1529,13 +1537,16 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if run_id:
                 db.update_run(run_id, status='failed', result=str(e))
             return ConversationHandler.END
-        finally:
-            typing_task.cancel()
-            try:
-                await typing_task
-            except asyncio.CancelledError:
-                pass
+        # (Typing indicator intentionally kept alive through post-processing;
+        # it is cancelled in the outer finally below.)
 
+        # Resolve the per-workflow output-token cap (0 = auto/default handled by MasterAI)
+        _max_tokens = 0
+        if workflow_id:
+            _wf_record = db.read_workflow(workflow_id)
+            _max_tokens = int((_wf_record or {}).get("max_tokens") or 0)
+        elif final_plan:
+            _max_tokens = int(final_plan.get("max_tokens") or 0)
 
         # --- AUTOMATIC POST-PROCESSING: Master AI Refinement ---
         try:
@@ -1546,12 +1557,20 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass  # status_msg may have been deleted/replaced by on_task_progress
 
+        _refine_start = time.monotonic()
         try:
-            # Pass global context (all agents' outputs) to the refiner so the
-            # polished report covers the ENTIRE workflow, not just the last task.
-            refiner_input = global_context if global_context else str(final_result)
-            refined_result = await asyncio.to_thread(master_ai.refine_output, refiner_input, "English")
-            logger.info(f"User {user_id}: Output refinement complete.")
+            # Refine the FINAL task output rather than the whole global_context,
+            # which can be enormous and stall the LLM for minutes. Fall back to the
+            # capped global context only when no final output exists.
+            _refiner_input = str(final_result) if final_result else (global_context or "")
+            refined_result = await asyncio.wait_for(
+                asyncio.to_thread(master_ai.refine_output, _refiner_input, "English", _max_tokens or None),
+                timeout=REFINE_TIMEOUT,
+            )
+            logger.info(f"User {user_id}: Output refinement complete ({time.monotonic() - _refine_start:.1f}s).")
+        except asyncio.TimeoutError:
+            logger.error(f"User {user_id}: Output refinement timed out after {REFINE_TIMEOUT}s. Using raw output.")
+            refined_result = str(final_result)
         except Exception as refine_err:
             logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
             refined_result = str(final_result)
@@ -1588,9 +1607,16 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         except Exception:
             pass  # status_msg may have been deleted/replaced by on_task_progress
+        _summarize_start = time.monotonic()
         try:
-            accumulated_context_str = await asyncio.to_thread(master_ai.summarize_global_context, global_context)
-            logger.info(f"User {user_id}: Context summarization complete.")
+            accumulated_context_str = await asyncio.wait_for(
+                asyncio.to_thread(master_ai.summarize_global_context, global_context, _max_tokens or None),
+                timeout=SUMMARIZE_TIMEOUT,
+            )
+            logger.info(f"User {user_id}: Context summarization complete ({time.monotonic() - _summarize_start:.1f}s).")
+        except asyncio.TimeoutError:
+            logger.error(f"User {user_id}: Context summarization timed out after {SUMMARIZE_TIMEOUT}s. Using raw context.")
+            accumulated_context_str = global_context if isinstance(global_context, str) else ""
         except Exception as summarize_err:
             logger.error(f"Context summarization failed: {summarize_err}. Using raw context.")
             accumulated_context_str = global_context if isinstance(global_context, str) else ""
@@ -1644,15 +1670,22 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 pass  # status_msg may have been deleted/replaced by on_task_progress
             try:
                 export_dir = os.path.join("exports", str(run_id) if run_id else f"chat_{chat_id}")
-                generated_files = await asyncio.to_thread(
-                    master_ai.generate_export_files,
-                    str(final_result),
-                    expected_exports,
-                    export_dir,
-                    global_context,
-                    export_instructions
+                _export_start = time.monotonic()
+                generated_files = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        master_ai.generate_export_files,
+                        str(final_result),
+                        expected_exports,
+                        export_dir,
+                        global_context,
+                        export_instructions,
+                        _max_tokens or None,
+                    ),
+                    timeout=EXPORT_TIMEOUT,
                 )
-                logger.info(f"Generated {len(generated_files)} files for User {user_id}")
+                logger.info(f"Generated {len(generated_files)} files for User {user_id} ({time.monotonic() - _export_start:.1f}s)")
+            except asyncio.TimeoutError:
+                logger.error(f"File generation timed out after {EXPORT_TIMEOUT}s.")
             except Exception as e:
                 logger.error(f"File generation failed for User {user_id}: {e}")
 
@@ -1725,6 +1758,15 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await context.bot.send_message(chat_id=chat_id, text=error_message)
 
     finally:
+        # Stop the typing indicator (kept alive through post-processing).
+        typing_task = context.user_data.get("typing_task")
+        if typing_task:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
         # Clean up user_data for the next conversation ONLY if not paused
         if not context.user_data.get("paused"):
             context.user_data.clear()
