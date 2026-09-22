@@ -781,7 +781,7 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
             chat_id=chat_id,
             text=(
                 f"⚠️ Master AI is set to <code>{model_label}</code>, which is not a local model. "
-                "Review skipped to avoid Gemini/cloud. Showing the original plan. "
+                "Showing the original plan. "
                 "Set MASTER_AI_MODEL_NAME to an Ollama model and restart the bot."
             ),
             parse_mode=ParseMode.HTML,
@@ -813,8 +813,7 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
         chat_id=chat_id,
         text=(
             "🔄 <b>Master AI is reviewing the plan...</b>\n"
-            f"<i>Local model: <code>{model_label}</code> · {original_n} starting tasks · "
-            "one pass, no Gemini.</i>"
+            f"🧠 Model: <code>{model_label}</code>"
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -862,7 +861,7 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
     n_final = len(plan.get("tasks") or [])
     review_header = (
         f"✅ <b>Master AI review complete</b>\n"
-        f"🧠 Model: <code>{model_label}</code> (local)\n"
+        f"🧠 Model: <code>{model_label}</code>\n"
         f"📝 Execution steps: <b>{n_final}</b>\n\n"
     )
 
@@ -883,7 +882,7 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
             plain_summary = format_plan_summary(plan, as_html=False)
             fallback_text = (
                 f"✅ Master AI review complete\n"
-                f"Model: {model_label} (local)\n"
+                f"Model: {model_label}\n"
                 f"Execution steps: {n_final}\n\n{plain_summary}"
             )
             await send_long_message(
@@ -1359,7 +1358,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text(
             text=(
                 f"🚀 <b>Execution in progress...</b>\n"
-                f"<i>Running the reviewed plan ({n_plan or '?'} steps), local models only.</i>"
+                f"<i>Running the reviewed plan ({n_plan or '?'} steps).</i>"
             ),
             parse_mode=ParseMode.HTML
         )
@@ -1507,7 +1506,7 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     err_title = "⚠️ <b>Local model busy or timed out</b>"
                     err_body = (
                         "<i>Ollama did not finish this step (busy, timeout, or VRAM). "
-                        "Progress is saved. Resume uses the same local model — not Gemini.</i>"
+                        "Progress is saved. Resume uses the same local model.</i>"
                     )
                 await status_msg.edit_text(
                     text=(

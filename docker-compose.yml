@@ -76,6 +76,7 @@ services:
       - ./config:/app/config
       - ./sdk:/app/sdk
       - ./.env:/app/.env
+      - ./bot.py:/app/bot.py
     restart: unless-stopped
     depends_on:
       - postgres

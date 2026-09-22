@@ -115,19 +115,29 @@ class EphemeralMemoryManager:
             # Remove any previous record with the same key to avoid duplicates
             self.delete_record(key)
 
+            added_to_vector = False
             if self.vector_store is not None:
-                metadata = {
-                    "key": key,
-                    "agent_role": agent_role,
-                    "run_id": self.run_id,
-                    "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
-                }
-                self.vector_store.add_texts(
-                    texts=[content_summary],
-                    metadatas=[metadata],
-                    ids=[key],
-                )
-            else:
+                try:
+                    metadata = {
+                        "key": key,
+                        "agent_role": agent_role,
+                        "run_id": self.run_id,
+                        "structured_data_json": json.dumps(structured_data, ensure_ascii=False),
+                    }
+                    self.vector_store.add_texts(
+                        texts=[content_summary],
+                        metadatas=[metadata],
+                        ids=[key],
+                    )
+                    added_to_vector = True
+                except Exception as e:
+                    logger.warning(
+                        f"[EphemeralMemory] vector_store.add_texts failed ({e}). "
+                        "Falling back to in-memory key-based store."
+                    )
+                    self.vector_store = None
+
+            if not added_to_vector:
                 self._fallback_records[key] = {
                     "key": key,
                     "agent_role": agent_role,
@@ -202,8 +212,16 @@ class EphemeralMemoryManager:
                     matches.append(rec)
             return matches[:k]
 
-        search_filter = {"agent_role": filter_agent} if filter_agent else None
-        results = self.vector_store.similarity_search(query, k=k, filter=search_filter)
+        try:
+            search_filter = {"agent_role": filter_agent} if filter_agent else None
+            results = self.vector_store.similarity_search(query, k=k, filter=search_filter)
+        except Exception as e:
+            logger.warning(
+                f"[EphemeralMemory] similarity_search failed ({e}). "
+                "Falling back to in-memory text search."
+            )
+            self.vector_store = None
+            return self.search_records(query, k=k, filter_agent=filter_agent)
 
         retrieved = []
         for doc in results:

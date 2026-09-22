@@ -53,18 +53,17 @@ class WriteAtomicMemoryInput(BaseModel):
             "'validated_schema').  Downstream agents will use this key to retrieve it."
         ),
     )
-    content_summary: str = Field(
-        ...,
+    content_summary: Optional[str] = Field(
+        default="",
         description=(
             "A clear, concise textual summary of the data being saved.  "
             "This text is vectorised for semantic search."
         ),
     )
-    structured_data: str = Field(
-        ...,
+    structured_data: Optional[Any] = Field(
+        default="{}",
         description=(
-            "A valid JSON string containing dictionaries, lists, or structured "
-            "parameters to persist.  Example: '{\"columns\": [\"id\", \"name\"], "
+            "A valid JSON string, dict, or structured data to persist.  Example: '{\"columns\": [\"id\", \"name\"], "
             "\"row_count\": 42}'"
         ),
     )
@@ -151,20 +150,30 @@ class WriteAtomicMemoryTool(BaseTool):
     # Injected at runtime by the crew builder
     memory_manager: Any = None
 
-    def _run(self, key: str, content_summary: str, structured_data: str) -> str:
+    def _run(self, key: str, content_summary: str = "", structured_data: Any = "{}") -> str:
         if not self.memory_manager:
             return "Error: EphemeralMemoryManager not initialised."
 
-        # Parse the JSON string produced by the LLM
-        try:
-            data_dict = json.loads(structured_data)
-        except Exception as exc:
-            # Graceful fallback: wrap raw text in a dict
-            data_dict = {"raw_content": structured_data, "parse_note": str(exc)}
-            logger.warning(
-                f"[WriteAtomicMemory] Could not parse structured_data as JSON "
-                f"for key '{key}': {exc}.  Wrapping as raw_content."
-            )
+        # Parse the JSON string produced by the LLM or handle existing structures
+        if isinstance(structured_data, dict):
+            data_dict = structured_data
+        elif isinstance(structured_data, list):
+            data_dict = {"items": structured_data}
+        else:
+            try:
+                data_dict = json.loads(str(structured_data))
+                if not isinstance(data_dict, dict):
+                    data_dict = {"value": data_dict}
+            except Exception as exc:
+                # Graceful fallback: wrap raw text in a dict
+                data_dict = {"raw_content": str(structured_data), "parse_note": str(exc)}
+                logger.warning(
+                    f"[WriteAtomicMemory] Could not parse structured_data as JSON "
+                    f"for key '{key}': {exc}.  Wrapping as raw_content."
+                )
+
+        if not content_summary:
+            content_summary = str(structured_data)[:200]
 
         # Resolve the calling agent's role for metadata
         agent_role = "Unknown Agent"

@@ -599,6 +599,49 @@ class MasterAI:
             self.fallback_chain = local_fallbacks
             logger.info(f"MasterAI local fallback chain: {self.fallback_chain or '(none)'}")
 
+        # Validate Ollama models dynamically against actually pulled models on the host
+        if self.model_provider == "ollama":
+            try:
+                from core.api_verifier import _fetch_ollama
+                ollama_info = _fetch_ollama()
+                if ollama_info and ollama_info.get("success"):
+                    available_pulled = ollama_info.get("chat_models", [])
+                    if available_pulled:
+                        def _matches_pulled(name: str) -> Optional[str]:
+                            name_clean = name.strip().lower()
+                            for p in available_pulled:
+                                p_clean = p.strip().lower()
+                                if name_clean == p_clean or name_clean.split(":")[0] == p_clean.split(":")[0]:
+                                    return p
+                            return None
+
+                        matched_primary = _matches_pulled(self.model_name)
+                        if matched_primary:
+                            self.model_name = matched_primary
+                        else:
+                            preferred = None
+                            for cand in ("qwen2.5-coder:14b", "llama3.1:latest", "llama3:latest", "phi3:latest"):
+                                if _matches_pulled(cand):
+                                    preferred = _matches_pulled(cand)
+                                    break
+                            if not preferred:
+                                preferred = available_pulled[0]
+                            logger.warning(
+                                f"MasterAI configured model '{self.model_name}' is not pulled in Ollama! "
+                                f"Auto-recovering to available model '{preferred}' (available: {available_pulled})."
+                            )
+                            self.model_name = preferred
+
+                        valid_fallbacks = []
+                        for p in available_pulled:
+                            cand_str = f"ollama/{p}"
+                            if p != self.model_name and cand_str not in valid_fallbacks:
+                                valid_fallbacks.append(cand_str)
+                        self.fallback_chain = valid_fallbacks
+                        logger.info(f"MasterAI verified Ollama models: active={self.model_name}, fallbacks={self.fallback_chain}")
+            except Exception as e:
+                logger.warning(f"Could not dynamically verify Ollama models: {e}")
+
         self.fallback_model = self.fallback_chain[0] if self.fallback_chain else None
 
         # Securely retrieve API key via DataManager
@@ -653,29 +696,40 @@ class MasterAI:
     def _apply_local_runtime(self, call_kwargs: dict, model_string: str) -> None:
         """Attach api_base / dummy key for Ollama and LM Studio local servers."""
         prefix = model_string.split("/")[0] if "/" in model_string else ""
+        in_docker = os.path.exists("/.dockerenv")
         if prefix == "ollama":
-            base = os.environ.get("OLLAMA_API_BASE")
-            # If running inside Docker and base points to localhost/127.0.0.1, convert to host.docker.internal
-            if os.path.exists("/.dockerenv") and base and ("localhost" in base or "127.0.0.1" in base):
-                base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
-            if base:
-                call_kwargs["api_base"] = base
-            
-            # Ollama does not require an API key when running locally/LAN.
-            # Never pass an empty API key or let an empty OLLAMA_API_KEY remain in os.environ,
-            # which causes LiteLLM to send an invalid 'Authorization: Bearer ' header.
+            base = (os.environ.get("OLLAMA_API_BASE") or "").strip()
+            if in_docker:
+                if not base:
+                    base = "http://host.docker.internal:11434"
+                elif "localhost" in base or "127.0.0.1" in base:
+                    base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+            else:
+                if not base:
+                    base = "http://127.0.0.1:11434"
+                elif "host.docker.internal" in base:
+                    base = base.replace("host.docker.internal", "127.0.0.1")
+            call_kwargs["api_base"] = base
+
+            # Ollama local/LAN does not check API keys, but LiteLLM/httpx requires a non-empty
+            # string to avoid raising "Illegal header value b'Bearer '".
             ollama_key = (os.environ.get("OLLAMA_API_KEY") or "").strip()
             if not ollama_key:
                 os.environ.pop("OLLAMA_API_KEY", None)
-                call_kwargs.pop("api_key", None)
-            else:
-                call_kwargs["api_key"] = ollama_key
+            call_kwargs["api_key"] = ollama_key or "ollama"
         elif prefix in ("lm_studio", "lmstudio"):
-            base = os.environ.get("LMSTUDIO_API_BASE") or os.environ.get("LM_STUDIO_API_BASE")
-            if os.path.exists("/.dockerenv") and base and ("localhost" in base or "127.0.0.1" in base):
-                base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
-            if base:
-                call_kwargs["api_base"] = base
+            base = (os.environ.get("LMSTUDIO_API_BASE") or os.environ.get("LM_STUDIO_API_BASE") or "").strip()
+            if in_docker:
+                if not base:
+                    base = "http://host.docker.internal:1234"
+                elif "localhost" in base or "127.0.0.1" in base:
+                    base = base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+            else:
+                if not base:
+                    base = "http://127.0.0.1:1234"
+                elif "host.docker.internal" in base:
+                    base = base.replace("host.docker.internal", "127.0.0.1")
+            call_kwargs["api_base"] = base
             call_kwargs["api_key"] = os.environ.get("LMSTUDIO_API_KEY") or "lm-studio"
 
     def _fetch_workflows_context(self):
@@ -743,10 +797,25 @@ class MasterAI:
         match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
         if match:
             return match.group(1).strip()
+
+        # Fallback: extract substring between the first '{' and last '}'
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            return text[start_idx:end_idx + 1].strip()
             
         return text.strip()
 
-    def _call_llm_with_retry(self, model: str, messages: list, temperature: float = 0.0, force_json_mode: bool = True, allow_fallback: bool = True, max_tokens: int = None) -> str:
+    def _call_llm_with_retry(
+        self,
+        model: str,
+        messages: list,
+        temperature: float = 0.0,
+        force_json_mode: bool = True,
+        allow_fallback: bool = True,
+        max_tokens: Optional[int] = None,
+        timeout_override: Optional[int] = None,
+    ) -> str:
         """
         Robust LLM call with exponential backoff retry and a multi-tier fallback cascade.
 
@@ -775,7 +844,7 @@ class MasterAI:
             is_local_model = provider_prefix in ["ollama", "lmstudio", "lm_studio", "vllm", "llama.cpp"]
             # Ollama/LM Studio often reject OpenAI json_object mode — skip it locally.
             effective_json = use_json_mode and not is_local_model
-            call_timeout = 90 if is_local_model else 45
+            call_timeout = timeout_override or (180 if is_local_model else 60)
             for attempt, wait in enumerate([0] + RETRY_WAITS):
                 if wait > 0:
                     logger.warning(
@@ -790,7 +859,11 @@ class MasterAI:
                         temperature=temperature,
                         timeout=call_timeout,
                     )
+<<<<<<< Updated upstream
                     if max_tokens:
+=======
+                    if max_tokens is not None:
+>>>>>>> Stashed changes
                         call_kwargs["max_tokens"] = max_tokens
                     
                     if is_local_model:
@@ -1530,68 +1603,178 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
             logger.error(f"Failed to decompose task '{name}': {e}. Returning original.")
             return [task]
 
+    def _heuristic_decompose_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Atomize complex tasks into sequential focused steps if LLM is slow or unexpanded."""
+        tasks = plan.get("tasks") or []
+        agents = plan.get("agents") or []
+        if len(tasks) >= 4:
+            return dict(plan)
+
+        new_tasks = []
+        step_num = 1
+
+        for t in tasks:
+            t_name = (t.get("name") or "").lower()
+            t_desc = (t.get("description") or "").lower()
+            agent_role = t.get("agent_role") or (agents[0]["role"] if agents else "Agent")
+            tools = list(t.get("tools") or [])
+            req_inputs = t.get("required_inputs") or []
+            model_id = t.get("model_id")
+
+            if any(w in t_name or w in t_desc for w in ["search", "literature", "scout", "research"]):
+                search_tools = [tool for tool in tools if "search" in tool] or ["search_scientific_literature"]
+                new_tasks.append({
+                    "id": f"step_{step_num}",
+                    "name": "Formulate Search Queries & Strategy",
+                    "description": "Analyze {topic} and formulate targeted academic search queries for arXiv and PubMed.",
+                    "expected_output": "Optimized query strings and research domain filters for {topic}",
+                    "agent_role": agent_role,
+                    "tools": search_tools,
+                    "required_inputs": req_inputs,
+                    "depends_on": [],
+                    "model_id": model_id
+                })
+                step_num += 1
+
+                new_tasks.append({
+                    "id": f"step_{step_num}",
+                    "name": "Execute Academic Literature Search",
+                    "description": "Search scientific databases (arXiv, PubMed) for {topic} and collect candidate papers.",
+                    "expected_output": "List of candidate scientific publications with titles, authors, DOIs, and abstracts",
+                    "agent_role": agent_role,
+                    "tools": search_tools,
+                    "required_inputs": [],
+                    "depends_on": [f"step_{step_num-1}"],
+                    "model_id": model_id
+                })
+                step_num += 1
+
+                new_tasks.append({
+                    "id": f"step_{step_num}",
+                    "name": "Extract Insights & Synthesize Matrix",
+                    "description": "Extract methodologies, key findings, and comparative results from collected papers into memory.",
+                    "expected_output": "Structured evidence matrix highlighting key findings and methodology comparisons",
+                    "agent_role": agent_role,
+                    "tools": ["read_atomic_memory", "write_atomic_memory"],
+                    "required_inputs": [],
+                    "depends_on": [f"step_{step_num-1}"],
+                    "model_id": model_id
+                })
+                step_num += 1
+
+            elif any(w in t_name or w in t_desc for w in ["synthesize", "report", "writer", "document"]):
+                prev_id = f"step_{step_num-1}" if step_num > 1 else ""
+                new_tasks.append({
+                    "id": f"step_{step_num}",
+                    "name": "Draft Technical Analysis Report",
+                    "description": "Draft comprehensive technical synthesis on {topic} using evidence from memory.",
+                    "expected_output": "Draft report covering methodologies, findings, and discussions",
+                    "agent_role": agent_role,
+                    "tools": ["read_atomic_memory", "write_atomic_memory"],
+                    "required_inputs": [],
+                    "depends_on": [prev_id] if prev_id else [],
+                    "model_id": model_id
+                })
+                step_num += 1
+
+                new_tasks.append({
+                    "id": f"step_{step_num}",
+                    "name": "Final Review & Polishing",
+                    "description": "Refine the report on {topic} for academic clarity, coherence, and professional formatting.",
+                    "expected_output": "Polished, publication-ready report in Markdown format",
+                    "agent_role": agent_role,
+                    "tools": [],
+                    "required_inputs": [],
+                    "depends_on": [f"step_{step_num-1}"],
+                    "model_id": model_id
+                })
+                step_num += 1
+            else:
+                prev_id = f"step_{step_num-1}" if step_num > 1 else ""
+                t_copy = dict(t)
+                t_copy["id"] = f"step_{step_num}"
+                if prev_id and not t_copy.get("depends_on"):
+                    t_copy["depends_on"] = [prev_id]
+                new_tasks.append(t_copy)
+                step_num += 1
+
+        result = dict(plan)
+        result["tasks"] = new_tasks
+        return result
+
     def review_workflow_plan(self, plan: Dict[str, Any], lightweight: bool = False) -> Dict[str, Any]:
         """
         Review a workflow plan with a single LLM call (or no call for predefined plans).
-
-        lightweight=True: return the original plan immediately. Used for unmodified
-        DB workflows that are already atomic — avoids N+1 14B calls.
-        lightweight=False: one-shot review of the whole plan; never falls back to Gemini.
         Preserves model_id / tools / required_inputs when present.
+        If local LLM times out or plan has too few steps, applies smart heuristic decomposition
+        to ensure high-quality 4-5 step execution without blocking.
         """
         if not plan or not isinstance(plan, dict) or "tasks" not in plan:
             return plan
 
         if lightweight:
             logger.info(
-                f"MasterAI lightweight review: keeping original {len(plan.get('tasks') or [])} tasks "
-                f"(no decompose, no coherence optimizer, no Gemini)."
+                f"MasterAI lightweight review: keeping original {len(plan.get('tasks') or [])} tasks."
             )
             return plan
 
         model_string = self._get_model_string()
-        compact_plan = {
-            "agents": plan.get("agents") or [],
-            "tasks": plan.get("tasks") or [],
-            "expected_exports": plan.get("expected_exports") or [],
-        }
+        agents = plan.get("agents") or []
+        agent_roles = [a.get("role") for a in agents if a.get("role")]
+        tasks = plan.get("tasks") or []
+
+        compact_tasks = [
+            {
+                "id": t.get("id") or f"step_{i+1}",
+                "name": t.get("name") or f"Task {i+1}",
+                "description": (t.get("description") or "").strip(),
+                "agent_role": t.get("agent_role") or (agent_roles[0] if agent_roles else "Agent"),
+                "tools": t.get("tools") or [],
+                "required_inputs": t.get("required_inputs") or [],
+            }
+            for i, t in enumerate(tasks)
+        ]
+
         system_prompt = (
-            "You are Alfredo reviewing a workflow plan before execution.\n"
-            "Return JSON with the SAME structure: agents, tasks, expected_exports.\n"
+            "You are Alfredo, Master AI optimizing a workflow plan.\n"
+            "Decompose multi-phase tasks into sequential, atomic subtasks (total 3 to 5 steps).\n"
             "Rules:\n"
-            "- Keep tasks atomic. Only split a task if it clearly does two unrelated jobs.\n"
-            "- Copy model_id, tools, required_inputs, human_validation, vector_dbs onto every task "
-            "(including any new subtasks derived from an original task).\n"
-            "- Do not add cloud/Gemini models. Do not invent model names.\n"
-            "- Preserve curly-brace placeholders like {topic}.\n"
-            "- Keep agent_role values matching the agents list.\n"
-            f"PLAN:\n{json.dumps(compact_plan, ensure_ascii=False, indent=2)}"
+            "- Output strictly valid JSON with top-level key 'tasks': [ ... ]. No conversational text.\n"
+            f"- Allowed agent_roles: {json.dumps(agent_roles)}.\n"
+            "- Each task object MUST have: 'id', 'name', 'description' (concise 1 sentence), 'expected_output', 'agent_role', 'tools', 'depends_on' (list of previous ids).\n"
+            "- Preserve variables like {topic} exactly as written.\n"
+            f"INPUT TASKS:\n{json.dumps(compact_tasks, ensure_ascii=False, indent=2)}"
         )
-        logger.info(f"MasterAI single-pass plan review with {model_string} (no Gemini fallback).")
+        logger.info(f"MasterAI plan review starting with {model_string} (capped at 35s).")
+        reviewed = None
         try:
             raw_output = self._call_llm_with_retry(
                 model=model_string,
                 messages=[{"role": "user", "content": system_prompt}],
                 temperature=0.1,
+                max_tokens=400,
+                timeout_override=35,
                 allow_fallback=False,
             )
             clean_json = self._sanitize_json(raw_output)
-            reviewed = json.loads(clean_json)
-            if not isinstance(reviewed, dict) or not reviewed.get("tasks"):
-                logger.warning("MasterAI review returned empty tasks. Keeping original plan.")
-                return plan
-            for key in ("expected_exports", "export_instructions"):
-                if key in plan and key not in reviewed:
-                    reviewed[key] = plan[key]
-            orig_tasks = plan.get("tasks") or []
-            reviewed = self._finalize_reviewed_plan(plan, reviewed)
-            logger.info(
-                f"MasterAI review complete: {len(orig_tasks)} -> {len(reviewed.get('tasks') or [])} tasks."
-            )
-            return reviewed
+            parsed = json.loads(clean_json)
+            if isinstance(parsed, dict) and parsed.get("tasks") and len(parsed["tasks"]) >= 3:
+                reviewed = parsed
+                logger.info(f"MasterAI LLM review produced {len(reviewed['tasks'])} tasks.")
         except Exception as e:
-            logger.error(f"MasterAI single-pass review failed: {e}. Keeping original plan.")
-            return plan
+            logger.warning(f"MasterAI LLM review did not complete in time ({e}). Applying smart decomposition.")
+
+        if not reviewed or len(reviewed.get("tasks") or []) < 3:
+            logger.info("Applying smart decomposition to ensure 4-5 atomic execution steps.")
+            reviewed = self._heuristic_decompose_plan(plan)
+
+        for key in ("agents", "expected_exports", "export_instructions"):
+            if key in plan and key not in reviewed:
+                reviewed[key] = plan[key]
+
+        reviewed = self._finalize_reviewed_plan(plan, reviewed)
+        logger.info(f"MasterAI review complete: {len(tasks)} -> {len(reviewed.get('tasks') or [])} tasks.")
+        return reviewed
 
     def _finalize_reviewed_plan(self, original: Dict[str, Any], reviewed: Dict[str, Any]) -> Dict[str, Any]:
         """Keep execution fields after review: unique step ids, models, agents, HITL."""
