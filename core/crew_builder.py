@@ -62,6 +62,10 @@ def check_abort(*args, **kwargs):
 from core.db_manager import DBManager
 from core.data_manager import DataManager
 from core.ephemeral_memory import EphemeralMemoryManager
+from core.scientific_scout import (
+    ensure_grounded_digest,
+    parse_scientific_search_output,
+)
 from core.workflow_contracts import (
     WORKER_HANDOFF_DIRECTIVE,
     MODEL_TIER_SIMPLE,
@@ -180,6 +184,32 @@ Your final message IS the deliverable. Write it directly in Markdown.
 - Do not describe the tool call. Do not output a "Task Completion Report".
 - If the search returned nothing, say that no verified papers were retrieved. Never fill a table with Method 1 / Finding 1.
 """
+
+
+def _uses_scientific_search(task_data: dict) -> bool:
+    return "search_scientific_literature" in [
+        str(tool) for tool in (task_data.get("tools") or []) if tool
+    ]
+
+
+def _run_scientific_search(execution_context: dict) -> str:
+    """Execute retrieval in the controller so the complete records survive the handoff."""
+    topic = str(
+        (execution_context or {}).get("topic")
+        or (execution_context or {}).get("user_input")
+        or ""
+    ).strip()
+    if not topic:
+        raise ValueError("Scientific Literature Scout requires a non-empty 'topic' input.")
+    logging.info("Controller executing scientific search for topic=%r", topic)
+    result = local_tools.search_scientific_literature.run(query=topic, max_results=8)
+    records = parse_scientific_search_output(result)
+    if len(records) < 5:
+        raise RuntimeError(
+            f"Scientific search returned only {len(records)} parseable verified records for '{topic}'."
+        )
+    logging.info("Controller retrieved %d parseable scientific records.", len(records))
+    return result
 
 # --- Security Helper: Hardcoded Tool Registry ---
 # Define a strict, immutable mapping of allowed tools to prevent injection attacks.
@@ -1147,7 +1177,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     
     def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output="", step_def=None, node_id=""):
         task_obj = _build_task(task_id, agents_cache, step_def=step_def)
-        _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
+        task_record = db.read_task(task_id) or {}
+        bibliographic = _is_bibliographic_deliverable(task_record)
+        if not bibliographic:
+            _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
 
         def normalize_name(s: str) -> str:
             if not s: return ""
@@ -1250,66 +1283,75 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             except Exception:
                 pass
 
-        single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
+        if _uses_scientific_search(task_record):
+            task_out = _run_scientific_search(current_inputs)
+        else:
+            single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
 
-        try:
-            result = single_task_crew.kickoff()
-        except Exception as e:
-            err_str = str(e).lower()
-            if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
-                logging.warning(f"Rate limit / 503 encountered: {e}")
-                t_rec = db.read_task(task_id) if task_id else None
-                mid = (t_rec or {}).get("model_id")
-                raise RateLimitError(
-                    f"Model 503/unavailable: {e}",
-                    0,
-                    task_outputs,
-                    is_cloud=_provider_is_cloud(mid, e),
-                )
-            elif "none or empty" in err_str:
-                raise RuntimeError(f"Agent failed to generate a valid output: {e}")
-            elif "connect" in err_str or "network" in err_str or "timeout" in err_str:
-                logging.warning(f"Connection error with primary model: {e}. Attempting fallback to default model.")
-                # Load default model ID from .env
-                DataManager.load_env()
-                fallback_model_id = _resolve_default_model_id()
-                if fallback_model_id:
-                    try:
-                        fallback_llm = _instantiate_llm(int(fallback_model_id), task_record=None)
-                        m = db.read_model(int(fallback_model_id))
-                        supports_tools = True
-                        if m:
-                            supports_tools = bool(m.get('supports_tools', 1))
-                            
-                        fallback_tools = task_obj.agent.tools if supports_tools else []
-                        if not supports_tools:
-                            task_obj.tools = []
-                            
-                        # Re-instantiate the agent cleanly to avoid 'LLM must be resolved' error
-                        fallback_agent = Agent(
-                            role=task_obj.agent.role,
-                            backstory=task_obj.agent.backstory,
-                            goal=task_obj.agent.goal,
-                            llm=fallback_llm,
-                            tools=fallback_tools,
-                            verbose=task_obj.agent.verbose,
-                            allow_delegation=task_obj.agent.allow_delegation,
-                            max_iter=task_obj.agent.max_iter,
-                            step_callback=task_obj.agent.step_callback
-                        )
-                        task_obj.agent = fallback_agent
-                        logging.info(f"Retrying task with fallback model {fallback_model_id}")
-                        # Re-instantiate the crew with the updated agent
-                        single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
-                        result = single_task_crew.kickoff()
-                    except Exception as fallback_e:
-                        raise RuntimeError(f"Primary model connection failed: {e}. Fallback also failed: {fallback_e}")
+            try:
+                result = single_task_crew.kickoff()
+            except Exception as e:
+                err_str = str(e).lower()
+                if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
+                    logging.warning(f"Rate limit / 503 encountered: {e}")
+                    t_rec = db.read_task(task_id) if task_id else None
+                    mid = (t_rec or {}).get("model_id")
+                    raise RateLimitError(
+                        f"Model 503/unavailable: {e}",
+                        0,
+                        task_outputs,
+                        is_cloud=_provider_is_cloud(mid, e),
+                    )
+                elif "none or empty" in err_str:
+                    raise RuntimeError(f"Agent failed to generate a valid output: {e}")
+                elif "connect" in err_str or "network" in err_str or "timeout" in err_str:
+                    logging.warning(f"Connection error with primary model: {e}. Attempting fallback to default model.")
+                    # Load default model ID from .env
+                    DataManager.load_env()
+                    fallback_model_id = _resolve_default_model_id()
+                    if fallback_model_id:
+                        try:
+                            fallback_llm = _instantiate_llm(int(fallback_model_id), task_record=None)
+                            m = db.read_model(int(fallback_model_id))
+                            supports_tools = True
+                            if m:
+                                supports_tools = bool(m.get('supports_tools', 1))
+
+                            fallback_tools = task_obj.agent.tools if supports_tools else []
+                            if not supports_tools:
+                                task_obj.tools = []
+
+                            # Re-instantiate the agent cleanly to avoid 'LLM must be resolved' error
+                            fallback_agent = Agent(
+                                role=task_obj.agent.role,
+                                backstory=task_obj.agent.backstory,
+                                goal=task_obj.agent.goal,
+                                llm=fallback_llm,
+                                tools=fallback_tools,
+                                verbose=task_obj.agent.verbose,
+                                allow_delegation=task_obj.agent.allow_delegation,
+                                max_iter=task_obj.agent.max_iter,
+                                step_callback=task_obj.agent.step_callback
+                            )
+                            task_obj.agent = fallback_agent
+                            logging.info(f"Retrying task with fallback model {fallback_model_id}")
+                            # Re-instantiate the crew with the updated agent
+                            single_task_crew = Crew(agents=[task_obj.agent], tasks=[task_obj], verbose=True, process='sequential')
+                            result = single_task_crew.kickoff()
+                        except Exception as fallback_e:
+                            raise RuntimeError(f"Primary model connection failed: {e}. Fallback also failed: {fallback_e}")
+                    else:
+                        raise e
                 else:
                     raise e
-            else:
-                raise e
-        
-        task_out = _result_to_text(result)
+
+            task_out = _result_to_text(result)
+            if bibliographic and parse_scientific_search_output(parent_output):
+                task_out = ensure_grounded_digest(
+                    task_out,
+                    parent_output,
+                    str(current_inputs.get("topic") or current_inputs.get("user_input") or "scientific topic"),
+                )
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
@@ -2182,14 +2224,8 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 **kwargs
             )
 
-            _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)
-
-            single_crew = Crew(
-                agents=[agent_instance],
-                tasks=[task_obj],
-                verbose=True,
-                process='sequential'
-            )
+            if not bibliographic:
+                _inject_memory_tools(agent_instance, task_obj, read_memory_tool, write_memory_tool)
 
             if progress_callback:
                 try:
@@ -2203,38 +2239,53 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 except Exception:
                     pass
 
-            max_retries = 2
-            last_exception = None
-            for attempt in range(max_retries + 1):
-                try:
-                    if attempt > 0:
-                        time.sleep(10 * attempt)
-                        single_crew = Crew(agents=[agent_instance], tasks=[task_obj], verbose=True, process='sequential')
-                    result = single_crew.kickoff(inputs=execution_context)
-                    last_exception = None
-                    break
-                except Exception as e:
-                    last_exception = e
-                    err_str = str(e).lower()
-                    is_transient = "503" in err_str or "unavailable" in err_str or "rate" in err_str or "empty" in err_str or "none" in err_str or "model output" in err_str or "resource" in err_str or "overloaded" in err_str
-                    if is_transient and attempt < max_retries:
-                        continue
-                    elif is_transient:
-                        if run_id: db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
-                        mid = task_data.get("model_id") or agent_info.get("model_id") or default_model_id
-                        raise RateLimitError(
-                            f"Model transient error after retries: {e}",
-                            task_idx,
-                            task_outputs,
-                            is_cloud=_provider_is_cloud(mid, e),
-                        )
-                    else:
-                        raise e
+            if _uses_scientific_search(task_data):
+                task_out = _run_scientific_search(execution_context)
+            else:
+                single_crew = Crew(
+                    agents=[agent_instance],
+                    tasks=[task_obj],
+                    verbose=True,
+                    process='sequential'
+                )
+                max_retries = 2
+                last_exception = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        if attempt > 0:
+                            time.sleep(10 * attempt)
+                            single_crew = Crew(agents=[agent_instance], tasks=[task_obj], verbose=True, process='sequential')
+                        result = single_crew.kickoff(inputs=execution_context)
+                        last_exception = None
+                        break
+                    except Exception as e:
+                        last_exception = e
+                        err_str = str(e).lower()
+                        is_transient = "503" in err_str or "unavailable" in err_str or "rate" in err_str or "empty" in err_str or "none" in err_str or "model output" in err_str or "resource" in err_str or "overloaded" in err_str
+                        if is_transient and attempt < max_retries:
+                            continue
+                        elif is_transient:
+                            if run_id: db.update_run(run_id, status='paused', result=str(e), current_task_idx=task_idx, task_outputs=task_outputs)
+                            mid = task_data.get("model_id") or agent_info.get("model_id") or default_model_id
+                            raise RateLimitError(
+                                f"Model transient error after retries: {e}",
+                                task_idx,
+                                task_outputs,
+                                is_cloud=_provider_is_cloud(mid, e),
+                            )
+                        else:
+                            raise e
 
-            if last_exception is not None:
-                raise last_exception
-                    
-            task_out = _result_to_text(result)
+                if last_exception is not None:
+                    raise last_exception
+
+                task_out = _result_to_text(result)
+                if bibliographic and parse_scientific_search_output(parent_output):
+                    task_out = ensure_grounded_digest(
+                        task_out,
+                        parent_output,
+                        str(execution_context.get("topic") or execution_context.get("user_input") or "scientific topic"),
+                    )
             key_name = f"dynamic_task_{task_idx}"
             summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {task_out[:500]}"
             memory_manager.write_record(key=key_name, content_summary=summary_text, structured_data={"raw_output": _cap_raw_output(task_out)}, agent_role=effective_role)

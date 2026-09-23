@@ -1553,34 +1553,44 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             _max_tokens = int(final_plan.get("max_tokens") or 0)
 
         # --- AUTOMATIC POST-PROCESSING: Master AI Refinement ---
-        try:
-            await status_msg.edit_text(
-                text="🧠 <b>Refining output...</b>\n<i>Master AI is polishing the final report.</i>",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass  # status_msg may have been deleted/replaced by on_task_progress
+        # Scientific Scout is already validated against retrieved records. Sending
+        # it through another LLM can mutate citations, so deliver it unchanged.
+        _is_scientific_scout = any(
+            "search_scientific_literature" in (task.get("tools") or [])
+            for task in ((final_plan or {}).get("tasks") or [])
+            if isinstance(task, dict)
+        )
+        if _is_scientific_scout:
+            refined_result = str(final_result)
+            logger.info(f"User {user_id}: Scientific digest passed through without LLM refinement.")
+        else:
+            try:
+                await status_msg.edit_text(
+                    text="🧠 <b>Refining output...</b>\n<i>Master AI is polishing the final report.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass  # status_msg may have been deleted/replaced by on_task_progress
 
-        _refine_start = time.monotonic()
-        try:
-            # Prefer whichever step actually contains papers. The last step is often
-            # only a tool trace, while the search step holds the DOIs.
-            from core.master_ai import select_refine_source
-            _refiner_input = select_refine_source(
-                str(final_result) if final_result else "",
-                global_context if isinstance(global_context, str) else None,
-            )
-            refined_result = await asyncio.wait_for(
-                asyncio.to_thread(master_ai.refine_output, _refiner_input, "English", _max_tokens or None),
-                timeout=REFINE_TIMEOUT,
-            )
-            logger.info(f"User {user_id}: Output refinement complete ({time.monotonic() - _refine_start:.1f}s).")
-        except asyncio.TimeoutError:
-            logger.error(f"User {user_id}: Output refinement timed out after {REFINE_TIMEOUT}s. Using raw output.")
-            refined_result = str(final_result)
-        except Exception as refine_err:
-            logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
-            refined_result = str(final_result)
+            _refine_start = time.monotonic()
+            try:
+                # Prefer whichever step contains substantive data over a tool trace.
+                from core.master_ai import select_refine_source
+                _refiner_input = select_refine_source(
+                    str(final_result) if final_result else "",
+                    global_context if isinstance(global_context, str) else None,
+                )
+                refined_result = await asyncio.wait_for(
+                    asyncio.to_thread(master_ai.refine_output, _refiner_input, "English", _max_tokens or None),
+                    timeout=REFINE_TIMEOUT,
+                )
+                logger.info(f"User {user_id}: Output refinement complete ({time.monotonic() - _refine_start:.1f}s).")
+            except asyncio.TimeoutError:
+                logger.error(f"User {user_id}: Output refinement timed out after {REFINE_TIMEOUT}s. Using raw output.")
+                refined_result = str(final_result)
+            except Exception as refine_err:
+                logger.error(f"Output refinement failed: {refine_err}. Using raw output.")
+                refined_result = str(final_result)
 
         # Update run record with the refined result (keep structured meta if present)
         if run_id:
