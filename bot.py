@@ -829,6 +829,7 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
 
     typing_task = asyncio.create_task(typing_indicator())
     context.user_data["typing_task"] = typing_task
+    kept_saved_plan = False
     try:
         keep_saved_plan = not context.user_data.get("plan_customized")
         reviewed = await asyncio.wait_for(
@@ -838,9 +839,15 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
         if reviewed:
             plan = reviewed
         new_n = len(plan.get("tasks") or [])
+        kept_saved_plan = keep_saved_plan and new_n == original_n
         if new_n != original_n:
             context.user_data["plan_customized"] = True
             logger.info(f"Review expanded plan {original_n} → {new_n} tasks; execution will use reviewed plan.")
+        elif keep_saved_plan:
+            logger.info(
+                f"Review kept the saved {original_n}-step plan "
+                "(literature scout: Crossref runs in the controller)."
+            )
     except Exception as decomp_err:
         logger.error(f"Plan review failed: {decomp_err}. Using original plan.")
         await context.bot.send_message(
@@ -864,10 +871,18 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
     reply_markup = InlineKeyboardMarkup(keyboard)
     summary_sent = False
     n_final = len(plan.get("tasks") or [])
+    plan_note = ""
+    if kept_saved_plan:
+        plan_note = (
+            "📌 <i>Kept the saved workflow as-is "
+            f"({n_final} steps). For Scientific Literature Scout this is expected: "
+            "Crossref runs in the controller, then the writer curates 5 verified papers.</i>\n\n"
+        )
     review_header = (
         f"✅ <b>Master AI review complete</b>\n"
         f"🧠 Model: <code>{model_label}</code>\n"
         f"📝 Execution steps: <b>{n_final}</b>\n\n"
+        f"{plan_note}"
     )
 
     try:
