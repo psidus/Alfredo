@@ -11,6 +11,17 @@ from core.db_manager import DBManager
 from core.data_manager import DataManager
 
 try:
+    from core.model_capability import (
+        ModelCapabilityRegistry,
+        CapabilityTier,
+        CRITICAL_FUNCTIONS,
+    )
+except ImportError:
+    ModelCapabilityRegistry = None
+    CapabilityTier = None
+    CRITICAL_FUNCTIONS = {}
+
+try:
     import litellm
 except ImportError:
     litellm = None
@@ -751,6 +762,21 @@ class MasterAI:
             raise ImportError("Please install litellm.")
             
         logger.info(f"MasterAI initialized with model: {self.model_provider}/{self.model_name}")
+
+        # --- Model Capability Registry ---
+        self.capability_registry = None
+        self._model_tier = None
+        if ModelCapabilityRegistry is not None:
+            try:
+                self.capability_registry = ModelCapabilityRegistry()
+                self._model_tier = self.capability_registry.get_tier(self.model_name)
+                logger.info(
+                    f"MasterAI capability tier: {self._model_tier.name} "
+                    f"(model: {self.model_name})"
+                )
+            except Exception as cap_err:
+                logger.warning(f"Could not initialize capability registry: {cap_err}")
+
         # Never keep a leftover global Gemini proxy on LiteLLM.
         if litellm is not None and getattr(litellm, "api_base", None):
             litellm.api_base = None
@@ -1710,6 +1736,18 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         expected_output = task.get('expected_output') or ""
         agent_role = task.get('agent_role') or ""
 
+        # --- Capability guard: skip LLM decomposition if model is too weak ---
+        if self.capability_registry is not None:
+            can_proceed, warning = self.capability_registry.check_function_capability(
+                self.model_name, "decompose_task_if_complex"
+            )
+            if not can_proceed:
+                logger.warning(
+                    f"Skipping LLM decomposition for task '{name}' "
+                    f"(model too weak: {warning}). Returning original."
+                )
+                return [task]
+
         # Format agents list for the LLM
         formatted_agents = []
         for agent in available_agents:
@@ -1830,6 +1868,18 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                 f"MasterAI review: keeping original {len(plan.get('tasks') or [])} tasks."
             )
             return plan
+
+        # --- Capability guard: skip LLM review if model is too weak ---
+        if self.capability_registry is not None:
+            can_proceed, warning = self.capability_registry.check_function_capability(
+                self.model_name, "review_workflow_plan"
+            )
+            if not can_proceed:
+                logger.warning(
+                    f"MasterAI review: model too weak for LLM review ({warning}). "
+                    "Using heuristic decomposition instead."
+                )
+                return self._heuristic_decompose_plan(plan)
 
         model_string = self._get_model_string()
         agents = plan.get("agents") or []
@@ -2081,6 +2131,18 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
         plan_json = json.dumps(plan, indent=2, ensure_ascii=False)
         system_prompt = WORKFLOW_COHERENCE_OPTIMIZER_PROMPT.replace("{expanded_plan}", plan_json)
         
+        # --- Capability guard: skip LLM coherence pass if model is too weak ---
+        if self.capability_registry is not None:
+            can_proceed, warning = self.capability_registry.check_function_capability(
+                self.model_name, "optimize_workflow_coherence"
+            )
+            if not can_proceed:
+                logger.warning(
+                    f"Skipping workflow coherence optimization ({warning}). "
+                    "Returning plan as-is."
+                )
+                return plan
+
         model_string = self._get_model_string()
             
         logger.info(f"MasterAI: Running Workflow Coherence Optimizer with model: {model_string}")

@@ -41,9 +41,27 @@ TOOL_PROFILE_INTERMEDIATE = "intermediate"
 TOOL_PROFILE_FINAL_WRITER = "final_writer"
 TOOL_PROFILES = (TOOL_PROFILE_INTERMEDIATE, TOOL_PROFILE_FINAL_WRITER)
 
-MODEL_TIER_DEFAULT = "default"
-MODEL_TIER_SIMPLE = "simple"
-MODEL_TIERS = (MODEL_TIER_DEFAULT, MODEL_TIER_SIMPLE)
+# Granular capability tiers (basic → expert)
+MODEL_TIER_BASIC = "basic"
+MODEL_TIER_STANDARD = "standard"
+MODEL_TIER_ADVANCED = "advanced"
+MODEL_TIER_EXPERT = "expert"
+MODEL_TIERS = (MODEL_TIER_BASIC, MODEL_TIER_STANDARD,
+               MODEL_TIER_ADVANCED, MODEL_TIER_EXPERT)
+
+# Backward-compatible aliases for legacy code / configs
+MODEL_TIER_SIMPLE = MODEL_TIER_BASIC      # "simple" → "basic"
+MODEL_TIER_DEFAULT = MODEL_TIER_STANDARD   # "default" → "standard"
+
+# Mapping that accepts both old and new tier names
+_TIER_ALIAS_MAP = {
+    "basic": MODEL_TIER_BASIC,
+    "simple": MODEL_TIER_BASIC,
+    "standard": MODEL_TIER_STANDARD,
+    "default": MODEL_TIER_STANDARD,
+    "advanced": MODEL_TIER_ADVANCED,
+    "expert": MODEL_TIER_EXPERT,
+}
 
 WORKER_HANDOFF_DIRECTIVE = """
 
@@ -58,6 +76,10 @@ When you finish:
 def resolve_model_tier(step_def: Any) -> str:
     if isinstance(step_def, dict):
         tier = (step_def.get("model_tier") or MODEL_TIER_DEFAULT).strip().lower()
+        # Use alias map for backward compat (simple→basic, default→standard)
+        resolved = _TIER_ALIAS_MAP.get(tier)
+        if resolved:
+            return resolved
         if tier in MODEL_TIERS:
             return tier
     return MODEL_TIER_DEFAULT

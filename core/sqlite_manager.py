@@ -241,6 +241,33 @@ class SQLiteManager:
             except sqlite3.OperationalError:
                 pass
                 
+            # Migration to add capability_tier to models
+            try:
+                self.cursor.execute(
+                    "ALTER TABLE models ADD COLUMN capability_tier TEXT DEFAULT 'standard';"
+                )
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add max_context_window to models
+            try:
+                self.cursor.execute(
+                    "ALTER TABLE models ADD COLUMN max_context_window INTEGER DEFAULT 0;"
+                )
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Migration to add capability_tags (JSON) to models
+            try:
+                self.cursor.execute(
+                    "ALTER TABLE models ADD COLUMN capability_tags TEXT DEFAULT '{}';"
+                )
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
             # Migration to add tools_json to tasks if upgrading
             try:
                 self.cursor.execute("ALTER TABLE tasks ADD COLUMN tools_json TEXT;")
@@ -458,9 +485,9 @@ class SQLiteManager:
     # which is the standard and effective way to prevent SQL injection attacks.
     # The logic is sound and maps directly to the defined schema.
     
-    def create_model(self, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0, supports_tools: bool = True) -> int:
-        sql = "INSERT INTO models (provider, model_name, env_var_name, is_local, vram_gb, supports_tools) VALUES (?, ?, ?, ?, ?, ?)"
-        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb, 1 if supports_tools else 0))
+    def create_model(self, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0, supports_tools: bool = True, capability_tier: str = "standard", max_context_window: int = 0, capability_tags: str = "{}") -> int:
+        sql = "INSERT INTO models (provider, model_name, env_var_name, is_local, vram_gb, supports_tools, capability_tier, max_context_window, capability_tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb, 1 if supports_tools else 0, capability_tier, max_context_window, capability_tags))
         self.conn.commit()
         return self.cursor.lastrowid
 
@@ -482,9 +509,9 @@ class SQLiteManager:
         rows = self.cursor.fetchall()
         return [self._to_dict(row) for row in rows]
 
-    def update_model(self, model_id: int, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0, supports_tools: bool = True) -> int:
-        sql = "UPDATE models SET provider = ?, model_name = ?, env_var_name = ?, is_local = ?, vram_gb = ?, supports_tools = ? WHERE id = ?"
-        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb, 1 if supports_tools else 0, model_id))
+    def update_model(self, model_id: int, provider: str, model_name: str, env_var_name: str = "", is_local: bool = False, vram_gb: float = 0.0, supports_tools: bool = True, capability_tier: str = "standard", max_context_window: int = 0, capability_tags: str = "{}") -> int:
+        sql = "UPDATE models SET provider = ?, model_name = ?, env_var_name = ?, is_local = ?, vram_gb = ?, supports_tools = ?, capability_tier = ?, max_context_window = ?, capability_tags = ? WHERE id = ?"
+        self.cursor.execute(sql, (provider, model_name, env_var_name, 1 if is_local else 0, vram_gb, 1 if supports_tools else 0, capability_tier, max_context_window, capability_tags, model_id))
         self.conn.commit()
         return self.cursor.rowcount
 

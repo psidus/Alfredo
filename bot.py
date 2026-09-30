@@ -867,6 +867,33 @@ async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_
 
     context.user_data["review_model"] = model_label
 
+    # --- Capability Warning Notifications ---
+    capability_warnings = []
+    for task in plan.get("tasks", []):
+        if isinstance(task, dict):
+            warning = task.pop("_capability_warning", None)
+            req_tier = task.pop("_required_tier", None)
+            if warning:
+                task_name = task.get('name') or task.get('id') or '?'
+                capability_warnings.append(
+                    f"⚠️ <b>{task_name}</b>: {warning}"
+                )
+    if capability_warnings:
+        warning_text = (
+            "⚠️ <b>Model Capability Warnings</b>\n\n"
+            + "\n".join(capability_warnings)
+            + "\n\n💡 <i>Consider assigning more powerful models "
+            "to these tasks for better results.</i>"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=warning_text,
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as warn_err:
+            logger.warning(f"Failed to send capability warnings: {warn_err}")
+
     keyboard = [[InlineKeyboardButton("✅ Approve reviewed plan", callback_data="confirm_plan")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     summary_sent = False

@@ -78,6 +78,10 @@ from core.workflow_contracts import (
     resolve_tool_profile,
     serialize_run_result_payload,
 )
+try:
+    from core.model_capability import ModelCapabilityRegistry
+except ImportError:
+    ModelCapabilityRegistry = None
 from core.workflow_graph import (
     desugar_graph_for_runtime,
     evaluate_loop_exit_condition,
@@ -760,6 +764,29 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
 
     model_record = db.read_model(execution_model_id) if execution_model_id else None
     supports_tools = bool(model_record.get('supports_tools', 1)) if model_record else True
+
+    # --- Task-Model Capability Validation ---
+    if ModelCapabilityRegistry is not None and model_record:
+        try:
+            _cap_registry = ModelCapabilityRegistry()
+            task_required_tier = _cap_registry.classify_task_criticality(
+                task_record.get('description', ''),
+                list(task_record.get('tools', []) or [])
+            )
+            model_name = model_record.get('model_name', '')
+            compatible, reason = _cap_registry.check_compatibility(
+                model_name, task_required_tier
+            )
+            if not compatible:
+                logging.warning(
+                    f"⚠️ Task {task_id} ('{task_record.get('name', '')}') requires tier "
+                    f"{task_required_tier.name} but model '{model_name}' is insufficient: {reason}"
+                )
+                # Store warning for bot-level notification
+                task_record['_capability_warning'] = reason
+                task_record['_required_tier'] = task_required_tier.name
+        except Exception as cap_err:
+            logging.warning(f"Capability check failed for task {task_id}: {cap_err}")
 
     raw_tools = list(task_record.get('tools', []) or [])
     raw_tools = filter_tool_names_by_profile(raw_tools, tool_profile)
