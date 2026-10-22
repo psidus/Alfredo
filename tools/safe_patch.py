@@ -71,7 +71,7 @@ def safe_patch(filepath):
         f.write(content)
     print(f"Successfully patched {filepath}")
 
-sqlite_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/sqlite_manager.py"
-postgres_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/postgres_manager.py"
+sqlite_path = "./core/sqlite_manager.py"
+postgres_path = "./core/postgres_manager.py"
 safe_patch(sqlite_path)
 safe_patch(postgres_path)

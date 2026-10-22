@@ -1,6 +1,6 @@
 import os
 
-dashboard_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/ui/dashboard.py"
+dashboard_path = "./ui/dashboard.py"
 with open(dashboard_path, "r", encoding="utf-8") as f:
     content = f.read()
 

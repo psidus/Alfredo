@@ -56,7 +56,7 @@ def update_manager(filepath):
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
 
-sqlite_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/sqlite_manager.py"
-postgres_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/postgres_manager.py"
+sqlite_path = "./core/sqlite_manager.py"
+postgres_path = "./core/postgres_manager.py"
 update_manager(sqlite_path)
 update_manager(postgres_path)

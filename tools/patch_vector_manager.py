@@ -2,7 +2,7 @@ import os
 import re
 
 def patch_file():
-    filepath = r"c:\Users\Pietro\Documents\GitHub\Alfredo\core\vector_manager.py"
+    filepath = r"core\vector_manager.py"
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
 

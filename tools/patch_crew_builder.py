@@ -1,6 +1,7 @@
 import os
 
-crew_builder_path = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/crew_builder.py"
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+crew_builder_path = os.path.join(base_dir, "core", "crew_builder.py")
 with open(crew_builder_path, "r", encoding="utf-8") as f:
     content = f.read()
 
@@ -18,18 +19,16 @@ new_logic_1 = """        kwargs = {}
 
 content = content.replace(old_logic_1, new_logic_1)
 
-old_logic_2 = """            kwargs = {}
-            if task_data.get('name', '').startswith("Extract Thermo Coefficients"):
-                kwargs['output_pydantic'] = ExtractionOutput"""
-new_logic_2 = """            kwargs = {}
-            if task_data.get('output_pydantic'):
-                cls = get_schema_class(task_data.get('output_pydantic'))
-                if cls:
-                    kwargs['output_pydantic'] = cls"""
+old_logic_2 = """                    if isinstance(schemas, list) and len(schemas) > 0:
+                        kwargs['output_pydantic'] = schemas[0]"""
+new_logic_2 = """                    if isinstance(schemas, list) and len(schemas) > 0:
+                        cls = get_schema_class(schemas[0])
+                        if cls:
+                            kwargs['output_pydantic'] = cls"""
 
 content = content.replace(old_logic_2, new_logic_2)
 
 with open(crew_builder_path, "w", encoding="utf-8") as f:
     f.write(content)
 
-print("crew_builder patched")
+print("Patch applied successfully to crew_builder.py")

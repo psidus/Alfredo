@@ -1,7 +1,7 @@
 import re
 import os
 
-filepath = "C:/Users/Pietro/Documents/GitHub/Alfredo/core/sqlite_manager.py"
+filepath = "./core/sqlite_manager.py"
 with open(filepath, "r", encoding="utf-8") as f:
     content = f.read()
 
@@ -66,5 +66,5 @@ content = content.replace("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'work
 content = content.replace("PRAGMA table_info(tasks)", "SELECT column_name as name FROM information_schema.columns WHERE table_name = 'tasks'")
 content = content.replace("PRAGMA table_info(workflows)", "SELECT column_name as name FROM information_schema.columns WHERE table_name = 'workflows'")
 
-with open("C:/Users/Pietro/Documents/GitHub/Alfredo/core/postgres_manager.py", "w", encoding="utf-8") as f:
+with open("./core/postgres_manager.py", "w", encoding="utf-8") as f:
     f.write(content)
