@@ -5051,6 +5051,79 @@ def render_history_monitoring():
         for run in older_runs:
             _render_run_card(run)
 
+    st.divider()
+    st.subheader("⏱️ Git Workspace Time-Travel & Audit (Zero-Code)")
+    st.caption(
+        "Ogni step dei workflow e ogni modifica a Agenti/Workflow viene salvata automaticamente in un repository Git locale (`workspace/`). "
+        "Puoi ispezionare i diff visuali (anche su Word/Excel/CSV) e ripristinare il workspace a qualsiasi punto nel tempo con un click."
+    )
+    try:
+        from core.git_workspace import get_git_workspace
+        git_ws = get_git_workspace()
+        if not git_ws.enabled:
+            st.warning("GitPython non disponibile in questo ambiente.")
+        else:
+            col_gt1, col_gt2, col_gt3 = st.columns([3, 2, 1])
+            with col_gt1:
+                manual_msg = st.text_input(
+                    "Nota Checkpoint Manuale",
+                    placeholder="Es. Prima di lanciare il nuovo test...",
+                    key="git_manual_cp_msg",
+                    label_visibility="collapsed",
+                )
+            with col_gt2:
+                show_gitops = st.checkbox("Mostra anche versioni Agenti/Workflow (GitOps)", value=True, key="git_show_gitops")
+            with col_gt3:
+                if st.button("📸 Crea Checkpoint", key="btn_git_manual_cp", use_container_width=True):
+                    cp_res = git_ws.checkpoint_step(
+                        run_id=None,
+                        step_label="Manual-UI",
+                        agent_role="Operator",
+                        task_name=manual_msg or "Checkpoint manuale da Dashboard",
+                    )
+                    if cp_res.get("committed"):
+                        st.toast(f"Checkpoint creato: {cp_res.get('short_sha')}", icon="✅")
+                        st.rerun()
+                    else:
+                        st.toast("Nessuna nuova modifica nei file del workspace.", icon="ℹ️")
+
+            live_diff = git_ws.get_smart_diff()
+            if live_diff.get("has_changes"):
+                with st.expander(f"🟡 Modifiche non ancora archiviate ({live_diff.get('summary')})", expanded=False):
+                    st.markdown(live_diff.get("diff_text") or "")
+
+            checkpoints = git_ws.list_checkpoints(limit=25, include_gitops=show_gitops)
+            if not checkpoints:
+                st.info("Nessun checkpoint registrato finora.")
+            else:
+                for idx_cp, cp in enumerate(checkpoints):
+                    sha = cp["sha"]
+                    short_sha = cp["short_sha"]
+                    files_badge = f" | 📄 {len(cp['changed_files'])} file" if cp.get("changed_files") else ""
+                    cp_title = f"🔖 `{short_sha}` | {cp['title']}{files_badge} | 🕒 {cp['timestamp']}"
+                    with st.expander(cp_title, expanded=(idx_cp == 0)):
+                        c_info, c_btn = st.columns([5, 2])
+                        with c_info:
+                            if cp.get("summary"):
+                                st.markdown(f"**Riepilogo:** {cp['summary']}")
+                            if cp.get("changed_files"):
+                                st.caption("File toccati: " + ", ".join(f"`{f}`" for f in cp["changed_files"][:10]))
+                        with c_btn:
+                            if st.button(
+                                "⏪ Ripristina qui",
+                                key=f"rb_btn_{short_sha}_{idx_cp}",
+                                help="Ripristina i file del workspace esattamente a questo checkpoint (salvando prima un backup automatico)",
+                                use_container_width=True,
+                            ):
+                                rb = git_ws.rollback_to_commit(sha, reason=f"Rollback da Dashboard a {short_sha}")
+                                if rb.get("success"):
+                                    st.toast(rb.get("message", "Rollback completato!"), icon="⏪")
+                                    st.rerun()
+                                else:
+                                    st.error(rb.get("error", "Errore durante il rollback."))
+    except Exception as e:
+        st.error(f"Errore caricamento Git Time-Travel: {e}")
+
 
 def render_local_training():
     """Renders Tab: Local Model Training."""

@@ -35,7 +35,7 @@ psycopg2-binary>=2.9.0
 pdfplumber>=0.11.0
 opencv-python-headless>=4.9.0
 torchvision
-psycopg2-binary>=2.9.9
+GitPython>=3.1.40
 
 # === Local Model Training (optional — GPU required) ===
 # Install these manually if you want to use the Local Training tab:

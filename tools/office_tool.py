@@ -30,10 +30,7 @@ def _request_confirmation(preview_message: str) -> bool:
     from core.human_in_the_loop import request_human_input
     from core.notification_manager import NotificationManager
 
-    chat_id = os.environ.get("CURRENT_CHAT_ID")
-    if not chat_id:
-        logger.warning("No CURRENT_CHAT_ID set — auto-denying write operation.")
-        return False
+    chat_id = os.environ.get("CURRENT_CHAT_ID") or "dashboard"
 
     full_message = (
         "⚠️ <b>CONFIRMATION REQUIRED</b>\n\n"

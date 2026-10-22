@@ -35,12 +35,6 @@ from core.human_in_the_loop import has_pending_request, provide_human_input
 # Load environment variables
 load_env()
 
-# Configure UTF-8 for Windows terminals
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
-
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

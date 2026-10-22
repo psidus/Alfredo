@@ -438,6 +438,15 @@ class PostgresManager:
                 db['path'] = db['path'].replace('\\', '/')
         return dbs
 
+    def read_vector_db(self, db_id: int) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM vector_databases WHERE id = %s"
+        self.cursor.execute(sql, (int(db_id),))
+        row = self.cursor.fetchone()
+        db_dict = self._to_dict(row)
+        if db_dict and db_dict.get('path'):
+            db_dict['path'] = db_dict['path'].replace('\\', '/')
+        return db_dict
+
     def delete_vector_db(self, db_id: int) -> int:
         sql = "DELETE FROM vector_databases WHERE id = %s"
         self.cursor.execute(sql, (db_id,))
@@ -585,98 +594,78 @@ class PostgresManager:
         self.conn.commit()
         return self.cursor.rowcount
 
+    @staticmethod
+    def _remove_task_from_steps(steps: list, target_task_id: int) -> tuple[list, bool]:
+        """Recursively removes target_task_id from top-level steps, batch_loop, and loop blocks."""
+        cleaned = []
+        removed = False
+        for step in (steps or []):
+            if isinstance(step, dict):
+                step_type = step.get("step_type", "task")
+                if step_type == "batch_loop" or ("task_ids" in step and "task_id" not in step):
+                    inner_steps, inner_removed = PostgresManager._remove_task_from_steps(
+                        step.get("task_ids", []), target_task_id
+                    )
+                    if inner_removed:
+                        removed = True
+                    new_step = dict(step)
+                    new_step["task_ids"] = inner_steps
+                    cleaned.append(new_step)
+                elif step_type == "loop" or "body_steps" in step:
+                    inner_steps, inner_removed = PostgresManager._remove_task_from_steps(
+                        step.get("body_steps", []), target_task_id
+                    )
+                    if inner_removed:
+                        removed = True
+                    new_step = dict(step)
+                    new_step["body_steps"] = inner_steps
+                    cleaned.append(new_step)
+                else:
+                    tid = int(step.get("task_id", 0) or 0)
+                    if tid == target_task_id:
+                        removed = True
+                    else:
+                        cleaned.append(step)
+            else:
+                try:
+                    tid = int(step)
+                except (ValueError, TypeError):
+                    cleaned.append(step)
+                    continue
+                if tid == target_task_id:
+                    removed = True
+                else:
+                    cleaned.append(step)
+        return cleaned, removed
+
     def delete_task(self, task_id: int) -> int:
         """
-        Deletes a task, removes it from any workflows, re-indexes remaining tasks,
-        and sets a warning flag on affected workflows.
+        Deletes a task, removes references to it from all workflows (including nested
+        batch_loop and loop blocks), and sets a warning flag on affected workflows
+        without mutating primary keys of remaining tasks.
         """
         task_id = int(task_id)
-        
-        # 1. Identify all workflows that contain this task and remove it
-        self.cursor.execute("SELECT id, task_ids_json FROM workflows")
-        workflows = self.cursor.fetchall()
-        
-        for wf in workflows:
-            try:
-                task_ids = json.loads(wf['task_ids_json'])
-            except (json.JSONDecodeError, TypeError):
-                task_ids = []
-                
-            # If the deleted task is in the workflow, remove it and set warning
-            def get_tid(t):
-                return int(t.get('task_id', 0)) if isinstance(t, dict) else int(t)
-
-            if any(get_tid(tid) == task_id for tid in task_ids):
-                new_task_ids = [tid for tid in task_ids if get_tid(tid) != task_id]
-                self.cursor.execute(
-                    "UPDATE workflows SET task_ids_json = %s, has_deletion_warning = 1 WHERE id = %s",
-                    (json.dumps(new_task_ids), wf['id'])
-                )
-
-        # 2. Delete the specific task from the tasks table
-        self.cursor.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
-        
-        # 3. Re-index remaining tasks to ensure sequential IDs (1, 2, 3...)
-        self.cursor.execute("SELECT id FROM tasks ORDER BY id")
-        remaining_tasks = self.cursor.fetchall()
-        
-        if remaining_tasks:
-            # Create a mapping from OLD_ID to NEW_ID (1-based index)
-            mapping = {int(row['id']): i + 1 for i, row in enumerate(remaining_tasks)}
-            
-            # Use a temporary table to safely update task IDs without PK collisions
-            self.cursor.execute("CREATE TEMP TABLE tasks_backup AS SELECT * FROM tasks")
-            self.cursor.execute("DELETE FROM tasks")
-            
-            # Get column names to ensure we re-insert correctly
-            self.cursor.execute("SELECT column_name as name FROM information_schema.columns WHERE table_name = 'tasks'")
-            columns = [col['name'] for col in self.cursor.fetchall()]
-            cols_str = ", ".join(columns)
-            placeholders = ", ".join(["%s"] * len(columns))
-            
-            self.cursor.execute("SELECT * FROM tasks_backup ORDER BY id")
-            all_task_data = self.cursor.fetchall()
-            
-            for i, task_data in enumerate(all_task_data):
-                task_dict = dict(task_data)
-                task_dict['id'] = i + 1 # Assign new sequential ID
-                
-                vals = [task_dict[col] for col in columns]
-                self.cursor.execute(f"INSERT INTO tasks ({cols_str}) VALUES ({placeholders})", vals)
-            
-            self.cursor.execute("DROP TABLE tasks_backup")
-            
-            # 4. Update all workflows: apply the mapping AND remove any orphaned IDs
+        with self.lock:
             self.cursor.execute("SELECT id, task_ids_json FROM workflows")
-            current_workflows = self.cursor.fetchall()
-            for wf in current_workflows:
-                try:
-                    t_ids = json.loads(wf['task_ids_json'])
-                    # Filter: keep only IDs that still exist in our mapping, and update them
-                    new_t_ids = []
-                    for tid in t_ids:
-                        actual_tid = int(tid.get('task_id', 0)) if isinstance(tid, dict) else int(tid)
-                        if actual_tid in mapping:
-                            if isinstance(tid, dict):
-                                new_dict = dict(tid)
-                                new_dict['task_id'] = mapping[actual_tid]
-                                new_t_ids.append(new_dict)
-                            else:
-                                new_t_ids.append(mapping[actual_tid])
-                    
-                    self.cursor.execute("UPDATE workflows SET task_ids_json = %s WHERE id = %s", 
-                                        (json.dumps(new_t_ids), wf['id']))
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            
-            # Reset SQLite autoincrement sequence
-            self.cursor.execute("SELECT setval(pg_get_serial_sequence('tasks', 'id'), COALESCE((SELECT MAX(id) FROM tasks), 1))", (len(all_task_data),))
-        else:
-            # If no tasks left, reset sequence
-            self.cursor.execute("SELECT setval(pg_get_serial_sequence('tasks', 'id'), 1, false)")
+            workflows = self.cursor.fetchall()
 
-        self.conn.commit()
-        return 1
+            for wf in workflows:
+                try:
+                    task_ids = json.loads(wf['task_ids_json'])
+                except (json.JSONDecodeError, TypeError):
+                    task_ids = []
+
+                new_task_ids, was_removed = self._remove_task_from_steps(task_ids, task_id)
+                if was_removed:
+                    self.cursor.execute(
+                        "UPDATE workflows SET task_ids_json = %s, has_deletion_warning = 1 WHERE id = %s",
+                        (json.dumps(new_task_ids), wf['id'])
+                    )
+
+            self.cursor.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+            deleted_count = self.cursor.rowcount
+            self.conn.commit()
+            return deleted_count or 1
 
     def dismiss_workflow_warning(self, workflow_id: int) -> None:
         """Clears the deletion warning flag for a workflow."""
@@ -729,42 +718,15 @@ class PostgresManager:
 
     def delete_workflow(self, workflow_id: int) -> int:
         """
-        Deletes a workflow and re-indexes remaining workflows to ensure sequential IDs.
+        Deletes a workflow by ID without mutating primary keys of remaining workflows
+        (preserving workflow_runs foreign key integrity).
         """
         workflow_id = int(workflow_id)
-        self.cursor.execute("DELETE FROM workflows WHERE id = %s", (workflow_id,))
-        
-        # Re-index remaining workflows
-        self.cursor.execute("SELECT id FROM workflows ORDER BY id")
-        remaining = self.cursor.fetchall()
-        
-        if remaining:
-            # Temporary table strategy for safe ID updates
-            self.cursor.execute("CREATE TEMP TABLE workflows_backup AS SELECT * FROM workflows")
-            self.cursor.execute("DELETE FROM workflows")
-            
-            self.cursor.execute("SELECT column_name as name FROM information_schema.columns WHERE table_name = 'workflows'")
-            columns = [col['name'] for col in self.cursor.fetchall()]
-            cols_str = ", ".join(columns)
-            placeholders = ", ".join(["%s"] * len(columns))
-            
-            self.cursor.execute("SELECT * FROM workflows_backup ORDER BY id")
-            all_wf_data = self.cursor.fetchall()
-            
-            for i, wf_data in enumerate(all_wf_data):
-                wf_dict = dict(wf_data)
-                wf_dict['id'] = i + 1
-                
-                vals = [wf_dict[col] for col in columns]
-                self.cursor.execute(f"INSERT INTO workflows ({cols_str}) VALUES ({placeholders})", vals)
-            
-            self.cursor.execute("DROP TABLE workflows_backup")
-            self.cursor.execute("SELECT setval(pg_get_serial_sequence('workflows', 'id'), COALESCE((SELECT MAX(id) FROM workflows), 1))", (len(all_wf_data),))
-        else:
-            self.cursor.execute("SELECT setval(pg_get_serial_sequence('workflows', 'id'), 1, false)")
-            
-        self.conn.commit()
-        return 1
+        with self.lock:
+            self.cursor.execute("DELETE FROM workflows WHERE id = %s", (workflow_id,))
+            deleted_count = self.cursor.rowcount
+            self.conn.commit()
+            return deleted_count or 1
 
     # --- Context Memory CRUD ---
     def update_context(self, session_id: str, last_output: str, accumulated_context: str = "") -> None:

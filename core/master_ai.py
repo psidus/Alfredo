@@ -975,14 +975,39 @@ class MasterAI:
                 "stream": False,
                 "options": options,
             }
+            # Native Constrained Decoding (JSON Schema / JSON Grammar) on Ollama
+            is_thinking_model = any(k in model_name.lower() for k in ("deepseek-r1", "qwq", "r1:"))
+            if not is_thinking_model:
+                if call_kwargs.get("_ollama_json_schema"):
+                    payload["format"] = call_kwargs["_ollama_json_schema"]
+                elif call_kwargs.get("_ollama_json_mode"):
+                    payload["format"] = "json"
+
             timeout_s = int(call_kwargs.get("timeout") or 60)
             resp = requests.post(
                 f"{base}/api/chat",
                 json=payload,
                 timeout=(5, timeout_s),
             )
+            if resp.status_code >= 400 and "format" in payload:
+                # Graceful fallback if an older Ollama server rejects schema/json format
+                payload.pop("format", None)
+                resp = requests.post(
+                    f"{base}/api/chat",
+                    json=payload,
+                    timeout=(5, timeout_s),
+                )
             resp.raise_for_status()
             content = ((resp.json() or {}).get("message") or {}).get("content") or ""
+            if not str(content).strip() and "format" in payload:
+                payload.pop("format", None)
+                resp = requests.post(
+                    f"{base}/api/chat",
+                    json=payload,
+                    timeout=(5, timeout_s),
+                )
+                resp.raise_for_status()
+                content = ((resp.json() or {}).get("message") or {}).get("content") or ""
             if not str(content).strip():
                 raise RuntimeError(f"Ollama model '{model_name}' returned an empty response.")
             return content
@@ -1041,6 +1066,8 @@ class MasterAI:
             effective_json = use_json_mode and not is_local_model
             call_timeout = timeout_override or (90 if is_local_model else 60)
             call_kwargs = _build_call_kwargs(m, effective_json, is_local_model, call_timeout)
+            if is_local_model and use_json_mode:
+                call_kwargs["_ollama_json_mode"] = True
 
             if is_local_model:
                 return _run_local_once(m, call_kwargs, call_timeout)
@@ -1723,6 +1750,18 @@ CRITICAL: The user's prompt might reference this data. You can answer questions 
                     generated_files.append(file_path)
             except Exception as e:
                 logger.error(f"Failed to generate export file {ext}: {e}")
+
+        if generated_files:
+            try:
+                from core.git_workspace import get_git_workspace
+                get_git_workspace().checkpoint_step(
+                    run_id=None,
+                    step_label="Export-Files",
+                    agent_role="MasterAI",
+                    task_name=f"Export files ({', '.join(os.path.basename(p) for p in generated_files)})",
+                )
+            except Exception:
+                pass
                 
         return generated_files
 

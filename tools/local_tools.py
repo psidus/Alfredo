@@ -3,7 +3,13 @@ import re
 import glob
 import logging
 import requests
-from duckduckgo_search import DDGS
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    try:
+        from ddgs import DDGS  # newer package name fallback
+    except ImportError:
+        DDGS = None
 from crewai.tools import tool
 
 logger = logging.getLogger(__name__)
@@ -14,9 +20,12 @@ os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 
 def _is_path_safe(file_path: str) -> bool:
-    """Validates if the resolved file_path is within the WORKSPACE_DIR."""
-    resolved_path = os.path.abspath(os.path.join(WORKSPACE_DIR, file_path))
-    return resolved_path.startswith(WORKSPACE_DIR)
+    """Validates if the resolved file_path is strictly inside WORKSPACE_DIR."""
+    try:
+        resolved_path = os.path.abspath(os.path.join(WORKSPACE_DIR, file_path))
+        return os.path.commonpath([resolved_path, WORKSPACE_DIR]) == WORKSPACE_DIR
+    except ValueError:
+        return False
 
 
 # ===========================================================================
@@ -90,8 +99,11 @@ def read_file_anywhere(file_path: str) -> str:
         os.path.abspath(".env"),
     ]
     for s in sensitive_dirs:
-        if abs_path.startswith(s):
-            return f"Error: Access to '{file_path}' is restricted for security reasons."
+        try:
+            if abs_path == s or os.path.commonpath([abs_path, s]) == s:
+                return f"Error: Access to '{file_path}' is restricted for security reasons."
+        except ValueError:
+            pass
 
     if not os.path.isfile(abs_path):
         return f"Error: File not found at '{abs_path}'."
@@ -319,9 +331,7 @@ def ask_operator(question: str) -> str:
     """
     from core.human_in_the_loop import request_human_input
 
-    chat_id = os.environ.get("CURRENT_CHAT_ID")
-    if not chat_id:
-        return "Error: Cannot reach operator. Assume default or abort."
+    chat_id = os.environ.get("CURRENT_CHAT_ID") or "dashboard"
 
     answer = request_human_input(chat_id, question)
     return f"Human replied: {answer}"
@@ -414,7 +424,10 @@ def read_python_file(file_path: str) -> str:
         full_path = os.path.abspath(file_path)
         
     # Security checks
-    if not full_path.startswith(project_root):
+    try:
+        if os.path.commonpath([full_path, project_root]) != project_root:
+            return "Error: Security violation. Path is outside the designated project directory."
+    except ValueError:
         return "Error: Security violation. Path is outside the designated project directory."
         
     # Block reading from sensitive directories (db, .env, venv, .git)
@@ -424,8 +437,11 @@ def read_python_file(file_path: str) -> str:
         os.path.join(project_root, ".git"),
     ]
     for s in sensitive_dirs:
-        if full_path.startswith(s):
-            return f"Error: Reading from sensitive directory '{os.path.basename(s)}' is restricted for security reasons."
+        try:
+            if full_path == s or os.path.commonpath([full_path, s]) == s:
+                return f"Error: Reading from sensitive directory '{os.path.basename(s)}' is restricted for security reasons."
+        except ValueError:
+            pass
 
     if not os.path.isfile(full_path):
         return f"Error: File not found at path '{file_path}' in the project root."
@@ -459,10 +475,11 @@ def python_repl(code: str) -> str:
     except Exception as e:
         return f"Compilation Error: {e}"
 
-    # If syntax is valid, execute the code in a subprocess
+    # If syntax is valid, execute the code in a subprocess inside WORKSPACE_DIR
     try:
         result = subprocess.run(
             [sys.executable, "-c", code],
+            cwd=WORKSPACE_DIR,
             capture_output=True,
             text=True,
             timeout=10
@@ -481,3 +498,109 @@ def python_repl(code: str) -> str:
         return "Error: Execution timed out (limit: 10 seconds)."
     except Exception as e:
         return f"Runtime Error during execution: {e}"
+
+
+@tool
+def edit_file_diff(file_path: str, old_text: str, new_text: str) -> str:
+    """
+    Modifica chirurgicamente (stile Cursor / Claude Code) una sezione specifica di un file
+    nel workspace senza dover riscrivere l'intero file.
+    Cerca `old_text` dentro `file_path` (relativo a workspace/) e lo sostituisce con `new_text`.
+    Restituisce conferma della modifica e attiva il versioning Git del workspace.
+    """
+    if not _is_path_safe(file_path):
+        return "Error: Security violation. Path is outside the designated workspace."
+
+    full_path = os.path.join(WORKSPACE_DIR, file_path)
+    if not os.path.isfile(full_path):
+        return f"Error: File '{file_path}' does not exist in workspace. Use write_file to create it first."
+
+    try:
+        with open(full_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        return f"Error reading '{file_path}': {e}"
+
+    if not old_text:
+        return "Error: 'old_text' cannot be empty. Provide the exact text block to replace."
+
+    if old_text not in content:
+        # Try normalized line endings
+        norm_content = content.replace("\r\n", "\n")
+        norm_old = old_text.replace("\r\n", "\n")
+        if norm_old not in norm_content:
+            return (
+                f"Error: Exact block 'old_text' was not found in '{file_path}'. "
+                "Read the file first with read_file to inspect exact lines."
+            )
+        updated = norm_content.replace(norm_old, new_text.replace("\r\n", "\n"), 1)
+    else:
+        updated = content.replace(old_text, new_text, 1)
+
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(updated)
+        old_lines = len(old_text.splitlines())
+        new_lines = len(new_text.splitlines())
+        return (
+            f"Successfully applied surgical edit to '{file_path}' "
+            f"(replaced {old_lines} lines with {new_lines} lines)."
+        )
+    except Exception as e:
+        return f"Error writing surgical edit to '{file_path}': {e}"
+
+
+@tool
+def git_workspace_time_travel(action: str = "diff", target_commit: str = "", message: str = "") -> str:
+    """
+    Gestisce il controllo versione automatico Git del workspace (Time-Travel, Diff, Checkpoint, Rollback)
+    senza richiedere comandi Git manuali.
+    Azioni supportate (`action`):
+    - 'diff': mostra le modifiche correnti ai file del workspace (inclusi Word .docx, Excel .xlsx, Markdown, CSV).
+    - 'log': elenca gli ultimi checkpoint salvati nel workspace con i relativi ID (`short_sha`).
+    - 'checkpoint': salva immediatamente un checkpoint Git con descrizione `message`.
+    - 'rollback': ripristina il workspace allo stato del checkpoint indicato in `target_commit` (SHA).
+    """
+    try:
+        from core.git_workspace import get_git_workspace
+        git_ws = get_git_workspace()
+    except Exception as e:
+        return f"Error initializing GitWorkspaceManager: {e}"
+
+    act = (action or "diff").strip().lower()
+    if act == "diff":
+        diff_info = git_ws.get_smart_diff()
+        if not diff_info.get("has_changes"):
+            return "Workspace pulito: nessuna modifica rispetto all'ultimo checkpoint Git."
+        return f"Riepilogo: {diff_info.get('summary')}\n\n{diff_info.get('diff_text')}"
+
+    if act == "log":
+        cps = git_ws.list_checkpoints(limit=15)
+        if not cps:
+            return "Nessun checkpoint Git trovato nel workspace."
+        lines = ["⏱️ CRONOLOGIA CHECKPOINT WORKSPACE (Git Time-Travel):"]
+        for cp in cps:
+            files_str = ", ".join(cp["changed_files"][:3]) if cp["changed_files"] else "nessun file"
+            lines.append(f"- [{cp['short_sha']}] ({cp['timestamp']}) {cp['title']} | File: {files_str}")
+        return "\n".join(lines)
+
+    if act == "checkpoint":
+        cp = git_ws.checkpoint_step(
+            run_id=None,
+            step_label="Agent-Checkpoint",
+            agent_role="Agent",
+            task_name=message or "Checkpoint richiesto dall'agente",
+        )
+        if cp.get("committed"):
+            return f"✅ Checkpoint creato [{cp.get('short_sha')}]: {cp.get('summary')}"
+        return "ℹ️ Nessuna modifica da salvare nel workspace."
+
+    if act == "rollback":
+        if not target_commit.strip():
+            return "Error: specifica 'target_commit' (es. lo short_sha ottenuto con action='log') per eseguire il rollback."
+        res = git_ws.rollback_to_commit(target_commit.strip(), reason=message or "Agent/Workflow Rollback")
+        if res.get("success"):
+            return f"⏪ {res.get('message')} (Nuovo commit: {res.get('new_short_sha')})"
+        return f"Error: {res.get('error')}"
+
+    return f"Error: Azione '{action}' non riconosciuta. Usa 'diff', 'log', 'checkpoint' o 'rollback'."

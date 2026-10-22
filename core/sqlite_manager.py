@@ -37,42 +37,91 @@ class SQLiteManager:
             db_path (str): The path to the SQLite database file.
         """
         self.db_path = db_path
-        self.conn: Optional[sqlite3.Connection] = None
-        self.cursor: Optional[sqlite3.Cursor] = None
-        self.lock = threading.Lock()
+        self._local = threading.local()
+        self._shared_conn: Optional[sqlite3.Connection] = None
+        self._shared_cursor: Optional[sqlite3.Cursor] = None
+        self.lock = threading.RLock()
         self._connect()
         self._create_tables()
+
+    def _create_connection(self) -> tuple[sqlite3.Connection, sqlite3.Cursor]:
+        """Creates and configures a thread-local SQLite connection with WAL mode."""
+        if self.db_path != ":memory:" and os.path.dirname(self.db_path):
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=20.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("PRAGMA foreign_keys = ON;")
+        if self.db_path != ":memory:":
+            cur.execute("PRAGMA journal_mode = WAL;")
+            cur.execute("PRAGMA synchronous = NORMAL;")
+            cur.execute("PRAGMA busy_timeout = 20000;")
+        conn.commit()
+        return conn, cur
+
+    @property
+    def conn(self) -> Optional[sqlite3.Connection]:
+        if self.db_path == ":memory:":
+            return self._shared_conn
+        if getattr(self._local, "closed", False):
+            return None
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            self._local.conn, self._local.cursor = self._create_connection()
+        return self._local.conn
+
+    @conn.setter
+    def conn(self, value: Optional[sqlite3.Connection]):
+        if self.db_path == ":memory:":
+            self._shared_conn = value
+        else:
+            self._local.conn = value
+
+    @property
+    def cursor(self) -> Optional[sqlite3.Cursor]:
+        if self.db_path == ":memory:":
+            return self._shared_cursor
+        if getattr(self._local, "closed", False):
+            return None
+        if not hasattr(self._local, "cursor") or self._local.cursor is None:
+            self._local.conn, self._local.cursor = self._create_connection()
+        return self._local.cursor
+
+    @cursor.setter
+    def cursor(self, value: Optional[sqlite3.Cursor]):
+        if self.db_path == ":memory:":
+            self._shared_cursor = value
+        else:
+            self._local.cursor = value
 
     def _connect(self):
         """Establishes the database connection and cursor."""
         try:
-            # Ensure the directory exists. This is a safe local file operation.
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            
-            # ARCHITECT'S NOTE: Increased timeout to 10 seconds. This is critical.
-            # Both Streamlit and the Telegram bot will access this file.
-            # Without a timeout, concurrent write attempts would immediately fail
-            # with a "database is locked" error. This timeout forces the second
-            # process to wait, preventing crashes and improving stability.
-            self.conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
-            
-            # Use Row factory to get dictionary-like results
-            self.conn.row_factory = sqlite3.Row
-            self.cursor = self.conn.cursor()
-            
-            # Enable foreign key support, crucial for data integrity.
-            self.cursor.execute("PRAGMA foreign_keys = ON;")
-            self.conn.commit()
+            conn, cur = self._create_connection()
+            if self.db_path == ":memory:":
+                self._shared_conn = conn
+                self._shared_cursor = cur
+            else:
+                self._local.closed = False
+                self._local.conn = conn
+                self._local.cursor = cur
         except sqlite3.Error as e:
             print(f"Database connection error: {e}")
             raise
 
     def close(self):
-        """Closes the database connection gracefully."""
-        if self.conn:
-            self.conn.close()
-            self.conn = None
-            self.cursor = None
+        """Closes the database connection gracefully for the current thread."""
+        if self.db_path == ":memory:":
+            if self._shared_conn:
+                self._shared_conn.close()
+                self._shared_conn = None
+                self._shared_cursor = None
+        else:
+            conn = getattr(self._local, "conn", None)
+            if conn:
+                conn.close()
+            self._local.conn = None
+            self._local.cursor = None
+            self._local.closed = True
             
     # ARCHITECT'S NOTE: Added context manager methods for robust resource management.
     # This guarantees that the database connection is closed automatically,
@@ -474,6 +523,15 @@ class SQLiteManager:
                 db['path'] = db['path'].replace('\\', '/')
         return dbs
 
+    def read_vector_db(self, db_id: int) -> Optional[Dict[str, Any]]:
+        sql = "SELECT * FROM vector_databases WHERE id = ?"
+        self.cursor.execute(sql, (int(db_id),))
+        row = self.cursor.fetchone()
+        db_dict = self._to_dict(row)
+        if db_dict and db_dict.get('path'):
+            db_dict['path'] = db_dict['path'].replace('\\', '/')
+        return db_dict
+
     def delete_vector_db(self, db_id: int) -> int:
         sql = "DELETE FROM vector_databases WHERE id = ?"
         self.cursor.execute(sql, (db_id,))
@@ -522,12 +580,29 @@ class SQLiteManager:
         return self.cursor.rowcount
 
     # --- Agents CRUD ---
+    def _gitops_snapshot(self, entity_type: str, entity_id: int, entity_name: str, payload: Dict[str, Any], reason: str) -> None:
+        if self.db_path == ":memory:":
+            return
+        try:
+            from core.git_workspace import get_git_workspace
+            get_git_workspace().snapshot_ai_config(
+                entity_type=entity_type,
+                entity_id=entity_id,
+                entity_name=entity_name or f"{entity_type}_{entity_id}",
+                payload=payload,
+                reason=reason,
+            )
+        except Exception:
+            pass
+
     def create_agent(self, name: str, role: str, backstory: str, model_id: Optional[int], tools: List[str]) -> int:
         tools_json = json.dumps(tools)
         sql = "INSERT INTO agents (name, role, backstory, model_id, tools_json) VALUES (?, ?, ?, ?, ?)"
         self.cursor.execute(sql, (name, role, backstory, model_id, tools_json))
         self.conn.commit()
-        return self.cursor.lastrowid
+        new_id = self.cursor.lastrowid
+        self._gitops_snapshot("agent", new_id, name, {"name": name, "role": role, "backstory": backstory, "model_id": model_id, "tools": tools}, "Creato agente")
+        return new_id
 
     def read_agent(self, agent_id: int) -> Optional[Dict[str, Any]]:
         sql = "SELECT * FROM agents WHERE id = ?"
@@ -565,7 +640,9 @@ class SQLiteManager:
         """
         self.cursor.execute(sql, (name, role, backstory, model_id, tools_json, agent_id))
         self.conn.commit()
-        return self.cursor.rowcount
+        rows = self.cursor.rowcount
+        self._gitops_snapshot("agent", agent_id, name, {"name": name, "role": role, "backstory": backstory, "model_id": model_id, "tools": tools}, "Aggiornato agente")
+        return rows
 
     def delete_agent(self, agent_id: int) -> int:
         sql = "DELETE FROM agents WHERE id = ?"
@@ -621,98 +698,78 @@ class SQLiteManager:
         self.conn.commit()
         return self.cursor.rowcount
 
+    @staticmethod
+    def _remove_task_from_steps(steps: list, target_task_id: int) -> tuple[list, bool]:
+        """Recursively removes target_task_id from top-level steps, batch_loop, and loop blocks."""
+        cleaned = []
+        removed = False
+        for step in (steps or []):
+            if isinstance(step, dict):
+                step_type = step.get("step_type", "task")
+                if step_type == "batch_loop" or ("task_ids" in step and "task_id" not in step):
+                    inner_steps, inner_removed = SQLiteManager._remove_task_from_steps(
+                        step.get("task_ids", []), target_task_id
+                    )
+                    if inner_removed:
+                        removed = True
+                    new_step = dict(step)
+                    new_step["task_ids"] = inner_steps
+                    cleaned.append(new_step)
+                elif step_type == "loop" or "body_steps" in step:
+                    inner_steps, inner_removed = SQLiteManager._remove_task_from_steps(
+                        step.get("body_steps", []), target_task_id
+                    )
+                    if inner_removed:
+                        removed = True
+                    new_step = dict(step)
+                    new_step["body_steps"] = inner_steps
+                    cleaned.append(new_step)
+                else:
+                    tid = int(step.get("task_id", 0) or 0)
+                    if tid == target_task_id:
+                        removed = True
+                    else:
+                        cleaned.append(step)
+            else:
+                try:
+                    tid = int(step)
+                except (ValueError, TypeError):
+                    cleaned.append(step)
+                    continue
+                if tid == target_task_id:
+                    removed = True
+                else:
+                    cleaned.append(step)
+        return cleaned, removed
+
     def delete_task(self, task_id: int) -> int:
         """
-        Deletes a task, removes it from any workflows, re-indexes remaining tasks,
-        and sets a warning flag on affected workflows.
+        Deletes a task, removes references to it from all workflows (including nested
+        batch_loop and loop blocks), and sets a warning flag on affected workflows
+        without mutating primary keys of remaining tasks.
         """
         task_id = int(task_id)
-        
-        # 1. Identify all workflows that contain this task and remove it
-        self.cursor.execute("SELECT id, task_ids_json FROM workflows")
-        workflows = self.cursor.fetchall()
-        
-        for wf in workflows:
-            try:
-                task_ids = json.loads(wf['task_ids_json'])
-            except (json.JSONDecodeError, TypeError):
-                task_ids = []
-                
-            # If the deleted task is in the workflow, remove it and set warning
-            def get_tid(t):
-                return int(t.get('task_id', 0)) if isinstance(t, dict) else int(t)
-
-            if any(get_tid(tid) == task_id for tid in task_ids):
-                new_task_ids = [tid for tid in task_ids if get_tid(tid) != task_id]
-                self.cursor.execute(
-                    "UPDATE workflows SET task_ids_json = ?, has_deletion_warning = 1 WHERE id = ?",
-                    (json.dumps(new_task_ids), wf['id'])
-                )
-
-        # 2. Delete the specific task from the tasks table
-        self.cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        
-        # 3. Re-index remaining tasks to ensure sequential IDs (1, 2, 3...)
-        self.cursor.execute("SELECT id FROM tasks ORDER BY id")
-        remaining_tasks = self.cursor.fetchall()
-        
-        if remaining_tasks:
-            # Create a mapping from OLD_ID to NEW_ID (1-based index)
-            mapping = {int(row['id']): i + 1 for i, row in enumerate(remaining_tasks)}
-            
-            # Use a temporary table to safely update task IDs without PK collisions
-            self.cursor.execute("CREATE TEMP TABLE tasks_backup AS SELECT * FROM tasks")
-            self.cursor.execute("DELETE FROM tasks")
-            
-            # Get column names to ensure we re-insert correctly
-            self.cursor.execute("PRAGMA table_info(tasks)")
-            columns = [col['name'] for col in self.cursor.fetchall()]
-            cols_str = ", ".join(columns)
-            placeholders = ", ".join(["?"] * len(columns))
-            
-            self.cursor.execute("SELECT * FROM tasks_backup ORDER BY id")
-            all_task_data = self.cursor.fetchall()
-            
-            for i, task_data in enumerate(all_task_data):
-                task_dict = dict(task_data)
-                task_dict['id'] = i + 1 # Assign new sequential ID
-                
-                vals = [task_dict[col] for col in columns]
-                self.cursor.execute(f"INSERT INTO tasks ({cols_str}) VALUES ({placeholders})", vals)
-            
-            self.cursor.execute("DROP TABLE tasks_backup")
-            
-            # 4. Update all workflows: apply the mapping AND remove any orphaned IDs
+        with self.lock:
             self.cursor.execute("SELECT id, task_ids_json FROM workflows")
-            current_workflows = self.cursor.fetchall()
-            for wf in current_workflows:
-                try:
-                    t_ids = json.loads(wf['task_ids_json'])
-                    # Filter: keep only IDs that still exist in our mapping, and update them
-                    new_t_ids = []
-                    for tid in t_ids:
-                        actual_tid = int(tid.get('task_id', 0)) if isinstance(tid, dict) else int(tid)
-                        if actual_tid in mapping:
-                            if isinstance(tid, dict):
-                                new_dict = dict(tid)
-                                new_dict['task_id'] = mapping[actual_tid]
-                                new_t_ids.append(new_dict)
-                            else:
-                                new_t_ids.append(mapping[actual_tid])
-                    
-                    self.cursor.execute("UPDATE workflows SET task_ids_json = ? WHERE id = ?", 
-                                        (json.dumps(new_t_ids), wf['id']))
-                except (json.JSONDecodeError, TypeError):
-                    continue
-            
-            # Reset SQLite autoincrement sequence
-            self.cursor.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'tasks'", (len(all_task_data),))
-        else:
-            # If no tasks left, reset sequence
-            self.cursor.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'tasks'")
+            workflows = self.cursor.fetchall()
 
-        self.conn.commit()
-        return 1
+            for wf in workflows:
+                try:
+                    task_ids = json.loads(wf['task_ids_json'])
+                except (json.JSONDecodeError, TypeError):
+                    task_ids = []
+
+                new_task_ids, was_removed = self._remove_task_from_steps(task_ids, task_id)
+                if was_removed:
+                    self.cursor.execute(
+                        "UPDATE workflows SET task_ids_json = ?, has_deletion_warning = 1 WHERE id = ?",
+                        (json.dumps(new_task_ids), wf['id'])
+                    )
+
+            self.cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            deleted_count = self.cursor.rowcount
+            self.conn.commit()
+            return deleted_count or 1
 
     def dismiss_workflow_warning(self, workflow_id: int) -> None:
         """Clears the deletion warning flag for a workflow."""
@@ -728,7 +785,9 @@ class SQLiteManager:
         sql = "INSERT INTO workflows (name, task_ids_json, expected_exports, requires_human_check, export_instructions, app_id, max_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)"
         self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str, app_id, max_tokens_int))
         self.conn.commit()
-        return self.cursor.lastrowid
+        new_id = self.cursor.lastrowid
+        self._gitops_snapshot("workflow", new_id, name, {"name": name, "task_ids": task_ids, "requires_human_check": requires_human_check, "expected_exports": expected_exports or [], "export_instructions": export_instructions_str, "max_tokens": max_tokens_int}, "Creato workflow")
+        return new_id
 
     def read_workflow(self, workflow_id: int) -> Optional[Dict[str, Any]]:
         sql = "SELECT * FROM workflows WHERE id = ?"
@@ -761,46 +820,21 @@ class SQLiteManager:
         """
         self.cursor.execute(sql, (name, task_ids_json, expected_exports_json, requires_human_check, export_instructions_str, max_tokens_int, workflow_id))
         self.conn.commit()
-        return self.cursor.rowcount
+        rows = self.cursor.rowcount
+        self._gitops_snapshot("workflow", workflow_id, name, {"name": name, "task_ids": task_ids, "requires_human_check": requires_human_check, "expected_exports": expected_exports or [], "export_instructions": export_instructions_str, "max_tokens": max_tokens_int}, "Aggiornato workflow")
+        return rows
 
     def delete_workflow(self, workflow_id: int) -> int:
         """
-        Deletes a workflow and re-indexes remaining workflows to ensure sequential IDs.
+        Deletes a workflow by ID without mutating primary keys of remaining workflows
+        (preserving workflow_runs foreign key integrity).
         """
         workflow_id = int(workflow_id)
-        self.cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
-        
-        # Re-index remaining workflows
-        self.cursor.execute("SELECT id FROM workflows ORDER BY id")
-        remaining = self.cursor.fetchall()
-        
-        if remaining:
-            # Temporary table strategy for safe ID updates
-            self.cursor.execute("CREATE TEMP TABLE workflows_backup AS SELECT * FROM workflows")
-            self.cursor.execute("DELETE FROM workflows")
-            
-            self.cursor.execute("PRAGMA table_info(workflows)")
-            columns = [col['name'] for col in self.cursor.fetchall()]
-            cols_str = ", ".join(columns)
-            placeholders = ", ".join(["?"] * len(columns))
-            
-            self.cursor.execute("SELECT * FROM workflows_backup ORDER BY id")
-            all_wf_data = self.cursor.fetchall()
-            
-            for i, wf_data in enumerate(all_wf_data):
-                wf_dict = dict(wf_data)
-                wf_dict['id'] = i + 1
-                
-                vals = [wf_dict[col] for col in columns]
-                self.cursor.execute(f"INSERT INTO workflows ({cols_str}) VALUES ({placeholders})", vals)
-            
-            self.cursor.execute("DROP TABLE workflows_backup")
-            self.cursor.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'workflows'", (len(all_wf_data),))
-        else:
-            self.cursor.execute("UPDATE sqlite_sequence SET seq = 0 WHERE name = 'workflows'")
-            
-        self.conn.commit()
-        return 1
+        with self.lock:
+            self.cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+            deleted_count = self.cursor.rowcount
+            self.conn.commit()
+            return deleted_count or 1
 
     # --- Context Memory CRUD ---
     def update_context(self, session_id: str, last_output: str, accumulated_context: str = "") -> None:

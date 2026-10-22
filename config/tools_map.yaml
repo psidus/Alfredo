@@ -9,6 +9,16 @@ tools_registry:
     description: "Allows agents to write files inside the agent's workspace/ folder. Overwrites existing files."
     required_secrets: []
 
+  edit_file_diff:
+    display_name: "Local: Surgical Edit File (Diff / Search & Replace)"
+    description: "Edits a specific section of a file inside workspace/ without overwriting the entire document (Cursor / Claude Code style)."
+    required_secrets: []
+
+  git_workspace_time_travel:
+    display_name: "Git: Workspace Time-Travel & Smart Diff"
+    description: "Automatic Git checkpoints, visual diffs (.docx/.xlsx/.md/.csv), and 1-step rollback for workspace files."
+    required_secrets: []
+
   write_python_file:
     display_name: "Code: Write Python File (Project)"
     description: "Allows agents to write .py scripts to the project. Use with caution."

@@ -223,6 +223,8 @@ ALLOWED_TOOLS = {
     "read_file": local_tools.read_file,
     "write_file": local_tools.write_file,
     "write_python_file": local_tools.write_python_file,
+    "edit_file_diff": local_tools.edit_file_diff,
+    "git_workspace_time_travel": local_tools.git_workspace_time_travel,
     # Full PC (read-only)
     "read_file_anywhere": local_tools.read_file_anywhere,
     "search_files": local_tools.search_files,
@@ -525,8 +527,7 @@ def _get_task_tools(tool_names, vector_dbs, strip_tools=False, app_record=None):
         for db_id in vector_dbs:
             try:
                 db_id_int = int(db_id)
-                db.cursor.execute("SELECT * FROM vector_databases WHERE id = %s", (db_id_int,))
-                vdb_record = db.cursor.fetchone()
+                vdb_record = db.read_vector_db(db_id_int) if hasattr(db, "read_vector_db") else None
                 if vdb_record:
                     tool_instance = VectorSearchTool(
                         name=f"search_db_{vdb_record['name']}",
@@ -1310,6 +1311,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             except Exception:
                 pass
 
+        from core.git_workspace import get_git_workspace
+        git_ws = get_git_workspace()
+        pre_step_sha = git_ws.get_head_sha()
+
         if _uses_scientific_search(task_record):
             task_out = _run_scientific_search(current_inputs)
         else:
@@ -1382,9 +1387,19 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
+        t_rec = db.read_task(task_id)
+        task_title = (t_rec.get("name") or t_rec.get("description", "")[:50]) if t_rec else f"Task {task_id}"
+        git_cp = git_ws.checkpoint_step(
+            run_id=run_id,
+            step_label=node_id or f"task_{task_id}",
+            agent_role=agent_role,
+            task_name=task_title,
+            pre_step_sha=pre_step_sha,
+        )
+
         filtered_tools = getattr(task_obj, "_alfredo_filtered_tools", None)
         if filtered_tools is None:
-            t_rec_tools = db.read_task(task_id)
+            t_rec_tools = t_rec
             filtered_tools = (t_rec_tools.get("tools") if t_rec_tools else []) or []
         handoff = enforce_node_handoff(
             memory_manager,
@@ -1398,7 +1413,6 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         with task_outputs_lock:
             handoffs.append(handoff)
 
-        t_rec = db.read_task(task_id)
         needs_hitl = bool(t_rec and t_rec.get('human_validation')) or (
             task_id is not None and int(task_id) in human_validation_task_ids
         )
@@ -1411,8 +1425,24 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 task_description=t_rec.get('description', ''), 
                 expected_output=t_rec.get('expected_output', '')
             )
+            if git_cp.get("committed"):
+                diff_preview = (git_cp.get("diff_text") or "")[:1200]
+                question += (
+                    f"\n\n📦 **[Git Smart Diff — Checkpoint `{git_cp.get('short_sha')}`]**\n"
+                    f"_{git_cp.get('summary')}_\n{diff_preview}"
+                )
+                options = list(options or [])
+                if "⏪ Annulla Modifiche File (Git Rollback)" not in options:
+                    options.append("⏪ Annulla Modifiche File (Git Rollback)")
+
             user_feedback = request_human_input(chat_id, question, options=options, task_id=f"task_{task_id}")
-            if user_feedback and user_feedback != "SYSTEM_ABORT":
+            if user_feedback == "SYSTEM_ABORT":
+                if git_cp.get("committed") and pre_step_sha:
+                    git_ws.rollback_to_commit(pre_step_sha, reason="Run abortita durante HITL")
+            elif user_feedback and "Git Rollback" in user_feedback and pre_step_sha:
+                rb_res = git_ws.rollback_to_commit(pre_step_sha, reason=f"HITL Rollback sullo step {node_id or task_id}")
+                task_out += f"\n\n[⏪ Git Rollback Eseguito: {rb_res.get('message', '')}]"
+            elif user_feedback and user_feedback != "SYSTEM_ABORT":
                 with task_outputs_lock:
                     if node_id:
                         task_outputs[f"__hitl_ok__{node_id}"] = True
@@ -1643,8 +1673,6 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     
                     batch_inputs = inputs.copy()
                     batch_inputs['current_batch'] = chunk_str
-                    
-                    memory_manager.clear_memory()
                     
                     try:
                         for b_idx, inner_task_id in enumerate(batch_tasks):
@@ -2058,10 +2086,12 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     vram_condition = threading.Condition(vram_lock)
     task_outputs_lock = threading.Lock()
     
-    def get_dynamic_task_vram_cost():
-        # Dynamic agents usually share the default model
-        if model_record and not supports_tools:
-            return float(model_record.get('vram_gb') or 0.0)
+    def get_dynamic_task_vram_cost(node_model_rec=None):
+        rec = node_model_rec or model_record
+        if rec:
+            is_local = bool(rec.get('is_local')) or str(rec.get('provider', '')).lower() in ('ollama', 'lmstudio', 'local')
+            if is_local:
+                return float(rec.get('vram_gb') or 0.0)
         return 0.0
 
     ready_queue = [n for n, deg in in_degree.items() if deg == 0 and n not in completed_nodes]
@@ -2266,6 +2296,10 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 except Exception:
                     pass
 
+            from core.git_workspace import get_git_workspace
+            git_ws = get_git_workspace()
+            pre_step_sha = git_ws.get_head_sha()
+
             if _uses_scientific_search(task_data):
                 task_out = _run_scientific_search(execution_context)
             else:
@@ -2317,12 +2351,32 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
             summary_text = f"Output of dynamic task {task_idx + 1} by agent '{effective_role}': {task_out[:500]}"
             memory_manager.write_record(key=key_name, content_summary=summary_text, structured_data={"raw_output": _cap_raw_output(task_out)}, agent_role=effective_role)
 
+            git_cp = git_ws.checkpoint_step(
+                run_id=run_id,
+                step_label=f"dynamic_task_{task_idx + 1}",
+                agent_role=effective_role,
+                task_name=task_data.get('name') or task_data.get('description', '')[:50],
+                pre_step_sha=pre_step_sha,
+            )
+
             if chat_id and task_data.get('human_validation'):
                 from core.master_ai import MasterAI
                 from core.human_in_the_loop import request_human_input
                 master_ai = MasterAI()
                 question, options = master_ai.format_validation_request(task_out, task_description=task_data.get('description', ''), expected_output=task_data.get('expected_output', ''))
+                if git_cp.get("committed"):
+                    diff_preview = (git_cp.get("diff_text") or "")[:1200]
+                    question += (
+                        f"\n\n📦 **[Git Smart Diff — Checkpoint `{git_cp.get('short_sha')}`]**\n"
+                        f"_{git_cp.get('summary')}_\n{diff_preview}"
+                    )
+                    options = list(options or [])
+                    if "⏪ Annulla Modifiche File (Git Rollback)" not in options:
+                        options.append("⏪ Annulla Modifiche File (Git Rollback)")
                 user_feedback = request_human_input(chat_id, question, options=options, task_id=f"dynamic_task_{task_idx}")
+                if user_feedback and "Git Rollback" in user_feedback and pre_step_sha:
+                    rb_res = git_ws.rollback_to_commit(pre_step_sha, reason=f"HITL Rollback su dynamic_task_{task_idx + 1}")
+                    task_out += f"\n\n[⏪ Git Rollback Eseguito: {rb_res.get('message', '')}]"
                 
                 if user_feedback and user_feedback != "SYSTEM_ABORT":
                     task_out = master_ai.process_validation_feedback(task_out, user_feedback)
