@@ -31,11 +31,19 @@ uvicorn[standard]>=0.34.0
 # PostgreSQL support for external app databases (optional)
 psycopg2-binary>=2.9.0
 
-# Dependencies for Scientific RAG
+# Dependencies for Scientific RAG & 360° AI Automation
 pdfplumber>=0.11.0
 opencv-python-headless>=4.9.0
 torchvision
 GitPython>=3.1.40
+beautifulsoup4>=4.12.0
+apscheduler>=3.10.0
+watchdog>=4.0.0
+mcp>=1.2.0
+instructor>=1.7.0
+crawl4ai>=0.4.0
+docling>=2.0.0
+mem0ai>=0.1.0
 
 # === Local Model Training (optional — GPU required) ===
 # Install these manually if you want to use the Local Training tab:

@@ -1137,15 +1137,23 @@ class MasterAI:
             
         logger.info(f"MasterAI Attempting Intent Evaluation with: {model_string}")
         try:
+            msgs = [
+                {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_prompt}"}
+            ]
             raw_output = self._call_llm_with_retry(
                 model=model_string,
-                messages=[
-                    {"role": "user", "content": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_prompt}"}
-                ]
+                messages=msgs,
             )
-            
-            clean_json = self._sanitize_json(raw_output)
-            result = json.loads(clean_json)
+
+            from core.structured_llm import validate_or_repair_json
+            result = validate_or_repair_json(
+                raw_output=raw_output,
+                sanitize_fn=self._sanitize_json,
+                llm_call_fn=self._call_llm_with_retry,
+                model=model_string,
+                original_messages=msgs,
+                max_repairs=2,
+            )
             
             # Post-process missing_inputs to include prompts from DB
             wf_id = result.get("workflow_id")

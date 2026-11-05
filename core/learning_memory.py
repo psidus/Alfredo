@@ -164,8 +164,25 @@ class LearningMemoryManager:
             A formatted string with the aggregated feedback, or an empty
             string if nothing relevant was found.
         """
+        relevant: List[str] = []
+        try:
+            from core.long_term_memory import get_long_term_memory
+            ltm_facts = get_long_term_memory().search_facts(query=task_description, limit=5)
+            for item in ltm_facts:
+                relevant.append(f"[Long-Term {item.get('category', 'fact').upper()}]: {item.get('fact')}")
+        except Exception:
+            pass
+
         if not self.vector_store:
-            return ""
+            if not relevant:
+                return ""
+            feedback_block = "\n".join(f"  - {item}" for item in relevant)
+            return (
+                "\n\n=== PREVIOUS LEARNINGS & FEEDBACK ===\n"
+                "In past executions, the following corrections/preferences were noted:\n"
+                f"{feedback_block}\n"
+                "=== END LEARNINGS ===\n"
+            )
 
         try:
             results = self.vector_store.similarity_search_with_relevance_scores(
@@ -173,11 +190,7 @@ class LearningMemoryManager:
                 k=top_k,
             )
 
-            if not results:
-                return ""
-
-            relevant = []
-            for doc, score in results:
+            for doc, score in (results or []):
                 if score >= min_relevance_score:
                     feedback = doc.metadata.get("feedback", doc.page_content)
                     workflow = doc.metadata.get("workflow_name", "Unknown")

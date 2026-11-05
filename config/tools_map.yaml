@@ -53,6 +53,41 @@ tools_registry:
     description: "Performs free web searches via DuckDuckGo."
     required_secrets: []
 
+  crawl_webpage_markdown:
+    display_name: "Web: Crawl4AI Full Page to Markdown"
+    description: "Extracts full webpage content, articles, and tables into clean Markdown using Crawl4AI."
+    required_secrets: []
+
+  automate_browser_task:
+    display_name: "Web: Browser Automation (Playwright / Browser-Use)"
+    description: "Automates headless browser actions (click, fill forms, wait, screenshot/PDF, extract DOM)."
+    required_secrets: []
+
+  parse_complex_document:
+    display_name: "Docs: Docling Complex Document & Table Parser"
+    description: "Converts complex PDFs, Word, PowerPoint, and Excel tables into structured Markdown using IBM Docling."
+    required_secrets: []
+
+  mcp_list_tools:
+    display_name: "MCP: Discover External Server Tools"
+    description: "Lists all tools exposed by active Model Context Protocol (MCP) servers."
+    required_secrets: []
+
+  mcp_call_tool:
+    display_name: "MCP: Call External Server Tool"
+    description: "Executes any tool on a connected MCP server (Drive, Notion, GitHub, SQLite, Home Assistant, etc.)."
+    required_secrets: []
+
+  remember_long_term_fact:
+    display_name: "Memory: Save Long-Term Fact (Mem0)"
+    description: "Stores permanent user preferences, project rules, or entities into persistent long-term memory."
+    required_secrets: []
+
+  recall_long_term_facts:
+    display_name: "Memory: Recall Long-Term Facts (Mem0)"
+    description: "Retrieves persistent user preferences, rules, and facts across sessions."
+    required_secrets: []
+
   search_scientific_literature:
     display_name: "Research: Crossref Scientific Literature"
     description: "Searches verified academic publications, preprints, and journals with DOIs via Crossref."

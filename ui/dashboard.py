@@ -4901,228 +4901,264 @@ def render_tool_factory():
 
 
 def render_history_monitoring():
-    """Renders Tab 5: Workflow Run History."""
+    """Renders Tab 5: Workflow Run History & 360° Automation Control Center (Minimal UI)."""
     db = get_db_manager()
-    st.header("History & Monitoring")
-    st.markdown("Track the execution status and results of your workflows.")
+    try:
+        from core.automation_scheduler import get_automation_engine
+        auto_engine = get_automation_engine()
+    except Exception:
+        auto_engine = None
 
-    col1, col2, col3 = st.columns([1, 1, 4])
-    with col1:
-        if st.button("🗑️ Clear All History", type="primary", use_container_width=True):
-            count = db.clear_all_runs()
-            st.toast(f"History cleared! ({count} runs removed)", icon="🗑️")
-            st.rerun()
-    with col2:
-        if st.button("🧹 Clear Completed", type="secondary", use_container_width=True):
-            runs_to_del = [r for r in db.read_all_runs() if r['status'] == 'completed']
-            for r in runs_to_del:
-                db.delete_run(r['id'])
-            st.toast(f"Cleared {len(runs_to_del)} completed runs!", icon="🧹")
-            st.rerun()
-    with col3:
-        if st.button("🔄 Refresh Live Status", type="secondary"):
-            st.rerun()
-            
-    auto_delete = st.checkbox("🧹 Auto-delete completed runs (keeps only failed/running)", value=False)
-
-    runs = db.read_all_runs(limit=50)
+    st.header("History & Automation Hub")
     workflows = db.read_all_workflows()
     wf_map = {wf['id']: wf['name'] for wf in workflows}
 
-    if not runs:
-        st.info("No workflow runs recorded yet.")
-        return
+    tab_runs, tab_auto, tab_mcp_mem, tab_git = st.tabs([
+        "📋 Run History",
+        "⏰ Triggers & Watchdog",
+        "🔌 MCP & Memory",
+        "⏱️ Git Rollback",
+    ])
 
-    valid_runs = []
-    for run in runs:
-        if auto_delete and run['status'] == 'completed':
-            db.delete_run(run['id'])
-            continue
-        valid_runs.append(run)
+    with tab_runs:
+        col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 2.4])
+        with col1:
+            if st.button("🗑️ Clear All", type="primary", use_container_width=True):
+                count = db.clear_all_runs()
+                st.toast(f"Removed {count} runs", icon="🗑️")
+                st.rerun()
+        with col2:
+            if st.button("🧹 Clear Done", type="secondary", use_container_width=True):
+                runs_to_del = [r for r in db.read_all_runs() if r['status'] == 'completed']
+                for r in runs_to_del:
+                    db.delete_run(r['id'])
+                st.toast(f"Cleared {len(runs_to_del)} completed runs", icon="🧹")
+                st.rerun()
+        with col3:
+            if st.button("🔄 Refresh", type="secondary", use_container_width=True):
+                st.rerun()
+        with col4:
+            auto_delete = st.checkbox("Auto-clean completed", value=False)
 
-    if not valid_runs:
-        st.info("No workflow runs recorded yet.")
-        return
+        runs = db.read_all_runs(limit=50)
+        valid_runs = []
+        for run in (runs or []):
+            if auto_delete and run['status'] == 'completed':
+                db.delete_run(run['id'])
+                continue
+            valid_runs.append(run)
 
-    import datetime
-    today_prefix = datetime.date.today().isoformat()
-    today_runs = [r for r in valid_runs if str(r.get('started_at', '')).startswith(today_prefix)]
-    older_runs = [r for r in valid_runs if not str(r.get('started_at', '')).startswith(today_prefix)]
-
-    def _render_run_card(run):
-        wf_name = wf_map.get(run['workflow_id'], f"Workflow {run['workflow_id']}")
-        status = run['status']
-        
-        status_colors = {
-            'running': '🔵 Running',
-            'completed': '🟢 Completed',
-            'failed': '🔴 Failed',
-            'stopped': '⏹️ Stopped'
-        }
-        status_display = status_colors.get(status, status)
-
-        # Extract topic/user input snippet for the expander title
-        topic_snippet = ""
-        inputs_val = run.get('inputs')
-        if inputs_val:
-            if isinstance(inputs_val, str):
-                try:
-                    inputs_dict = json.loads(inputs_val)
-                except Exception:
-                    inputs_dict = {}
-            else:
-                inputs_dict = inputs_val or {}
-            raw_topic = inputs_dict.get('topic') or inputs_dict.get('idea') or inputs_dict.get('user_input')
-            if raw_topic:
-                raw_topic = str(raw_topic).strip()
-                topic_snippet = f" | 🎯 {raw_topic[:35]}..." if len(raw_topic) > 35 else f" | 🎯 {raw_topic}"
-
-        started_str = str(run.get('started_at') or '')
-        date_badge = "📅 Today" if started_str.startswith(today_prefix) else f"🗓️ {started_str.split(' ')[0]}"
-        time_part = started_str.split(' ')[-1][:8] if ' ' in started_str else started_str
-
-        expander_title = f"{status_display} | {wf_name}{topic_snippet} | {date_badge} {time_part}"
-        
-        with st.expander(expander_title):
-            col_data, col_actions = st.columns([8, 1])
-            with col_data:
-                st.markdown(f"**Started At:** {run['started_at']}")
-                if run['finished_at']:
-                    st.markdown(f"**Finished At:** {run['finished_at']}")
-                if run.get('source'):
-                    st.caption(f"Source: `{run['source']}`")
-                
-                if status == 'running':
-                    in_flight_json = run.get('in_flight_tasks')
-                    if in_flight_json and in_flight_json != '[]':
-                        import json
-                        try:
-                            in_flight_list = json.loads(in_flight_json)
-                            if len(in_flight_list) > 1:
-                                tasks_str = ", ".join(in_flight_list)
-                                st.info(f"⏳ **In Progress:** {len(in_flight_list)} Agents running in parallel ({tasks_str})")
-                            elif len(in_flight_list) == 1:
-                                st.info(f"⏳ **In Progress:** Executing {in_flight_list[0]}")
-                        except Exception:
-                            current_idx = run.get('current_task_idx', 0)
-                            st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
-                    else:
-                        current_idx = run.get('current_task_idx', 0)
-                        st.info(f"⏳ **In Progress:** Executing Step {current_idx + 1}")
-
-                st.markdown("**Result / Error:**")
-                if run['result']:
-                    st.code(run['result'], language=None)
-                else:
-                    st.write("No output yet.")
-            
-            with col_actions:
-                if status in ['failed', 'running']:
-                    if st.button("🔄", key=f"res_run_{run['id']}", help="Resume this run"):
-                        with st.spinner("Resuming execution..."):
-                            try:
-                                from core.crew_builder import execute_run_with_resume
-                                last_output, global_context = execute_run_with_resume(run['id'])
-                                db.update_run(run['id'], status='completed', result=last_output)
-                                st.toast("Run resumed and completed successfully!", icon="✅")
-                                st.rerun()
-                            except Exception as e:
-                                db.update_run(run['id'], status='failed', result=str(e))
-                                st.toast(f"Failed to resume run: {e}", icon="❌")
-                                st.rerun()
-                if status == 'running':
-                    if st.button("🛑", key=f"stop_run_{run['id']}", help="Stop this run"):
-                        db.update_run(run['id'], status='stopped')
-                        st.toast("Run stopped", icon="🛑")
-                        st.rerun()
-                        
-                if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete this run"):
-                    db.delete_run(run['id'])
-                    st.toast(f"Run {run['id']} deleted")
-                    st.rerun()
-
-    if today_runs:
-        st.subheader(f"⚡ Today's Executions ({len(today_runs)})")
-        for run in today_runs:
-            _render_run_card(run)
-
-    if older_runs:
-        st.subheader(f"📁 Past History ({len(older_runs)})")
-        for run in older_runs:
-            _render_run_card(run)
-
-    st.divider()
-    st.subheader("⏱️ Git Workspace Time-Travel & Audit (Zero-Code)")
-    st.caption(
-        "Ogni step dei workflow e ogni modifica a Agenti/Workflow viene salvata automaticamente in un repository Git locale (`workspace/`). "
-        "Puoi ispezionare i diff visuali (anche su Word/Excel/CSV) e ripristinare il workspace a qualsiasi punto nel tempo con un click."
-    )
-    try:
-        from core.git_workspace import get_git_workspace
-        git_ws = get_git_workspace()
-        if not git_ws.enabled:
-            st.warning("GitPython non disponibile in questo ambiente.")
+        if not valid_runs:
+            st.info("No workflow runs recorded yet.")
         else:
-            col_gt1, col_gt2, col_gt3 = st.columns([3, 2, 1])
-            with col_gt1:
-                manual_msg = st.text_input(
-                    "Nota Checkpoint Manuale",
-                    placeholder="Es. Prima di lanciare il nuovo test...",
-                    key="git_manual_cp_msg",
+            import datetime
+            today_prefix = datetime.date.today().isoformat()
+            today_runs = [r for r in valid_runs if str(r.get('started_at', '')).startswith(today_prefix)]
+            older_runs = [r for r in valid_runs if not str(r.get('started_at', '')).startswith(today_prefix)]
+
+            def _render_run_card(run):
+                wf_name = wf_map.get(run['workflow_id'], f"Workflow {run['workflow_id']}")
+                status = run['status']
+                status_colors = {
+                    'running': '🔵 Running',
+                    'completed': '🟢 Completed',
+                    'failed': '🔴 Failed',
+                    'stopped': '⏹️ Stopped',
+                }
+                status_display = status_colors.get(status, status)
+
+                topic_snippet = ""
+                inputs_val = run.get('inputs')
+                if inputs_val:
+                    if isinstance(inputs_val, str):
+                        try:
+                            inputs_dict = json.loads(inputs_val)
+                        except Exception:
+                            inputs_dict = {}
+                    else:
+                        inputs_dict = inputs_val or {}
+                    raw_topic = inputs_dict.get('topic') or inputs_dict.get('idea') or inputs_dict.get('user_input')
+                    if raw_topic:
+                        raw_topic = str(raw_topic).strip()
+                        topic_snippet = f" | 🎯 {raw_topic[:35]}..." if len(raw_topic) > 35 else f" | 🎯 {raw_topic}"
+
+                started_str = str(run.get('started_at') or '')
+                date_badge = "📅 Today" if started_str.startswith(today_prefix) else f"🗓️ {started_str.split(' ')[0]}"
+                time_part = started_str.split(' ')[-1][:8] if ' ' in started_str else started_str
+
+                with st.expander(f"{status_display} | {wf_name}{topic_snippet} | {date_badge} {time_part}"):
+                    col_data, col_actions = st.columns([8, 1])
+                    with col_data:
+                        st.caption(f"Started: `{run['started_at']}` | Finished: `{run.get('finished_at') or '—'}` | Source: `{run.get('source', 'manual')}`")
+                        if status == 'running':
+                            in_flight_json = run.get('in_flight_tasks')
+                            if in_flight_json and in_flight_json != '[]':
+                                try:
+                                    in_flight_list = json.loads(in_flight_json)
+                                    st.info(f"⏳ Executing: {', '.join(in_flight_list)}")
+                                except Exception:
+                                    st.info(f"⏳ Step {run.get('current_task_idx', 0) + 1}")
+                            else:
+                                st.info(f"⏳ Step {run.get('current_task_idx', 0) + 1}")
+                        if run.get('result'):
+                            st.code(run['result'], language=None)
+                    with col_actions:
+                        if status in ['failed', 'running']:
+                            if st.button("🔄", key=f"res_run_{run['id']}", help="Resume"):
+                                with st.spinner("Resuming..."):
+                                    try:
+                                        from core.crew_builder import execute_run_with_resume
+                                        last_output, _ = execute_run_with_resume(run['id'])
+                                        db.update_run(run['id'], status='completed', result=last_output)
+                                        st.rerun()
+                                    except Exception as e:
+                                        db.update_run(run['id'], status='failed', result=str(e))
+                                        st.rerun()
+                        if status == 'running':
+                            if st.button("🛑", key=f"stop_run_{run['id']}", help="Stop"):
+                                db.update_run(run['id'], status='stopped')
+                                st.rerun()
+                        if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete"):
+                            db.delete_run(run['id'])
+                            st.rerun()
+
+            if today_runs:
+                st.caption(f"⚡ Today ({len(today_runs)})")
+                for run in today_runs:
+                    _render_run_card(run)
+            if older_runs:
+                st.caption(f"📁 Archive ({len(older_runs)})")
+                for run in older_runs:
+                    _render_run_card(run)
+
+    with tab_auto:
+        if not auto_engine:
+            st.warning("AutomationEngine unavailable.")
+        elif not workflows:
+            st.info("Create at least one Workflow first to configure automated triggers.")
+        else:
+            wf_choices = {f"{w['name']} (#{w['id']})": w['id'] for w in workflows}
+            with st.container(border=True):
+                c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 2.5, 1])
+                rule_name = c1.text_input("Name", placeholder="Auto Inbox PDF", key="au_name", label_visibility="collapsed")
+                sel_wf = c2.selectbox("Workflow", list(wf_choices.keys()), key="au_wf", label_visibility="collapsed")
+                trig_type = c3.selectbox("Type", ["folder_watch", "daily", "interval"], key="au_type", label_visibility="collapsed")
+                param_val = c4.text_input(
+                    "Param",
+                    value="workspace/inbox" if trig_type == "folder_watch" else ("08:00" if trig_type == "daily" else "60"),
+                    help="Folder path (folder_watch), HH:MM (daily), or minutes (interval)",
+                    key="au_param",
                     label_visibility="collapsed",
                 )
-            with col_gt2:
-                show_gitops = st.checkbox("Mostra anche versioni Agenti/Workflow (GitOps)", value=True, key="git_show_gitops")
-            with col_gt3:
-                if st.button("📸 Crea Checkpoint", key="btn_git_manual_cp", use_container_width=True):
-                    cp_res = git_ws.checkpoint_step(
-                        run_id=None,
-                        step_label="Manual-UI",
-                        agent_role="Operator",
-                        task_name=manual_msg or "Checkpoint manuale da Dashboard",
+                if c5.button("➕ Add", key="au_add_btn", type="primary", use_container_width=True):
+                    auto_engine.add_rule(
+                        name=rule_name or f"{trig_type}_{wf_choices[sel_wf]}",
+                        workflow_id=wf_choices[sel_wf],
+                        trigger_type=trig_type,
+                        interval_minutes=int(param_val) if (trig_type == "interval" and param_val.isdigit()) else 60,
+                        daily_time=param_val if trig_type == "daily" else "08:00",
+                        watch_folder=param_val if trig_type == "folder_watch" else "",
                     )
-                    if cp_res.get("committed"):
-                        st.toast(f"Checkpoint creato: {cp_res.get('short_sha')}", icon="✅")
+                    st.rerun()
+
+            rules = auto_engine.load_rules()
+            if not rules:
+                st.caption("No active automation triggers.")
+            for r in rules:
+                rc1, rc2, rc3, rc4 = st.columns([3, 3, 1, 1])
+                badge = "🟢" if r.get("enabled", True) else "⚪"
+                wf_lbl = wf_map.get(r.get("workflow_id"), f"#{r.get('workflow_id')}")
+                detail = (
+                    f"📂 `{r.get('watch_folder')}`"
+                    if r.get("trigger_type") == "folder_watch"
+                    else (f"🕒 `{r.get('daily_time')}`" if r.get("trigger_type") == "daily" else f"⏱️ `{r.get('interval_minutes')}m`")
+                )
+                rc1.markdown(f"{badge} **{r.get('name')}** → `{wf_lbl}`")
+                rc2.caption(f"{detail} | Last: `{r.get('last_triggered') or 'never'}`")
+                if rc3.button("⏯️", key=f"au_tog_{r['id']}", use_container_width=True):
+                    auto_engine.toggle_rule(r["id"], not r.get("enabled", True))
+                    st.rerun()
+                if rc4.button("🗑️", key=f"au_del_{r['id']}", use_container_width=True):
+                    auto_engine.delete_rule(r["id"])
+                    st.rerun()
+
+    with tab_mcp_mem:
+        col_mcp, col_mem = st.columns(2)
+        with col_mcp:
+            st.markdown("##### 🔌 MCP Servers")
+            from core.mcp_client import get_mcp_manager
+            mcp_mgr = get_mcp_manager()
+            with st.container(border=True):
+                m1, m2, m3 = st.columns([1.5, 2.5, 1])
+                s_name = m1.text_input("Server ID", placeholder="sqlite_local", key="mcp_id", label_visibility="collapsed")
+                s_cmd = m2.text_input("Cmd + Args", placeholder="uvx mcp-server-fetch", key="mcp_cmd", label_visibility="collapsed")
+                if m3.button("➕ MCP", key="mcp_add", use_container_width=True):
+                    if s_name and s_cmd:
+                        parts = s_cmd.strip().split()
+                        mcp_mgr.upsert_server(s_name, parts[0], parts[1:], enabled=True)
                         st.rerun()
-                    else:
-                        st.toast("Nessuna nuova modifica nei file del workspace.", icon="ℹ️")
+            for s_key, s_cfg in mcp_mgr.load_servers().items():
+                mc1, mc2, mc3 = st.columns([3.5, 1, 1])
+                icon = "🟢" if s_cfg.get("enabled") else "⚪"
+                cmd_preview = f"{s_cfg.get('command', '')} {' '.join(str(x) for x in (s_cfg.get('args') or [])[:2])}"
+                mc1.markdown(f"{icon} **{s_key}** · `{cmd_preview[:38]}`")
+                if mc2.button("⏯️", key=f"mcp_tog_{s_key}", use_container_width=True):
+                    mcp_mgr.toggle_server(s_key, not s_cfg.get("enabled"))
+                    st.rerun()
+                if mc3.button("🗑️", key=f"mcp_del_{s_key}", use_container_width=True):
+                    mcp_mgr.delete_server(s_key)
+                    st.rerun()
 
-            live_diff = git_ws.get_smart_diff()
-            if live_diff.get("has_changes"):
-                with st.expander(f"🟡 Modifiche non ancora archiviate ({live_diff.get('summary')})", expanded=False):
-                    st.markdown(live_diff.get("diff_text") or "")
+        with col_mem:
+            st.markdown("##### 🧠 Long-Term Memory (Mem0)")
+            from core.long_term_memory import get_long_term_memory
+            ltm = get_long_term_memory()
+            with st.container(border=True):
+                f1, f2, f3 = st.columns([2.8, 1.2, 1])
+                new_fact = f1.text_input("Fact / Rule", placeholder="Usa sempre formato EUR e lingua IT", key="ltm_fact", label_visibility="collapsed")
+                new_cat = f2.selectbox("Cat", ["preference", "rule", "project"], key="ltm_cat", label_visibility="collapsed")
+                if f3.button("➕ Save", key="ltm_add", use_container_width=True):
+                    if new_fact.strip():
+                        ltm.add_fact(new_fact.strip(), category=new_cat, source="ui")
+                        st.rerun()
+            for item in ltm.list_all()[:15]:
+                fc1, fc2 = st.columns([5, 1])
+                fc1.caption(f"**[{item.get('category', '').upper()}]** {item.get('fact')}")
+                if fc2.button("🗑️", key=f"ltm_del_{item['id']}", use_container_width=True):
+                    ltm.delete_fact(item["id"])
+                    st.rerun()
 
-            checkpoints = git_ws.list_checkpoints(limit=25, include_gitops=show_gitops)
-            if not checkpoints:
-                st.info("Nessun checkpoint registrato finora.")
+    with tab_git:
+        try:
+            from core.git_workspace import get_git_workspace
+            git_ws = get_git_workspace()
+            if not git_ws.enabled:
+                st.warning("GitPython unavailable.")
             else:
-                for idx_cp, cp in enumerate(checkpoints):
-                    sha = cp["sha"]
+                g1, g2, g3 = st.columns([3.5, 1.5, 1])
+                manual_msg = g1.text_input("Note", placeholder="Checkpoint note...", key="git_manual_cp_msg", label_visibility="collapsed")
+                show_gitops = g2.checkbox("Include GitOps", value=True, key="git_show_gitops")
+                if g3.button("📸 Snapshot", key="btn_git_manual_cp", type="primary", use_container_width=True):
+                    cp_res = git_ws.checkpoint_step(None, "Manual-UI", "Operator", manual_msg or "Manual snapshot")
+                    st.toast(f"Saved: {cp_res.get('short_sha')}" if cp_res.get("committed") else "No changes", icon="✅")
+                    st.rerun()
+
+                live_diff = git_ws.get_smart_diff()
+                if live_diff.get("has_changes"):
+                    with st.expander(f"🟡 Uncommitted changes ({live_diff.get('summary')})", expanded=False):
+                        st.markdown(live_diff.get("diff_text") or "")
+
+                for idx_cp, cp in enumerate(git_ws.list_checkpoints(limit=20, include_gitops=show_gitops)):
                     short_sha = cp["short_sha"]
-                    files_badge = f" | 📄 {len(cp['changed_files'])} file" if cp.get("changed_files") else ""
-                    cp_title = f"🔖 `{short_sha}` | {cp['title']}{files_badge} | 🕒 {cp['timestamp']}"
-                    with st.expander(cp_title, expanded=(idx_cp == 0)):
-                        c_info, c_btn = st.columns([5, 2])
-                        with c_info:
-                            if cp.get("summary"):
-                                st.markdown(f"**Riepilogo:** {cp['summary']}")
-                            if cp.get("changed_files"):
-                                st.caption("File toccati: " + ", ".join(f"`{f}`" for f in cp["changed_files"][:10]))
-                        with c_btn:
-                            if st.button(
-                                "⏪ Ripristina qui",
-                                key=f"rb_btn_{short_sha}_{idx_cp}",
-                                help="Ripristina i file del workspace esattamente a questo checkpoint (salvando prima un backup automatico)",
-                                use_container_width=True,
-                            ):
-                                rb = git_ws.rollback_to_commit(sha, reason=f"Rollback da Dashboard a {short_sha}")
-                                if rb.get("success"):
-                                    st.toast(rb.get("message", "Rollback completato!"), icon="⏪")
-                                    st.rerun()
-                                else:
-                                    st.error(rb.get("error", "Errore durante il rollback."))
-    except Exception as e:
-        st.error(f"Errore caricamento Git Time-Travel: {e}")
+                    c_row1, c_row2 = st.columns([5.5, 1])
+                    files_str = f" · 📄 {', '.join(cp['changed_files'][:3])}" if cp.get("changed_files") else ""
+                    c_row1.markdown(f"`{short_sha}` **{cp['title']}** <small>({cp['timestamp']}{files_str})</small>", unsafe_allow_html=True)
+                    if c_row2.button("⏪ Restore", key=f"rb_btn_{short_sha}_{idx_cp}", use_container_width=True):
+                        rb = git_ws.rollback_to_commit(cp["sha"], reason=f"UI Rollback to {short_sha}")
+                        st.toast(rb.get("message", "Restored!"), icon="⏪")
+                        st.rerun()
+        except Exception as e:
+            st.error(f"Git Rollback error: {e}")
 
 
 def render_local_training():

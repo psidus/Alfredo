@@ -108,7 +108,7 @@ pip install unsloth torch trl peft bitsandbytes accelerate datasets transformers
 ```
 
 > [!NOTE]
-> Queste dipendenze **non sono incluse** nel `requirements.txt` principale perché richiedono una GPU compatibile. Sono documentate come commento nel file [requirements.txt](file:///c:/Users/pietr/OneDrive/Documenti/GitHub/Alfredo/requirements.txt#L39-L43).
+> Queste dipendenze **non sono incluse** nel `requirements.txt` principale perché richiedono una GPU compatibile. Sono documentate come commento nel file [requirements.txt](file:///C:/dev/Alfredo/requirements.txt#L39-L43).
 
 ### Variabili ambiente (opzionali)
 
@@ -269,9 +269,9 @@ graph LR
 
 | File | Cosa fa |
 |---|---|
-| [bot.py](file:///c:/Users/pietr/OneDrive/Documenti/GitHub/Alfredo/bot.py#L1347-L1368) | Salva il feedback dell'utente ricevuto via Telegram |
-| [crew_builder.py](file:///c:/Users/pietr/OneDrive/Documenti/GitHub/Alfredo/core/crew_builder.py#L605-L614) | Cerca feedback simili e li inietta nei task description |
-| [learning_memory.py](file:///c:/Users/pietr/OneDrive/Documenti/GitHub/Alfredo/core/learning_memory.py) | Il manager del vector store ChromaDB |
+| [bot.py](file:///C:/dev/Alfredo/bot.py#L1347-L1368) | Salva il feedback dell'utente ricevuto via Telegram |
+| [crew_builder.py](file:///C:/dev/Alfredo/core/crew_builder.py#L605-L614) | Cerca feedback simili e li inietta nei task description |
+| [learning_memory.py](file:///C:/dev/Alfredo/core/learning_memory.py) | Il manager del vector store ChromaDB |
 
 ### Differenza chiave
 

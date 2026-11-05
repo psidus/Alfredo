@@ -96,6 +96,10 @@ import tools.thermo_excel_writer as thermo_excel_writer
 import tools.vector_pagination_tool as vector_pagination_tool
 import tools.thermo_excel_reader as thermo_excel_reader
 import tools.workflow_trigger_tool as workflow_trigger_tool
+import tools.web_automation_tool as web_automation_tool
+from core.mcp_client import mcp_list_tools, mcp_call_tool
+from core.docling_parser import parse_complex_document
+from core.long_term_memory import remember_long_term_fact, recall_long_term_facts
 from tools.ephemeral_memory_tool import ReadAtomicMemoryTool, WriteAtomicMemoryTool
 from core.schema_loader import get_schema_class
 
@@ -230,8 +234,16 @@ ALLOWED_TOOLS = {
     "search_files": local_tools.search_files,
     # Web & communication
     "search_web": local_tools.search_web,
+    "crawl_webpage_markdown": web_automation_tool.crawl_webpage_markdown,
+    "automate_browser_task": web_automation_tool.automate_browser_task,
     "search_scientific_literature": local_tools.search_scientific_literature,
     "ask_operator": local_tools.ask_operator,
+    # Document Intelligence (Docling) & MCP & Long-Term Memory (Mem0)
+    "parse_complex_document": parse_complex_document,
+    "mcp_list_tools": mcp_list_tools,
+    "mcp_call_tool": mcp_call_tool,
+    "remember_long_term_fact": remember_long_term_fact,
+    "recall_long_term_facts": recall_long_term_facts,
     # Terminal
     "execute_shell_command": terminal_executor.execute_shell_command,
     # Office & Screenshot (Word/Excel generation requires human confirmation & sandboxing)
