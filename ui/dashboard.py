@@ -1194,7 +1194,7 @@ def render_api_vault():
                     default_master_index = idx
                     break
             
-        col_master_model, col_master_save = st.columns([4, 1])
+        col_master_model, col_master_save = st.columns([4, 1], vertical_alignment="bottom")
         with col_master_model:
             selected_master_model_str = st.selectbox(
                 "Select Model for Master AI (System Orchestrator)", 
@@ -1204,8 +1204,6 @@ def render_api_vault():
                 help="Select the model that Master AI will use for routing intents and refining agent output."
             )
         with col_master_save:
-            st.write("") # Spacer
-            st.write("") # Spacer
             if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
                 if selected_master_model_str:
                     chosen_model_name = selected_master_model_str.split(" / ", 1)[-1]
@@ -1222,7 +1220,7 @@ def render_api_vault():
                     default_agent_index = idx
                     break
             
-        col_agent_model, col_agent_save = st.columns([4, 1])
+        col_agent_model, col_agent_save = st.columns([4, 1], vertical_alignment="bottom")
         with col_agent_model:
             selected_default_agent_model_str = st.selectbox(
                 "Select Default Model for Agents", 
@@ -1232,8 +1230,6 @@ def render_api_vault():
                 help="Select the default model that all agents will use if a task doesn't override it."
             )
         with col_agent_save:
-            st.write("") # Spacer
-            st.write("") # Spacer
             if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
                 if selected_default_agent_model_str:
                     chosen_agent_model_name = selected_default_agent_model_str.split(" / ", 1)[-1]

@@ -115,215 +115,171 @@ def render_canvas_palette_and_board(
     if "wf_loop_select_ids" not in st.session_state:
         st.session_state.wf_loop_select_ids = []
 
-    left, right = st.columns([1, 3])
+    # Determine active block selection
+    selected = getattr(st.session_state.get("wf_flow_state"), "selected_id", None)
+    if not selected:
+        selected = st.session_state.get("canvas_selected_node")
+    user_picked = st.session_state.get("canvas_inspect_pick")
+    if user_picked and user_picked != "—":
+        selected = user_picked
+
+    left, right = st.columns([1.15, 2.35], gap="medium")
 
     with left:
-        st.markdown("### Palette")
-        st.caption(
-            "1) Add **Level** columns · 2) Drop blocks inside · "
-            "3) Resize borders · 4) Loop-select to frame a group"
+        insp_badge = f"🔍 Inspector ({selected})" if selected else "🔍 Inspector"
+        tab_palette, tab_inspector, tab_loop, tab_actions = st.tabs(
+            ["🧱 Palette", insp_badge, "🔁 Loop Frame", "⚙️ Actions"]
         )
 
-        add_kind = st.selectbox(
-            "Add block",
-            ["Level", "Task", "Batch", "HITL", "Export", "Input", "LLM", "Tool", "Router"],
-            key="canvas_add_kind",
-        )
+        with tab_palette:
+            st.markdown("#### Add Block")
+            st.caption(
+                "1) Add **Level** columns · 2) Drop blocks inside · "
+                "3) Resize borders · 4) Wire data between dots"
+            )
+            add_kind = st.selectbox(
+                "Add block",
+                ["Level", "Task", "Batch", "HITL", "Export", "Input", "LLM", "Tool", "Router"],
+                key="canvas_add_kind",
+            )
 
-        if add_kind == "Level":
-            nxt = next_level_number(st.session_state.wf_selected_task_ids)
-            st.write(f"Next level number: **{nxt}**")
-            if st.button("Add Level column", key="canvas_btn_level"):
-                st.session_state.wf_selected_task_ids.append(make_level_node(nxt))
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
+            if add_kind == "Level":
+                nxt = next_level_number(st.session_state.wf_selected_task_ids)
+                st.write(f"Next level number: **{nxt}**")
+                if st.button("Add Level column", key="canvas_btn_level"):
+                    st.session_state.wf_selected_task_ids.append(make_level_node(nxt))
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
 
-        elif add_kind == "Task":
-            if agents:
-                a_opts = {f"{a['name']} — {a['role']}": a["id"] for a in agents}
-                a_lab = st.selectbox("Agent", list(a_opts.keys()), key="canvas_add_agent")
-                atasks = tasks_by_agent.get(a_opts[a_lab], [])
-                if atasks:
-                    t_opts = {
-                        f"{t.get('name') or t['id']}: {(t.get('description') or '')[:40]}": t["id"]
-                        for t in atasks
-                    }
-                    t_lab = st.selectbox("Task", list(t_opts.keys()), key="canvas_add_task")
-                    lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-                    if st.button("Add Task to canvas", key="canvas_btn_task"):
-                        g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                        g.append({
-                            "id": new_node_id(),
-                            "type": NODE_TYPE_TASK,
-                            "task_id": t_opts[t_lab],
-                            "depends_on": [],
-                            "execution_level": lvl,
-                            "model_tier": "default",
-                            "inputs_map": {},
-                        })
-                        st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                            g, task_id_map=task_id_map
-                        )
-                        st.session_state.pop("wf_flow_state", None)
-                        st.rerun()
+            elif add_kind == "Task":
+                if agents:
+                    a_opts = {f"{a['name']} — {a['role']}": a["id"] for a in agents}
+                    a_lab = st.selectbox("Agent", list(a_opts.keys()), key="canvas_add_agent")
+                    atasks = tasks_by_agent.get(a_opts[a_lab], [])
+                    if atasks:
+                        t_opts = {
+                            f"{t.get('name') or t['id']}: {(t.get('description') or '')[:40]}": t["id"]
+                            for t in atasks
+                        }
+                        t_lab = st.selectbox("Task", list(t_opts.keys()), key="canvas_add_task")
+                        lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                        if st.button("Add Task to canvas", key="canvas_btn_task"):
+                            g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                            g.append({
+                                "id": new_node_id(),
+                                "type": NODE_TYPE_TASK,
+                                "task_id": t_opts[t_lab],
+                                "depends_on": [],
+                                "execution_level": lvl,
+                                "model_tier": "default",
+                                "inputs_map": {},
+                            })
+                            st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                                g, task_id_map=task_id_map
+                            )
+                            st.session_state.pop("wf_flow_state", None)
+                            st.rerun()
+                    else:
+                        st.info("No tasks for this agent.")
                 else:
-                    st.info("No tasks for this agent.")
-            else:
-                st.info("Create agents first.")
+                    st.info("Create agents first.")
 
-        elif add_kind == "Batch":
-            b_size = st.number_input("Batch size", 1, 100, 5, key="canvas_b_size")
-            b_src = st.text_input("Source", "{previous_result}", key="canvas_b_src")
-            all_t = {f"{t.get('name') or t['id']}": t["id"] for t in tasks}
-            inner = st.multiselect("Inner tasks", list(all_t.keys()), key="canvas_b_inner")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add Batch", key="canvas_btn_batch") and inner:
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("batch"),
-                    "type": NODE_TYPE_BATCH,
-                    "task_ids": [all_t[x] for x in inner],
-                    "batch_size": int(b_size),
-                    "source_variable": b_src,
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "inputs_map": {},
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "HITL":
-            msg = st.text_input("Message", "Please review before continuing.", key="canvas_hitl_msg")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add HITL", key="canvas_btn_hitl"):
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("hitl"),
-                    "type": NODE_TYPE_HITL,
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "inputs_map": {},
-                    "message": msg,
-                    "gate_mode": "after_parents",
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "Export":
-            ex = st.multiselect("Formats", available_exports, key="canvas_ex")
-            instr = st.text_area("Instructions", key="canvas_ex_instr", height=60)
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add Export", key="canvas_btn_ex"):
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("export"),
-                    "type": NODE_TYPE_EXPORT,
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "inputs_map": {},
-                    "exports": ex,
-                    "export_instructions": instr or "",
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "Input":
-            keys = st.text_input("Keys", "user_input", key="canvas_in_keys")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add Input", key="canvas_btn_in"):
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("input"),
-                    "type": NODE_TYPE_INPUT,
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "inputs_map": {},
-                    "keys": [k.strip() for k in keys.split(",") if k.strip()] or ["user_input"],
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "LLM":
-            prompt = st.text_area("Prompt", "{previous_result}", key="canvas_llm_prompt", height=90)
-            fmt = st.selectbox("Output format", ["text", "json"], key="canvas_llm_fmt")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add LLM", key="canvas_btn_llm"):
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("llm"),
-                    "type": NODE_TYPE_LLM,
-                    "prompt": (prompt or "").strip() or "{previous_result}",
-                    "output_format": fmt,
-                    "temperature": 0.2,
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "model_tier": "default",
-                    "inputs_map": {},
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "Tool":
-            try:
-                from core.crew_builder import ALLOWED_TOOLS
-                tool_names = sorted(ALLOWED_TOOLS.keys())
-            except Exception:
-                tool_names = []
-            if tool_names:
-                tool_name = st.selectbox("Tool", tool_names, key="canvas_tool_name")
-            else:
-                tool_name = st.text_input("Tool name", key="canvas_tool_name_txt")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add Tool", key="canvas_btn_tool") and (tool_name or "").strip():
-                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
-                g.append({
-                    "id": new_node_id("tool"),
-                    "type": NODE_TYPE_TOOL,
-                    "tool_name": str(tool_name).strip(),
-                    "tool_args": {},
-                    "depends_on": [],
-                    "execution_level": lvl,
-                    "model_tier": "default",
-                    "inputs_map": {},
-                })
-                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
-                    g, task_id_map=task_id_map
-                )
-                st.session_state.pop("wf_flow_state", None)
-                st.rerun()
-
-        elif add_kind == "Router":
-            routes_str = st.text_input("Routes", "yes, no", key="canvas_router_routes")
-            routes = [r.strip() for r in (routes_str or "").split(",") if r.strip()]
-            mode = st.selectbox("Mode", ["auto", "rules", "llm"], key="canvas_router_mode")
-            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
-            if st.button("Add Router", key="canvas_btn_router"):
-                if len(set(routes)) < 2:
-                    st.error("A router needs at least two distinct routes.")
-                else:
+            elif add_kind == "Batch":
+                b_size = st.number_input("Batch size", 1, 100, 5, key="canvas_b_size")
+                b_src = st.text_input("Source", "{previous_result}", key="canvas_b_src")
+                all_t = {f"{t.get('name') or t['id']}": t["id"] for t in tasks}
+                inner = st.multiselect("Inner tasks", list(all_t.keys()), key="canvas_b_inner")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add Batch", key="canvas_btn_batch") and inner:
                     g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
                     g.append({
-                        "id": new_node_id("router"),
-                        "type": NODE_TYPE_ROUTER,
-                        "routes": routes,
-                        "rules": [],
-                        "router_mode": mode,
-                        "default_route": routes[0],
+                        "id": new_node_id("batch"),
+                        "type": NODE_TYPE_BATCH,
+                        "task_ids": [all_t[x] for x in inner],
+                        "batch_size": int(b_size),
+                        "source_variable": b_src,
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "inputs_map": {},
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
+
+            elif add_kind == "HITL":
+                msg = st.text_input("Message", "Please review before continuing.", key="canvas_hitl_msg")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add HITL", key="canvas_btn_hitl"):
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("hitl"),
+                        "type": NODE_TYPE_HITL,
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "inputs_map": {},
+                        "message": msg,
+                        "gate_mode": "after_parents",
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
+
+            elif add_kind == "Export":
+                ex = st.multiselect("Formats", available_exports, key="canvas_ex")
+                instr = st.text_area("Instructions", key="canvas_ex_instr", height=60)
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add Export", key="canvas_btn_ex"):
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("export"),
+                        "type": NODE_TYPE_EXPORT,
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "inputs_map": {},
+                        "exports": ex,
+                        "export_instructions": instr or "",
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
+
+            elif add_kind == "Input":
+                keys = st.text_input("Keys", "user_input", key="canvas_in_keys")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add Input", key="canvas_btn_in"):
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("input"),
+                        "type": NODE_TYPE_INPUT,
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "inputs_map": {},
+                        "keys": [k.strip() for k in keys.split(",") if k.strip()] or ["user_input"],
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
+
+            elif add_kind == "LLM":
+                prompt = st.text_area("Prompt", "{previous_result}", key="canvas_llm_prompt", height=90)
+                fmt = st.selectbox("Output format", ["text", "json"], key="canvas_llm_fmt")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add LLM", key="canvas_btn_llm"):
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("llm"),
+                        "type": NODE_TYPE_LLM,
+                        "prompt": (prompt or "").strip() or "{previous_result}",
+                        "output_format": fmt,
+                        "temperature": 0.2,
                         "depends_on": [],
                         "execution_level": lvl,
                         "model_tier": "default",
@@ -335,87 +291,191 @@ def render_canvas_palette_and_board(
                     st.session_state.pop("wf_flow_state", None)
                     st.rerun()
 
-        st.markdown("---")
-        st.markdown("### Loop select")
-        mode_on = st.toggle(
-            "Loop select mode",
-            value=bool(st.session_state.wf_loop_select_mode),
-            key="canvas_loop_toggle",
-            help="Draw a rectangle on the marquee board: L→R full, R→L partial.",
-        )
-        st.session_state.wf_loop_select_mode = mode_on
-        selected_ids = list(st.session_state.wf_loop_select_ids or [])
-        if selected_ids:
-            st.caption(f"Selected: `{', '.join(selected_ids)}`")
-        else:
-            st.caption("No blocks selected yet — draw on the marquee board (right).")
-        if st.button("Clear loop selection", key="canvas_loop_clear"):
-            st.session_state.wf_loop_select_ids = []
-            st.session_state.pop("wf_flow_state", None)
-            st.rerun()
+            elif add_kind == "Tool":
+                try:
+                    from core.crew_builder import ALLOWED_TOOLS
+                    tool_names = sorted(ALLOWED_TOOLS.keys())
+                except Exception:
+                    tool_names = []
+                if tool_names:
+                    tool_name = st.selectbox("Tool", tool_names, key="canvas_tool_name")
+                else:
+                    tool_name = st.text_input("Tool name", key="canvas_tool_name_txt")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add Tool", key="canvas_btn_tool") and (tool_name or "").strip():
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("tool"),
+                        "type": NODE_TYPE_TOOL,
+                        "tool_name": str(tool_name).strip(),
+                        "tool_args": {},
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "model_tier": "default",
+                        "inputs_map": {},
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
 
-        loop_mode = st.selectbox(
-            "Loop mode (on frame)",
-            [LOOP_MODE_WHILE, LOOP_MODE_FOR_EACH],
-            key="canvas_loop_mode",
-        )
-        max_it = st.number_input("max_iterations", 1, 100, 5, key="canvas_loop_max")
-        exit_hitl = st.checkbox("Exit on HITL approve", value=True, key="canvas_loop_hitl")
-        cond_pat = st.text_input("Exit output regex (optional)", "", key="canvas_loop_cond_pat")
-        if st.button("Create loop frame from selection", key="canvas_btn_loop_frame"):
-            body = [
-                n for n in st.session_state.wf_selected_task_ids
-                if n.get("id") in selected_ids and n.get("type") in (NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_HITL)
-            ]
-            if len(body) < 1:
-                st.error("Select at least one Task/Batch/HITL with the marquee (L→R or R→L).")
+            elif add_kind == "Router":
+                routes_str = st.text_input("Routes", "yes, no", key="canvas_router_routes")
+                routes = [r.strip() for r in (routes_str or "").split(",") if r.strip()]
+                mode = st.selectbox("Mode", ["auto", "rules", "llm"], key="canvas_router_mode")
+                lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+                if st.button("Add Router", key="canvas_btn_router"):
+                    if len(set(routes)) < 2:
+                        st.error("A router needs at least two distinct routes.")
+                    else:
+                        g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                        g.append({
+                            "id": new_node_id("router"),
+                            "type": NODE_TYPE_ROUTER,
+                            "routes": routes,
+                            "rules": [],
+                            "router_mode": mode,
+                            "default_route": routes[0],
+                            "depends_on": [],
+                            "execution_level": lvl,
+                            "model_tier": "default",
+                            "inputs_map": {},
+                        })
+                        st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                            g, task_id_map=task_id_map
+                        )
+                        st.session_state.pop("wf_flow_state", None)
+                        st.rerun()
+
+        with tab_inspector:
+            st.markdown("#### Block Inspector")
+            node_ids = [n["id"] for n in st.session_state.wf_selected_task_ids]
+            pick_opts = ["—"] + node_ids
+            idx = 0
+            if selected in node_ids:
+                idx = node_ids.index(selected) + 1
+            pick_row, trash_row = st.columns([4, 1])
+            with pick_row:
+                pick = st.selectbox("Selected block", options=pick_opts, index=idx, key="canvas_inspect_pick")
+            with trash_row:
+                st.write("")  # align with selectbox
+                if st.button("🗑", key="canvas_trash_selected", help="Delete selected block (Delete/Backspace on canvas)"):
+                    target = pick if pick and pick != "—" else selected
+                    if target and target in node_ids:
+                        st.session_state.wf_selected_task_ids = remove_node(
+                            st.session_state.wf_selected_task_ids, target
+                        )
+                        st.session_state.pop("wf_flow_state", None)
+                        st.rerun()
+                    else:
+                        st.toast("Select a block to delete")
+
+            active_id = pick if (pick and pick != "—") else selected
+            if active_id and active_id in node_ids:
+                _render_node_inspector(
+                    db=db,
+                    node_id=active_id,
+                    task_id_map=task_id_map,
+                    agent_id_map=agent_id_map,
+                    agents=agents,
+                    available_exports=available_exports,
+                    sanitize_input=sanitize_input,
+                )
             else:
-                frame_ui = compute_loop_frame_ui(body)
-                levels = {int(n.get("execution_level") or 1) for n in body}
-                loop_lvl = min(levels)
-                cond_src = body[-1]["id"]
-                st.session_state.wf_selected_task_ids.append({
-                    "id": new_node_id("loop"),
-                    "type": NODE_TYPE_LOOP,
-                    "loop_mode": loop_mode,
-                    "scope": LOOP_SCOPE_NODES,
-                    "body_node_ids": [n["id"] for n in body],
-                    "body_levels": [],
-                    "source_variable": "{previous_result}",
-                    "max_iterations": int(max_it),
-                    "exit_on_hitl": bool(exit_hitl),
-                    "exit_condition": {
-                        "output_match": {
-                            "source_node": cond_src if cond_pat.strip() else "",
-                            "pattern": cond_pat.strip(),
-                        }
-                    },
-                    "depends_on": [],
-                    "execution_level": loop_lvl,
-                    "inputs_map": {},
-                    "canvas_ui": frame_ui,
-                })
+                st.info("👆 Click any block on the canvas or pick one from the dropdown above to inspect and edit its properties.")
+
+        with tab_loop:
+            st.markdown("#### Loop Select & Frame")
+            mode_on = st.toggle(
+                "Loop select mode",
+                value=bool(st.session_state.wf_loop_select_mode),
+                key="canvas_loop_toggle",
+                help="Draw a rectangle on the marquee board: L→R full, R→L partial.",
+            )
+            st.session_state.wf_loop_select_mode = mode_on
+            selected_ids = list(st.session_state.wf_loop_select_ids or [])
+            if selected_ids:
+                st.caption(f"Selected: `{', '.join(selected_ids)}`")
+            else:
+                st.caption("No blocks selected yet — draw on the marquee board (right).")
+            if st.button("Clear loop selection", key="canvas_loop_clear"):
                 st.session_state.wf_loop_select_ids = []
-                st.session_state.wf_loop_select_mode = False
                 st.session_state.pop("wf_flow_state", None)
                 st.rerun()
 
-        st.markdown("---")
-        if st.button("Snap & restack in levels", key="canvas_restack"):
-            st.session_state.wf_selected_task_ids = snap_assisted_positions(
-                st.session_state.wf_selected_task_ids, task_id_map=task_id_map
+            loop_mode = st.selectbox(
+                "Loop mode (on frame)",
+                [LOOP_MODE_WHILE, LOOP_MODE_FOR_EACH],
+                key="canvas_loop_mode",
             )
-            st.session_state.pop("wf_flow_state", None)
-            st.rerun()
-        if st.button("Auto-link by levels", key="canvas_assist"):
-            st.session_state.wf_selected_task_ids = assisted_chain_edges(
-                st.session_state.wf_selected_task_ids
+            max_it = st.number_input("max_iterations", 1, 100, 5, key="canvas_loop_max")
+            exit_hitl = st.checkbox("Exit on HITL approve", value=True, key="canvas_loop_hitl")
+            cond_pat = st.text_input("Exit output regex (optional)", "", key="canvas_loop_cond_pat")
+            if st.button("Create loop frame from selection", key="canvas_btn_loop_frame"):
+                body = [
+                    n for n in st.session_state.wf_selected_task_ids
+                    if n.get("id") in selected_ids and n.get("type") in (NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_HITL)
+                ]
+                if len(body) < 1:
+                    st.error("Select at least one Task/Batch/HITL with the marquee (L→R or R→L).")
+                else:
+                    frame_ui = compute_loop_frame_ui(body)
+                    levels = {int(n.get("execution_level") or 1) for n in body}
+                    loop_lvl = min(levels)
+                    cond_src = body[-1]["id"]
+                    st.session_state.wf_selected_task_ids.append({
+                        "id": new_node_id("loop"),
+                        "type": NODE_TYPE_LOOP,
+                        "loop_mode": loop_mode,
+                        "scope": LOOP_SCOPE_NODES,
+                        "body_node_ids": [n["id"] for n in body],
+                        "body_levels": [],
+                        "source_variable": "{previous_result}",
+                        "max_iterations": int(max_it),
+                        "exit_on_hitl": bool(exit_hitl),
+                        "exit_condition": {
+                            "output_match": {
+                                "source_node": cond_src if cond_pat.strip() else "",
+                                "pattern": cond_pat.strip(),
+                            }
+                        },
+                        "depends_on": [],
+                        "execution_level": loop_lvl,
+                        "inputs_map": {},
+                        "canvas_ui": frame_ui,
+                    })
+                    st.session_state.wf_loop_select_ids = []
+                    st.session_state.wf_loop_select_mode = False
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
+
+        with tab_actions:
+            st.markdown("#### Canvas Tools & Layout")
+            if st.button("Snap & restack in levels", key="canvas_restack", use_container_width=True):
+                st.session_state.wf_selected_task_ids = snap_assisted_positions(
+                    st.session_state.wf_selected_task_ids, task_id_map=task_id_map
+                )
+                st.session_state.pop("wf_flow_state", None)
+                st.rerun()
+            if st.button("Auto-link by levels", key="canvas_assist", use_container_width=True):
+                st.session_state.wf_selected_task_ids = assisted_chain_edges(
+                    st.session_state.wf_selected_task_ids
+                )
+                st.session_state.pop("wf_flow_state", None)
+                st.rerun()
+            if st.button("Rebuild canvas layout", key="canvas_rebuild", use_container_width=True):
+                st.session_state.pop("wf_flow_state", None)
+                st.rerun()
+
+            st.markdown("---")
+            st.markdown("##### 💡 Canvas Tips")
+            st.markdown(
+                "- **Columns**: Blocks snap inside Level columns (execution phases).\n"
+                "- **Wiring**: Drag from a block's right dot to a target block's left dot.\n"
+                "- **Delete**: Select a block and press **Backspace** / **Delete**, or click 🗑 in the Inspector.\n"
+                "- **Inspector**: Click any block on the canvas to immediately inspect its properties on the left."
             )
-            st.session_state.pop("wf_flow_state", None)
-            st.rerun()
-        if st.button("Rebuild canvas layout", key="canvas_rebuild"):
-            st.session_state.pop("wf_flow_state", None)
-            st.rerun()
 
     with right:
         st.markdown("### Canvas")
@@ -502,7 +562,7 @@ def render_canvas_palette_and_board(
         st.session_state.wf_flow_state = run_streamlit_flow_preserving_size(
             "alfredo_wf_canvas",
             st.session_state.wf_flow_state,
-            height=620,
+            height=680,
             fit_view=True,
             show_controls=True,
             show_minimap=True,
@@ -549,32 +609,6 @@ def render_canvas_palette_and_board(
         except Exception as e:
             st.warning(f"Could not sync canvas: {e}")
 
-        selected = getattr(st.session_state.wf_flow_state, "selected_id", None) if "wf_flow_state" in st.session_state else None
-        if not selected:
-            selected = st.session_state.get("canvas_selected_node")
-
-        st.markdown("---")
-        st.markdown("### Inspector")
-        node_ids = [n["id"] for n in st.session_state.wf_selected_task_ids]
-        pick_opts = ["—"] + node_ids
-        idx = 0
-        if selected in node_ids:
-            idx = node_ids.index(selected) + 1
-        pick_row, trash_row = st.columns([4, 1])
-        with pick_row:
-            pick = st.selectbox("Selected block", options=pick_opts, index=idx, key="canvas_inspect_pick")
-        with trash_row:
-            st.write("")  # align with selectbox
-            if st.button("🗑", key="canvas_trash_selected", help="Elimina selezionato (Canc/Backspace sul canvas)"):
-                target = pick if pick and pick != "—" else selected
-                if target and target in node_ids:
-                    st.session_state.wf_selected_task_ids = remove_node(
-                        st.session_state.wf_selected_task_ids, target
-                    )
-                    st.session_state.pop("wf_flow_state", None)
-                    st.rerun()
-                else:
-                    st.toast("Seleziona un blocco da eliminare")
         # Keyboard Delete/Canc when focus is outside the canvas iframe
         import streamlit.components.v1 as components
 
@@ -594,7 +628,7 @@ def render_canvas_palette_and_board(
                 for (const b of buttons) {
                   if ((b.getAttribute('kind') || '') === 'secondary') { /* skip */ }
                   const title = (b.getAttribute('title') || '') + ' ' + (b.innerText || '');
-                  if (title.indexOf('Elimina selezionato') >= 0 || (b.innerText || '').trim() === '🗑') {
+                  if (title.indexOf('Delete selected') >= 0 || title.indexOf('Elimina selezionato') >= 0 || (b.innerText || '').trim() === '🗑') {
                     e.preventDefault();
                     b.click();
                     break;
@@ -606,17 +640,6 @@ def render_canvas_palette_and_board(
             """,
             height=0,
         )
-        if pick and pick != "—":
-            _render_node_inspector(
-                db=db,
-                node_id=pick,
-                task_id_map=task_id_map,
-                agent_id_map=agent_id_map,
-                agents=agents,
-                available_exports=available_exports,
-                sanitize_input=sanitize_input,
-            )
-
 
 def _render_node_inspector(
     *,
@@ -962,7 +985,7 @@ def _render_node_inspector(
             "Source", value=node.get("source_variable") or "{previous_result}", key=f"insp_bsrc_{node_id}"
         )
 
-    if st.button("🗑 Elimina dal workflow", key=f"insp_rm_{node_id}"):
+    if st.button("🗑 Delete from workflow", key=f"insp_rm_{node_id}"):
         st.session_state.wf_selected_task_ids = remove_node(graph, node_id)
         st.session_state.pop("wf_flow_state", None)
         st.rerun()
