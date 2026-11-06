@@ -3,12 +3,15 @@ import logging
 import os
 import re
 import threading
+import time
 import concurrent.futures
 from typing import Optional, Dict, Any
 
 
 from core.db_manager import DBManager
 from core.data_manager import DataManager
+from core import gpu_gate
+from core.run_context import current_run_id
 
 try:
     from core.model_capability import (
@@ -28,9 +31,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# One local Master AI call at a time. A timed-out request must not keep the
-# next review/refine/export queued behind it on Ollama.
-_local_llm_slot = threading.BoundedSemaphore(1)
+# Local model calls go through core.gpu_gate.GPU_GATE: one model at a time on
+# the GPU, FIFO queueing across runs, VRAM fit checks and first-token metrics.
 
 # --- Headroom AI: Context Compression ---
 # Headroom is a Gemini-oriented proxy. NEVER assign it to the global LiteLLM
@@ -956,8 +958,13 @@ class MasterAI:
             call_kwargs["messages"] = _compress_messages(call_kwargs["messages"], model=m)
             return call_kwargs
 
-        def _complete_ollama(call_kwargs: dict) -> str:
-            """Native Ollama chat with a hard read timeout that closes the socket."""
+        def _complete_ollama(call_kwargs: dict) -> "tuple[str, Optional[float]]":
+            """Native Ollama chat (streaming) with time-to-first-token measurement.
+
+            Streaming keeps the JSON-schema/json format support intact and gives
+            the gate a real TTFT sample; the outer thread still enforces the
+            hard deadline.
+            """
             import requests
 
             base = (call_kwargs.get("api_base") or "http://127.0.0.1:11434").rstrip("/")
@@ -972,7 +979,6 @@ class MasterAI:
             payload = {
                 "model": model_name,
                 "messages": call_kwargs["messages"],
-                "stream": False,
                 "options": options,
             }
             # Native Constrained Decoding (JSON Schema / JSON Grammar) on Ollama
@@ -984,33 +990,49 @@ class MasterAI:
                     payload["format"] = "json"
 
             timeout_s = int(call_kwargs.get("timeout") or 60)
-            resp = requests.post(
-                f"{base}/api/chat",
-                json=payload,
-                timeout=(5, timeout_s),
-            )
-            if resp.status_code >= 400 and "format" in payload:
-                # Graceful fallback if an older Ollama server rejects schema/json format
-                payload.pop("format", None)
-                resp = requests.post(
+
+            def _stream(body: dict) -> "tuple[str, Optional[float]]":
+                started = time.monotonic()
+                first_token: Optional[float] = None
+                parts: list[str] = []
+                request_body = {**body, "stream": True}
+                with requests.post(
                     f"{base}/api/chat",
-                    json=payload,
+                    json=request_body,
+                    stream=True,
                     timeout=(5, timeout_s),
-                )
-            resp.raise_for_status()
-            content = ((resp.json() or {}).get("message") or {}).get("content") or ""
+                ) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        content = ((record.get("message") or {}).get("content")) or ""
+                        if content:
+                            if first_token is None:
+                                first_token = time.monotonic() - started
+                            parts.append(content)
+                        if record.get("done"):
+                            break
+                return "".join(parts), first_token
+
+            try:
+                content, ttft = _stream(payload)
+            except Exception:
+                # Graceful fallback if an older Ollama server rejects schema/json format
+                if "format" not in payload:
+                    raise
+                payload.pop("format", None)
+                content, ttft = _stream(payload)
             if not str(content).strip() and "format" in payload:
                 payload.pop("format", None)
-                resp = requests.post(
-                    f"{base}/api/chat",
-                    json=payload,
-                    timeout=(5, timeout_s),
-                )
-                resp.raise_for_status()
-                content = ((resp.json() or {}).get("message") or {}).get("content") or ""
+                content, ttft = _stream(payload)
             if not str(content).strip():
                 raise RuntimeError(f"Ollama model '{model_name}' returned an empty response.")
-            return content
+            return content, ttft
 
         def _complete_litellm(call_kwargs: dict) -> str:
             if litellm is None:
@@ -1022,16 +1044,20 @@ class MasterAI:
             return content
 
         def _run_local_once(m: str, call_kwargs: dict, call_timeout: int) -> str:
-            """One local attempt. If Ollama is still busy, fail immediately."""
-            if not _local_llm_slot.acquire(blocking=False):
-                raise TimeoutError(
-                    "Local model is still busy with a previous Master AI call."
-                )
+            """Queue for the GPU, then run one local attempt under a hard deadline."""
+            gate = gpu_gate.GPU_GATE
+            profile = gate.profile_for_model(m) or gate.custom_profile(m)
+            try:
+                ticket = gate.acquire(profile, run_id=current_run_id())
+            except gpu_gate.GpuGateError as exc:
+                raise TimeoutError(str(exc)) from exc
 
             def _invoke():
                 prefix = (m.split("/")[0] if "/" in m else m).lower()
                 if prefix == "ollama":
-                    return _complete_ollama(call_kwargs)
+                    content, ttft = _complete_ollama(call_kwargs)
+                    gate.record_first_token(profile, ttft)
+                    return content
                 return _complete_litellm(call_kwargs)
 
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="master-llm")
@@ -1043,7 +1069,7 @@ class MasterAI:
             finally:
                 pool.shutdown(wait=False)
                 if fut.done():
-                    _local_llm_slot.release()
+                    gate.release(ticket)
                 else:
                     def _release_when_done(done_fut):
                         try:
@@ -1051,7 +1077,7 @@ class MasterAI:
                         except Exception:
                             pass
                         finally:
-                            _local_llm_slot.release()
+                            gate.release(ticket)
 
                     threading.Thread(
                         target=_release_when_done, args=(fut,), daemon=True

@@ -37,8 +37,11 @@ from core.workflow_graph import (
     NODE_TYPE_HITL,
     NODE_TYPE_INPUT,
     NODE_TYPE_LEVEL,
+    NODE_TYPE_LLM,
     NODE_TYPE_LOOP,
+    NODE_TYPE_ROUTER,
     NODE_TYPE_TASK,
+    NODE_TYPE_TOOL,
     compute_loop_frame_ui,
     make_level_node,
     new_node_id,
@@ -123,7 +126,7 @@ def render_canvas_palette_and_board(
 
         add_kind = st.selectbox(
             "Add block",
-            ["Level", "Task", "Batch", "HITL", "Export", "Input"],
+            ["Level", "Task", "Batch", "HITL", "Export", "Input", "LLM", "Tool", "Router"],
             key="canvas_add_kind",
         )
 
@@ -251,6 +254,86 @@ def render_canvas_palette_and_board(
                 )
                 st.session_state.pop("wf_flow_state", None)
                 st.rerun()
+
+        elif add_kind == "LLM":
+            prompt = st.text_area("Prompt", "{previous_result}", key="canvas_llm_prompt", height=90)
+            fmt = st.selectbox("Output format", ["text", "json"], key="canvas_llm_fmt")
+            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+            if st.button("Add LLM", key="canvas_btn_llm"):
+                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                g.append({
+                    "id": new_node_id("llm"),
+                    "type": NODE_TYPE_LLM,
+                    "prompt": (prompt or "").strip() or "{previous_result}",
+                    "output_format": fmt,
+                    "temperature": 0.2,
+                    "depends_on": [],
+                    "execution_level": lvl,
+                    "model_tier": "default",
+                    "inputs_map": {},
+                })
+                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                    g, task_id_map=task_id_map
+                )
+                st.session_state.pop("wf_flow_state", None)
+                st.rerun()
+
+        elif add_kind == "Tool":
+            try:
+                from core.crew_builder import ALLOWED_TOOLS
+                tool_names = sorted(ALLOWED_TOOLS.keys())
+            except Exception:
+                tool_names = []
+            if tool_names:
+                tool_name = st.selectbox("Tool", tool_names, key="canvas_tool_name")
+            else:
+                tool_name = st.text_input("Tool name", key="canvas_tool_name_txt")
+            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+            if st.button("Add Tool", key="canvas_btn_tool") and (tool_name or "").strip():
+                g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                g.append({
+                    "id": new_node_id("tool"),
+                    "type": NODE_TYPE_TOOL,
+                    "tool_name": str(tool_name).strip(),
+                    "tool_args": {},
+                    "depends_on": [],
+                    "execution_level": lvl,
+                    "model_tier": "default",
+                    "inputs_map": {},
+                })
+                st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                    g, task_id_map=task_id_map
+                )
+                st.session_state.pop("wf_flow_state", None)
+                st.rerun()
+
+        elif add_kind == "Router":
+            routes_str = st.text_input("Routes", "yes, no", key="canvas_router_routes")
+            routes = [r.strip() for r in (routes_str or "").split(",") if r.strip()]
+            mode = st.selectbox("Mode", ["auto", "rules", "llm"], key="canvas_router_mode")
+            lvl = _default_level_for_new(st.session_state.wf_selected_task_ids)
+            if st.button("Add Router", key="canvas_btn_router"):
+                if len(set(routes)) < 2:
+                    st.error("A router needs at least two distinct routes.")
+                else:
+                    g = _ensure_level_exists(st.session_state.wf_selected_task_ids, lvl)
+                    g.append({
+                        "id": new_node_id("router"),
+                        "type": NODE_TYPE_ROUTER,
+                        "routes": routes,
+                        "rules": [],
+                        "router_mode": mode,
+                        "default_route": routes[0],
+                        "depends_on": [],
+                        "execution_level": lvl,
+                        "model_tier": "default",
+                        "inputs_map": {},
+                    })
+                    st.session_state.wf_selected_task_ids = auto_stack_all_levels(
+                        g, task_id_map=task_id_map
+                    )
+                    st.session_state.pop("wf_flow_state", None)
+                    st.rerun()
 
         st.markdown("---")
         st.markdown("### Loop select")
@@ -770,6 +853,106 @@ def _render_node_inspector(
         keys = ", ".join(node.get("keys") or [])
         edited = st.text_input("Keys", value=keys, key=f"insp_ik_{node_id}")
         node["keys"] = [k.strip() for k in edited.split(",") if k.strip()]
+
+    elif ntype == NODE_TYPE_LLM:
+        node["prompt"] = st.text_area(
+            "Prompt",
+            value=node.get("prompt") or "",
+            key=f"insp_llm_prompt_{node_id}",
+            height=140,
+            help="{previous_result}, {input.key}, {node_id}, {node_id.section}.",
+        )
+        node["system_prompt"] = st.text_input(
+            "System prompt (optional)",
+            value=node.get("system_prompt") or "",
+            key=f"insp_llm_sys_{node_id}",
+        )
+        fmt_opts = ["text", "json"]
+        cur_fmt = node.get("output_format") if node.get("output_format") in fmt_opts else "text"
+        node["output_format"] = st.selectbox(
+            "Output format",
+            fmt_opts,
+            index=fmt_opts.index(cur_fmt),
+            key=f"insp_llm_fmt_{node_id}",
+        )
+        try:
+            cur_temp = float(node.get("temperature", 0.2))
+        except (TypeError, ValueError):
+            cur_temp = 0.2
+        node["temperature"] = st.slider(
+            "Temperature", 0.0, 1.0, max(0.0, min(1.0, cur_temp)), 0.05,
+            key=f"insp_llm_temp_{node_id}",
+        )
+        with st.expander("Node data wiring"):
+            st.json(node.get("inputs_map") or {})
+
+    elif ntype == NODE_TYPE_TOOL:
+        node["tool_name"] = st.text_input(
+            "Tool name", value=node.get("tool_name") or "", key=f"insp_tool_name_{node_id}"
+        )
+        import json as _json
+        args_json = _json.dumps(node.get("tool_args") or {}, ensure_ascii=False)
+        edited_args = st.text_area(
+            "Arguments (JSON object)",
+            value=args_json,
+            key=f"insp_tool_args_{node_id}",
+            height=100,
+        )
+        try:
+            parsed_args = _json.loads(edited_args or "{}")
+            if isinstance(parsed_args, dict):
+                node["tool_args"] = parsed_args
+            else:
+                st.caption("⚠️ Arguments must be a JSON object.")
+        except _json.JSONDecodeError:
+            st.caption("⚠️ Invalid JSON (keeping the last valid value).")
+        with st.expander("Node data wiring"):
+            st.json(node.get("inputs_map") or {})
+
+    elif ntype == NODE_TYPE_ROUTER:
+        routes_str = st.text_input(
+            "Routes (comma-separated)",
+            value=", ".join(str(r) for r in (node.get("routes") or [])),
+            key=f"insp_router_routes_{node_id}",
+        )
+        node["routes"] = [r.strip() for r in routes_str.split(",") if r.strip()]
+        mode_opts = ["auto", "rules", "llm"]
+        cur_mode = node.get("router_mode") if node.get("router_mode") in mode_opts else "auto"
+        node["router_mode"] = st.selectbox(
+            "Mode", mode_opts, index=mode_opts.index(cur_mode), key=f"insp_router_mode_{node_id}"
+        )
+        if node["routes"]:
+            cur_def = node.get("default_route")
+            if cur_def not in node["routes"]:
+                cur_def = node["routes"][0]
+            node["default_route"] = st.selectbox(
+                "Default route",
+                node["routes"],
+                index=node["routes"].index(cur_def),
+                key=f"insp_router_default_{node_id}",
+            )
+        rules_text = "\n".join(
+            f"{r.get('route')} | {r.get('pattern', '')}"
+            for r in (node.get("rules") or [])
+            if isinstance(r, dict)
+        )
+        edited_rules = st.text_area(
+            "Rules (route | regex per line)",
+            value=rules_text,
+            key=f"insp_router_rules_{node_id}",
+            height=100,
+        )
+        new_rules = []
+        for line in edited_rules.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            route_part, _, pattern = line.partition("|")
+            if route_part.strip() and pattern.strip():
+                new_rules.append({"route": route_part.strip(), "pattern": pattern.strip()})
+        node["rules"] = new_rules
+        with st.expander("Node data wiring"):
+            st.json(node.get("inputs_map") or {})
 
     elif ntype == NODE_TYPE_BATCH:
         node["batch_size"] = st.number_input(

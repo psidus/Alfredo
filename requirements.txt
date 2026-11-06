@@ -50,3 +50,6 @@ mem0ai>=0.1.0
 #   pip install unsloth torch trl peft bitsandbytes accelerate datasets transformers
 # Note: unsloth requires a CUDA-compatible GPU with at least 8GB VRAM.
 # These are NOT auto-installed because they are large and GPU-specific.
+
+# Web Push (mobile approval notifications) - optional, degrades gracefully if missing
+pywebpush>=1.14.0

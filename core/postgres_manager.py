@@ -182,6 +182,51 @@ class PostgresManager:
             );
             """,
             """
+            CREATE TABLE IF NOT EXISTS run_interrupts (
+                id SERIAL PRIMARY KEY,
+                run_id INTEGER NOT NULL,
+                node_id TEXT,
+                task_id INTEGER,
+                chat_id TEXT,
+                kind TEXT DEFAULT 'hitl', -- 'hitl' | 'approval'
+                question TEXT,
+                options_json TEXT DEFAULT '[]',
+                payload_json TEXT DEFAULT '{}', -- engine state needed to resume
+                status TEXT DEFAULT 'pending',  -- 'pending' | 'answered' | 'cancelled'
+                answer TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                answered_at TIMESTAMP
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_run_interrupts_run
+            ON run_interrupts (run_id, status);
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id SERIAL PRIMARY KEY,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh TEXT NOT NULL,
+                auth TEXT NOT NULL,
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS run_events (
+                id SERIAL PRIMARY KEY,
+                run_id INTEGER NOT NULL REFERENCES workflow_runs (id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                payload_json TEXT DEFAULT '{}',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_run_seq
+            ON run_events (run_id, seq);
+            """,
+            """
             CREATE TABLE IF NOT EXISTS apps (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -875,6 +920,221 @@ class PostgresManager:
         sql = "DELETE FROM hitl_requests WHERE chat_id = %s"
         self.cursor.execute(sql, (chat_id,))
         self.conn.commit()
+
+    # --- Persistent run interrupts (HITL / approvals that survive restarts) ---
+    def _process_interrupt(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not data:
+            return data
+        for field, out, default in (
+            ("options_json", "options", []),
+            ("payload_json", "payload", {}),
+        ):
+            raw = data.get(field)
+            try:
+                data[out] = json.loads(raw) if raw else default
+            except (json.JSONDecodeError, TypeError):
+                data[out] = default
+        return data
+
+    def create_run_interrupt(
+        self,
+        run_id: int,
+        node_id: str = None,
+        task_id: int = None,
+        chat_id: str = None,
+        kind: str = "hitl",
+        question: str = "",
+        options: list = None,
+        payload: dict = None,
+    ) -> int:
+        sql = """
+        INSERT INTO run_interrupts
+            (run_id, node_id, task_id, chat_id, kind, question, options_json, payload_json, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+        RETURNING id
+        """
+        self.cursor.execute(
+            sql,
+            (
+                int(run_id),
+                node_id,
+                task_id,
+                chat_id,
+                kind,
+                question or "",
+                json.dumps(options or [], ensure_ascii=False),
+                json.dumps(payload or {}, ensure_ascii=False),
+            ),
+        )
+        self.conn.commit()
+        return self.cursor.fetchone()["id"]
+
+    def get_run_interrupt(self, interrupt_id: int) -> Optional[Dict[str, Any]]:
+        self.cursor.execute("SELECT * FROM run_interrupts WHERE id = %s", (int(interrupt_id),))
+        return self._process_interrupt(self._to_dict(self.cursor.fetchone()))
+
+    def get_pending_interrupts(
+        self, run_id: int = None, chat_id: str = None
+    ) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM run_interrupts WHERE status = 'pending'"
+        params: List[Any] = []
+        if run_id is not None:
+            sql += " AND run_id = %s"
+            params.append(int(run_id))
+        if chat_id is not None:
+            sql += " AND chat_id = %s"
+            params.append(str(chat_id))
+        sql += " ORDER BY created_at ASC"
+        self.cursor.execute(sql, tuple(params))
+        return [self._process_interrupt(self._to_dict(r)) for r in self.cursor.fetchall()]
+
+    def answer_run_interrupt(self, interrupt_id: int, answer: str) -> bool:
+        sql = (
+            "UPDATE run_interrupts SET answer = %s, status = 'answered', "
+            "answered_at = CURRENT_TIMESTAMP WHERE id = %s AND status = 'pending'"
+        )
+        self.cursor.execute(sql, (answer, int(interrupt_id)))
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    def cancel_run_interrupts(self, run_id: int) -> int:
+        sql = (
+            "UPDATE run_interrupts SET status = 'cancelled', "
+            "answered_at = CURRENT_TIMESTAMP WHERE run_id = %s AND status = 'pending'"
+        )
+        self.cursor.execute(sql, (int(run_id),))
+        self.conn.commit()
+        return self.cursor.rowcount
+
+    def delete_run_interrupt(self, interrupt_id: int) -> int:
+        self.cursor.execute("DELETE FROM run_interrupts WHERE id = %s", (int(interrupt_id),))
+        self.conn.commit()
+        return self.cursor.rowcount
+
+    # --- Web Push subscriptions ---
+    def save_push_subscription(
+        self, endpoint: str, p256dh: str, auth: str, user_agent: str = ""
+    ) -> int:
+        """Insert or refresh a browser push subscription (unique endpoint)."""
+        sql = """
+        INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (endpoint) DO UPDATE SET
+            p256dh = EXCLUDED.p256dh,
+            auth = EXCLUDED.auth,
+            user_agent = EXCLUDED.user_agent
+        RETURNING id
+        """
+        self.cursor.execute(sql, (str(endpoint), str(p256dh), str(auth), user_agent or ""))
+        row = self.cursor.fetchone()
+        self.conn.commit()
+        return int(row["id"]) if row else 0
+
+    def list_push_subscriptions(self) -> List[Dict[str, Any]]:
+        self.cursor.execute(
+            "SELECT id, endpoint, p256dh, auth, user_agent, created_at "
+            "FROM push_subscriptions ORDER BY id ASC"
+        )
+        return [self._to_dict(row) for row in self.cursor.fetchall()]
+
+    def delete_push_subscription(
+        self, endpoint: str = None, subscription_id: int = None
+    ) -> bool:
+        if subscription_id is not None:
+            self.cursor.execute(
+                "DELETE FROM push_subscriptions WHERE id = %s", (int(subscription_id),)
+            )
+        elif endpoint:
+            self.cursor.execute(
+                "DELETE FROM push_subscriptions WHERE endpoint = %s", (str(endpoint),)
+            )
+        else:
+            return False
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    # --- Run event log ---
+    def append_run_event(
+        self, run_id: int, event_type: str, payload_json: str = "{}", keep: int = 0
+    ) -> Optional[int]:
+        import time as _time
+
+        sql = (
+            "INSERT INTO run_events (run_id, seq, type, payload_json) "
+            "SELECT %s, COALESCE(MAX(seq), 0) + 1, %s, %s FROM run_events WHERE run_id = %s "
+            "RETURNING seq"
+        )
+        for attempt in range(5):
+            try:
+                with self.lock:
+                    self.cursor.execute(
+                        sql, (int(run_id), str(event_type), payload_json, int(run_id))
+                    )
+                    row = self.cursor.fetchone()
+                    self.conn.commit()
+                break
+            except psycopg2.IntegrityError:
+                self.conn.rollback()
+                if attempt == 4:
+                    return None
+                _time.sleep(0.01 * (attempt + 1))
+            except Exception:
+                self.conn.rollback()
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Could not append run event %s for run %s", event_type, run_id, exc_info=True
+                )
+                return None
+        seq = int(row["seq"]) if row and row.get("seq") is not None else None
+        if keep and seq and seq % 100 == 0:
+            self.prune_run_events(run_id, keep=keep)
+        return seq
+
+    def read_run_events(
+        self, after_seq: int = 0, run_id: Optional[int] = None, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 200), 1000))
+        params: List[Any] = []
+        where = ""
+        if run_id is not None:
+            where = "WHERE run_id = %s "
+            params.append(int(run_id))
+        params.extend([int(after_seq or 0), limit])
+        sql = (
+            "SELECT id, run_id, seq, type, payload_json, created_at FROM run_events "
+            f"{where}{'AND' if where else 'WHERE'} seq > %s "
+            "ORDER BY run_id ASC, seq ASC LIMIT %s"
+        )
+        self.cursor.execute(sql, tuple(params))
+        return [self._to_dict(row) for row in self.cursor.fetchall()]
+
+    def latest_run_event_seq(self, run_id: int) -> int:
+        self.cursor.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS seq FROM run_events WHERE run_id = %s",
+            (int(run_id),),
+        )
+        row = self.cursor.fetchone()
+        return int(row["seq"]) if row else 0
+
+    def prune_run_events(self, run_id: int, keep: int = 2000) -> int:
+        keep = max(100, int(keep or 2000))
+        sql = (
+            "DELETE FROM run_events WHERE run_id = %s AND seq <= "
+            "(SELECT COALESCE(MAX(seq), 0) - %s FROM run_events WHERE run_id = %s)"
+        )
+        with self.lock:
+            self.cursor.execute(sql, (int(run_id), keep, int(run_id)))
+            count = self.cursor.rowcount
+            self.conn.commit()
+            return count
+
+    def clear_run_events(self, run_id: int) -> int:
+        with self.lock:
+            self.cursor.execute("DELETE FROM run_events WHERE run_id = %s", (int(run_id),))
+            count = self.cursor.rowcount
+            self.conn.commit()
+            return count
 
     # --- External Apps CRUD ---
     def create_app(self, name: str, display_name: str = None, description: str = None,

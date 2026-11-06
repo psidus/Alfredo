@@ -47,6 +47,8 @@ start_marker_gpu.bat
 config/advanced_rag_setup.json
 test_*.txt
 test_*.py
+!tests/
+!tests/test_*.py
 fix_*.py
 verify_*.py
 
@@ -70,3 +72,13 @@ exports/
 imports/
 temp/
 tmp/
+
+# Mobile PWA (built assets are committed so the server can serve /app without Node)
+mobile_web/node_modules/
+!mobile_web/package.json
+!mobile_web/package-lock.json
+!mobile_web/tsconfig.json
+*.tsbuildinfo
+config/push_vapid.json
+config/share_secret.txt
+config/automations_state.json
