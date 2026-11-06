@@ -4575,36 +4575,15 @@ def render_workflow_assembler():
 
         
             st.markdown("---")
-            head_col1, head_col2 = st.columns([0.45, 2.55], vertical_alignment="center")
-            with head_col1:
-                st.markdown("<h3 style='margin: 0; padding: 0;'>Canvas</h3>", unsafe_allow_html=True)
-            with head_col2:
-                st.markdown(
-                    """
-                    <style>
-                    div[data-testid="stRadio"]:has(input[value*="Canvas (drag & drop)"]) {
-                        display: flex;
-                        flex-direction: row;
-                        align-items: center;
-                        gap: 0.8rem;
-                        margin: 0;
-                    }
-                    div[data-testid="stRadio"]:has(input[value*="Canvas (drag & drop)"]) > label {
-                        margin-bottom: 0 !important;
-                        font-weight: 600;
-                        white-space: nowrap;
-                    }
-                    </style>
-                    """,
-                    unsafe_allow_html=True,
-                )
-                editor_mode = st.radio(
-                    "Editor mode",
-                    ["Canvas (drag & drop)", "Lanes (classic)"],
-                    horizontal=True,
-                    key="wf_editor_mode",
-                    help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
-                )
+            st.markdown("### Canvas")
+            editor_mode = st.radio(
+                "Editor mode",
+                ["Canvas (drag & drop)", "Lanes (classic)"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="wf_editor_mode",
+                help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
+            )
 
             if editor_mode.startswith("Canvas"):
                 st.caption(
