@@ -6767,6 +6767,21 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         box-sizing: border-box !important;
         margin: 0 !important;
     }
+    /* Modal / Dialog styling: fixed height, white title, dark close button */
+    [data-testid="stDialog"] > div:first-child {
+        max-height: 85vh !important;
+        height: 85vh !important;
+    }
+    [data-testid="stDialog"] h2,
+    [data-testid="stDialog"] [data-testid="stHeadingWithActionElements"] h2 {
+        color: #ffffff !important;
+    }
+    [data-testid="stDialog"] button[aria-label="Close"] {
+        background-color: #1e293b !important;
+        color: #ffffff !important;
+        border-radius: 8px !important;
+        border: 1px solid #334155 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
