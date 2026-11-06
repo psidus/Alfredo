@@ -4575,15 +4575,44 @@ def render_workflow_assembler():
 
         
             st.markdown("---")
-            editor_mode = st.radio(
-                "Editor mode",
-                ["Canvas (drag & drop)", "Lanes (classic)"],
-                horizontal=True,
-                key="wf_editor_mode",
-                help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
-            )
+            head_col1, head_col2 = st.columns([0.45, 2.55], vertical_alignment="center")
+            with head_col1:
+                st.markdown("<h3 style='margin: 0; padding: 0;'>Canvas</h3>", unsafe_allow_html=True)
+            with head_col2:
+                st.markdown(
+                    """
+                    <style>
+                    div[data-testid="stRadio"]:has(input[value*="Canvas (drag & drop)"]) {
+                        display: flex;
+                        flex-direction: row;
+                        align-items: center;
+                        gap: 0.8rem;
+                        margin: 0;
+                    }
+                    div[data-testid="stRadio"]:has(input[value*="Canvas (drag & drop)"]) > label {
+                        margin-bottom: 0 !important;
+                        font-weight: 600;
+                        white-space: nowrap;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                editor_mode = st.radio(
+                    "Editor mode",
+                    ["Canvas (drag & drop)", "Lanes (classic)"],
+                    horizontal=True,
+                    key="wf_editor_mode",
+                    help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
+                )
 
             if editor_mode.startswith("Canvas"):
+                st.caption(
+                    "Blocks auto-fit text and snap inside Level columns (75% width). "
+                    "Agent name is a banner on the first task — no separate agent chips. "
+                    "Delete: 🗑 below, **Backspace** on the canvas, or node menu. "
+                    "Task left/right dots are for wiring; Level dots do nothing."
+                )
                 canvas_ok = False
                 try:
                     from ui.workflow_canvas_panel import render_canvas_palette_and_board

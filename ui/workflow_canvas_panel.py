@@ -478,7 +478,6 @@ def render_canvas_palette_and_board(
             )
 
     with right:
-        st.markdown("### Canvas")
         if not _check_streamlit_flow():
             st.error(
                 "Install `streamlit-flow-component` to use the drag-and-drop canvas "
@@ -531,12 +530,6 @@ def render_canvas_palette_and_board(
                     f"Selection ({direction}): " + ", ".join(st.session_state.wf_loop_select_ids)
                 )
 
-        st.caption(
-            "Blocks auto-fit text and snap inside Level columns (75% width). "
-            "Agent name is a banner on the first task — no separate agent chips. "
-            "Delete: 🗑 below, **Backspace** on the canvas, or node menu. "
-            "Task left/right dots are for wiring; Level dots do nothing."
-        )
         if "wf_flow_state" in st.session_state:
             st.session_state.wf_flow_state = strip_decorator_nodes_from_state(
                 st.session_state.wf_flow_state
