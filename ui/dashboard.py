@@ -123,6 +123,21 @@ def sanitize_input(text: str) -> str:
     text = text.replace('--', '')
     return text.strip()
 
+def get_alfredo_robot_b64() -> str:
+    """Return base64 data URI of the desktop Alfredo robot icon."""
+    try:
+        import base64
+        for candidate in ["ui/alfredo_robot.png", "ui/favicon.ico", "logo.png"]:
+            if os.path.exists(candidate):
+                with open(candidate, "rb") as f:
+                    data = f.read()
+                mime = "image/png" if candidate.endswith(".png") else "image/x-icon"
+                return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+    except Exception:
+        pass
+    return ""
+
+
 def sanitize_filename(name: str) -> str:
     """
     Creates a safe filename from a user-provided string.
@@ -1623,9 +1638,9 @@ def render_api_vault():
                 )
                 st.rerun()
             except sqlite3.IntegrityError:
-                st.error(f"Il modello '{model_name}' è già presente nel database.")
+                st.error(f"Model '{model_name}' is already in the database.")
             except Exception as e:
-                st.error(f"Errore durante l'aggiunta del modello: {e}")
+                st.error(f"Error adding model: {e}")
 
         models = db.read_all_models()
         if models:
@@ -2426,7 +2441,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                             unsafe_allow_html=True
                                         )
                 else:
-                    st.info("Nessun tool corrisponde alla ricerca.")
+                    st.info("No tools match your search.")
 
             # Compile selected tools from all checkboxes state
             selected_tools = [t for t in AVAILABLE_TOOLS if st.session_state.get(f"cb_task_{t}", False)]
@@ -5795,9 +5810,9 @@ def render_local_training():
             type=["csv", "txt", "json", "jsonl", "pdf"],
             accept_multiple_files=True,
         )
-        if st.button("Genera Dataset ChatML", type="primary"):
+        if st.button("Generate ChatML Dataset", type="primary"):
             if uploaded_files:
-                st.info("Salvataggio file e conversione in ChatML...")
+                st.info("Saving file and converting to ChatML...")
                 saved_paths = []
                 for f in uploaded_files:
                     save_dir = ft.RAW_DATASET_DIR
@@ -5813,11 +5828,11 @@ def render_local_training():
                         f"{result['total_entries']} esempi da {len(result['processed_files'])} file."
                     )
                 else:
-                    st.error("Nessun esempio generato. Controlla i file e i messaggi sotto.")
+                    st.error("No examples generated. Check files and messages below.")
                 for err in result.get("errors") or []:
                     st.warning(err)
             else:
-                st.warning("Carica almeno un file prima.")
+                st.warning("Upload at least one file first.")
 
         st.markdown("---")
         ok, ds_msg, ds_count = ft.ensure_dataset_ready()
@@ -5827,7 +5842,7 @@ def render_local_training():
             if preview:
                 st.dataframe(preview, use_container_width=True)
             else:
-                st.info("Dataset presente ma anteprima vuota.")
+                st.info("Dataset present but preview is empty.")
         else:
             st.info(ds_msg)
 
@@ -5849,7 +5864,7 @@ def render_local_training():
             )
             if "llama" in base_model.lower():
                 st.caption(
-                    "Llama gated: imposta `HUGGINGFACE_TOKEN` nel `.env` e accetta la licenza su HuggingFace."
+                    "Llama gated: set `HUGGINGFACE_TOKEN` in `.env` and accept the license on HuggingFace."
                 )
 
         with col2:
@@ -5874,11 +5889,11 @@ def render_local_training():
             st.warning(ds_info)
 
         st.markdown("---")
-        if st.button("Avvia Addestramento 🚀", type="primary", use_container_width=True):
+        if st.button("Start Training 🚀", type="primary", use_container_width=True):
             result = ft.start_training_process({"model": base_model, "preset": preset})
             if result.get("ok"):
                 st.success(result["message"])
-                st.info("Apri il tab Monitoring per seguire progressi e log.")
+                st.info("Open the Monitoring tab to track progress and logs.")
             else:
                 st.error(result.get("message", "Avvio training fallito."))
 
@@ -5894,25 +5909,25 @@ def render_local_training():
         pct = min(100, int((step / total) * 100))
         label = f"Step {step}/{total} — Loss: {loss:.4f}"
         if done:
-            label += " ✅ Completato"
+            label += " ✅ Completed"
         elif running:
-            label += " ⏳ In corso"
+            label += " ⏳ In progress"
         st.progress(pct, text=label)
 
         col_a, col_b = st.columns(2)
         with col_a:
             auto_refresh = st.checkbox("Auto-refresh (3s)", value=running and not done)
         with col_b:
-            if st.button("Aggiorna ora"):
+            if st.button("Refresh now"):
                 st.rerun()
 
         loss_history = ft.read_loss_history()
         if loss_history:
             st.line_chart(pd.DataFrame({"Loss": loss_history}))
         elif running:
-            st.info("In attesa dei primi valori di loss...")
+            st.info("Waiting for first loss values...")
         else:
-            st.caption("Nessuna curva loss ancora. Avvia un training per vedere i dati reali.")
+            st.caption("No loss curve yet. Start training to see real data.")
 
         with st.expander("Training Logs", expanded=True):
             st.code(ft.read_training_logs(), language="text")
@@ -5923,13 +5938,13 @@ def render_local_training():
 
     with tab_chat:
         st.subheader("Inference Test")
-        st.markdown("Testa l'adapter LoRA salvato in `storage/adapters/temp` dopo il training.")
+        st.markdown("Test the LoRA adapter saved in `storage/adapters/temp` after training.")
         if not os.path.isdir(ft.ADAPTER_DIR):
-            st.warning("Nessun adapter trovato. Completa prima un training.")
-        prompt = st.chat_input("Di' qualcosa al modello fine-tuned...")
+            st.warning("No adapter found. Complete training first.")
+        prompt = st.chat_input("Say something to the fine-tuned model...")
         if prompt:
             st.chat_message("user").write(prompt)
-            with st.spinner("Generazione in corso..."):
+            with st.spinner("Generating..."):
                 resp = ft.run_inference(prompt, ft.ADAPTER_DIR)
             st.chat_message("assistant").write(resp)
 
@@ -6576,18 +6591,38 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             margin-top: 0 !important;
             padding-top: 0 !important;
         }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button,
         [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button {
-            background: transparent !important;
+            background-color: transparent !important;
+            background-image: url('""" + get_alfredo_robot_b64() + """') !important;
+            background-repeat: no-repeat !important;
+            background-position: center !important;
+            background-size: contain !important;
             border: none !important;
             box-shadow: none !important;
-            padding: 0.1rem 0.2rem !important;
-            min-height: auto !important;
-            font-size: 1.55rem !important;
-            line-height: 1 !important;
+            width: 2.2rem !important;
+            height: 2.2rem !important;
+            min-height: 2.2rem !important;
+            min-width: 2.2rem !important;
+            padding: 0 !important;
+            color: transparent !important;
+            cursor: pointer !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            transition: transform 0.15s ease, opacity 0.15s ease !important;
         }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button:hover,
         [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button:hover {
-            background: rgba(128, 128, 128, 0.12) !important;
-            border-radius: 8px !important;
+            opacity: 0.85 !important;
+            transform: scale(1.08) !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+        }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button * {
+            display: none !important;
+            visibility: hidden !important;
         }
         [data-testid="stSidebar"] .sidebar-brand-block {
             margin-top: 0 !important;
@@ -6646,7 +6681,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         align-items: center !important;
         justify-content: flex-start !important;
     }
-    /* Assistant: circular robot button pinned to the right end of the toolbar */
+    /* Assistant: robot icon button without circle, sized to full 2.9rem */
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn {
         display: flex !important;
         justify-content: flex-end !important;
@@ -6657,12 +6692,24 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         height: 2.9rem !important;
         min-height: 2.9rem !important;
         padding: 0 !important;
-        border-radius: 50% !important;
-        font-size: 1.25rem !important;
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        font-size: 2.6rem !important;
         line-height: 1 !important;
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
+        cursor: pointer !important;
+        transition: transform 0.15s ease, opacity 0.15s ease !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button:hover {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        transform: scale(1.1) !important;
+        opacity: 0.85 !important;
     }
     [data-testid="stMain"] .st-key-telegram_toolbar > [data-testid="stLayoutWrapper"],
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) > [data-testid="stLayoutWrapper"] {
@@ -6712,9 +6759,10 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
     @st.dialog("🤖 Alfredo Assistant", width="large")
     def show_assistant():
         try:
-            from ui.views.assistant import render_assistant
-
-            render_assistant(compact=True)
+            import importlib
+            import ui.views.assistant as assistant_mod
+            importlib.reload(assistant_mod)
+            assistant_mod.render_assistant(compact=True)
         except Exception as exc:  # noqa: BLE001 - never break the toolbar
             st.error(f"Assistant unavailable: {exc}")
 
@@ -6780,7 +6828,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         try:
             render_api_vault()
         except Exception as e:
-            st.error(f"Errore nel caricamento di API Vault & Model Registry: {e}")
+            st.error(f"Error loading API Vault & Model Registry: {e}")
             st.exception(e)
 
     def page_asset_builder():
@@ -6790,42 +6838,42 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             try:
                 render_knowledge_base()
             except Exception as e:
-                st.error(f"Errore nel caricamento del Database: {e}")
+                st.error(f"Error loading Database: {e}")
                 st.exception(e)
                 
         with tab_agents:
             try:
                 render_agent_caserma()
             except Exception as e:
-                st.error(f"Errore nel caricamento di Agent Caserma: {e}")
+                st.error(f"Error loading Agent Caserma: {e}")
                 st.exception(e)
 
         with tab_tools:
             try:
                 render_tool_factory()
             except Exception as e:
-                st.error(f"Errore nel caricamento di Tool Factory: {e}")
+                st.error(f"Error loading Tool Factory: {e}")
                 st.exception(e)
 
     def page_task_builder():
         try:
             render_task_builder()
         except Exception as e:
-            st.error(f"Errore nel caricamento di Task Builder: {e}")
+            st.error(f"Error loading Task Builder: {e}")
             st.exception(e)
 
     def page_workflow_assembler():
         try:
             render_workflow_assembler()
         except Exception as e:
-            st.error(f"Errore nel caricamento di Workflow Assembler: {e}")
+            st.error(f"Error loading Workflow Assembler: {e}")
             st.exception(e)
 
     def page_history_monitoring():
         try:
             render_history_monitoring()
         except Exception as e:
-            st.error(f"Errore nel caricamento di History & Monitoring: {e}")
+            st.error(f"Error loading History & Monitoring: {e}")
             st.exception(e)
 
     def page_my_apps():
@@ -6846,7 +6894,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         try:
             render_workspace_system()
         except Exception as e:
-            st.error(f"Errore nel caricamento di Workspace & System: {e}")
+            st.error(f"Error loading Workspace & System: {e}")
             st.exception(e)
 
     pages = [
