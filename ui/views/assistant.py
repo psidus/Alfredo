@@ -439,7 +439,7 @@ def _render_single_approval(intr: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_assistant(compact: bool = False, *args, **kwargs) -> None:
+def render_assistant(compact: bool = False) -> None:
     """Page entry point.
 
     ``compact`` is used when the assistant is rendered inside the toolbar dialog:
