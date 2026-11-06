@@ -6681,14 +6681,16 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         align-items: center !important;
         justify-content: flex-start !important;
     }
-    /* Assistant: robot icon button without circle, sized to full 2.9rem */
+    /* Assistant: robot icon button without circle, filling container, same height as start bot */
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn {
         display: flex !important;
-        justify-content: flex-end !important;
+        justify-content: center !important;
+        align-items: center !important;
+        width: 100% !important;
     }
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button {
-        width: 2.9rem !important;
-        min-width: 2.9rem !important;
+        width: 100% !important;
+        min-width: 100% !important;
         height: 2.9rem !important;
         min-height: 2.9rem !important;
         padding: 0 !important;
@@ -6703,6 +6705,14 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         justify-content: center !important;
         cursor: pointer !important;
         transition: transform 0.15s ease, opacity 0.15s ease !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button p,
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button div {
+        font-size: 2.6rem !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
     }
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button:hover {
         background: transparent !important;
@@ -6770,7 +6780,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
     btn_label = "🔴 Stop Bot Telegram" if bot_running else "🟢 Start Bot Telegram"
 
     toolbar_bot, toolbar_config, toolbar_spacer, toolbar_assistant = st.columns(
-        [1.15, 1.15, 5.2, 0.6], vertical_alignment="center", gap="small"
+        [1.15, 1.15, 4.8, 1.0], vertical_alignment="center", gap="small"
     )
 
     with toolbar_bot:
@@ -6810,7 +6820,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
                     st.success("Telegram configuration saved to .env!")
                     st.rerun()
     with toolbar_assistant:
-        if st.button("🤖", key="assistant_open_btn", help="Alfredo Assistant — chat and workflows"):
+        if st.button("🤖", key="assistant_open_btn", help="Alfredo Assistant — chat and workflows", use_container_width=True):
             show_assistant()
 
 
