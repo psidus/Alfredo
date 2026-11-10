@@ -60,7 +60,10 @@ async function request<T>(
   body?: unknown,
 ): Promise<T> {
   const base = normalizeBaseUrl(config.baseUrl);
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "ngrok-skip-browser-warning": "true",
+  };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (config.token) headers["X-Control-Token"] = config.token;
 
