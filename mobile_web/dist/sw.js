@@ -2,16 +2,24 @@
  * - App shell: cache-first with runtime caching of hashed assets.
  * - API calls are never cached (they are authenticated and stateful).
  */
-const CACHE_NAME = "alfredo-shell-v3";
+const CACHE_NAME = "alfredo-shell-v4";
 const SCOPE = self.registration.scope;
 
 self.addEventListener("install", (event) => {
+  self.skipWaiting();
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll([SCOPE, `${SCOPE}manifest.webmanifest`]))
-      .catch(() => undefined)
-      .then(() => self.skipWaiting()),
+      .then((cache) =>
+        cache.addAll([
+          SCOPE,
+          `${SCOPE}manifest.webmanifest`,
+          `${SCOPE}icon-512.png`,
+          `${SCOPE}icon-192.png`,
+          `${SCOPE}alfredo_robot.png`,
+        ])
+      )
+      .catch(() => undefined),
   );
 });
 
