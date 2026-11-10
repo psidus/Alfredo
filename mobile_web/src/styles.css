@@ -143,16 +143,27 @@ button {
   padding-bottom: 28px;
 }
 
-/* Arrow styling for perfect vertical centering */
-.arrow-left-icon {
+/* Nav back button with arrow: pixel-perfect vertical centering and close spacing */
+.btn-nav-back {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 3px !important;
+  line-height: 1 !important;
+  padding: 6px 12px !important;
+}
+
+.btn-nav-back .arrow-left-svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.btn-nav-back .nav-text {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  font-size: 1.2em;
   line-height: 1;
-  vertical-align: middle;
-  transform: translateY(-1px);
-  margin-right: 4px;
 }
 
 .card {

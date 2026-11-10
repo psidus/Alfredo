@@ -202,9 +202,20 @@ export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props
   return (
     <div className="screen">
       <div className="row between">
-        <button className="btn small ghost" onClick={onBack}>
-          <span className="arrow-left-icon">←</span>
-          <span>{currentLang === "en" ? "Back" : "Indietro"}</span>
+        <button className="btn small ghost btn-nav-back" onClick={onBack}>
+          <svg
+            className="arrow-left-svg"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M10 13L5 8L10 3" />
+          </svg>
+          <span className="nav-text">{currentLang === "en" ? "Back" : "Indietro"}</span>
         </button>
         <span className="muted">Run #{runId}</span>
       </div>

@@ -151,13 +151,24 @@ export function FilesScreen({ config, lang: propLang }: Props) {
     <div className="screen">
       <div className="row between">
         <button
-          className="btn small ghost"
+          className="btn small ghost btn-nav-back"
           onClick={() => setPath(parentOf(path))}
           disabled={!path}
           title={currentLang === "en" ? "Parent folder" : "Cartella superiore"}
         >
-          <span className="arrow-left-icon">←</span>
-          <span>{currentLang === "en" ? "Up" : "Su"}</span>
+          <svg
+            className="arrow-left-svg"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M10 13L5 8L10 3" />
+          </svg>
+          <span className="nav-text">{currentLang === "en" ? "Up" : "Su"}</span>
         </button>
         <button
           className="btn small ghost"
