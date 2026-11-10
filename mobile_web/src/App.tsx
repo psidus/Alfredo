@@ -10,16 +10,9 @@ import { ApprovalsScreen } from "./screens/Approvals";
 import { SettingsScreen } from "./screens/Settings";
 import { FilesScreen } from "./screens/Files";
 import { usePolling } from "./components/ui";
+import { loadLanguage, saveLanguage, translations, type Language, type TranslationKey } from "./i18n";
 
 type View = "tabs" | "settings" | "run";
-
-const TAB_TITLES: Record<Tab, { title: string; hint: string }> = {
-  chat: { title: "Alfredo", hint: "assistente libero" },
-  workflows: { title: "Workflow", hint: "avvia un processo salvato" },
-  runs: { title: "Esecuzioni", hint: "storico e stato in tempo reale" },
-  approvals: { title: "Approvazioni", hint: "decisioni che aspettano te" },
-  files: { title: "File", hint: "workspace, anteprime e upload" },
-};
 
 function initialTab(): Tab {
   const requested = new URLSearchParams(window.location.search).get("tab");
@@ -40,6 +33,18 @@ export default function App() {
   const [view, setView] = useState<View>(() => (loadConfig().token ? "tabs" : "settings"));
   const [runId, setRunId] = useState<number | null>(null);
   const [pending, setPending] = useState(0);
+  const [lang, setLang] = useState<Language>(() => loadLanguage());
+
+  const handleLanguageChange = (nextLang: Language) => {
+    setLang(nextLang);
+    saveLanguage(nextLang);
+  };
+
+  const toggleLanguage = () => {
+    handleLanguageChange(lang === "it" ? "en" : "it");
+  };
+
+  const t = (key: TranslationKey): string => translations[lang][key] || "";
 
   const refreshPending = useCallback(async () => {
     if (!config.token && !config.baseUrl) return;
@@ -81,30 +86,83 @@ export default function App() {
     setView("run");
   };
 
-  const header = view === "run" ? { title: "Esecuzione", hint: "stato e approvazioni" } : TAB_TITLES[tab];
+  const tabTitles: Record<Tab, { title: string; hint: string }> = {
+    chat: { title: t("assistantTitle"), hint: t("assistantHint") },
+    workflows: { title: t("workflowsTitle"), hint: t("workflowsHint") },
+    runs: { title: t("runsTitle"), hint: t("runsHint") },
+    approvals: { title: t("approvalsTitle"), hint: t("approvalsHint") },
+    files: { title: t("filesTitle"), hint: t("filesHint") },
+  };
+
+  const currentHeader =
+    view === "run"
+      ? { title: t("runDetailTitle"), hint: t("runDetailHint") }
+      : tabTitles[tab];
+
+  const currentTitle = view === "settings" ? t("settingsTitle") : currentHeader.title;
+  const currentHint = view === "settings" ? t("settingsHint") : currentHeader.hint;
 
   return (
     <div className="app">
       <header className="app-header">
-        <div>
-          <h1>{view === "settings" ? "Impostazioni" : header.title}</h1>
-          <p className="hint">{view === "settings" ? "connessione al server" : header.hint}</p>
+        <div className="header-title-container">
+          <div className="header-title-row">
+            <h1>{currentTitle}</h1>
+            <img
+              src="/app/alfredo_robot.png"
+              alt="Alfredo"
+              className="header-robot-icon"
+              title="Alfredo Assistant"
+            />
+          </div>
+          <p className="hint">{currentHint}</p>
         </div>
-        {view !== "settings" ? (
+
+        <div className="header-actions">
           <button
-            className="btn small ghost"
-            aria-label="Impostazioni"
-            onClick={() => setView("settings")}
+            className="btn small ghost lang-toggle-btn"
+            onClick={toggleLanguage}
+            title={lang === "it" ? "Switch to English" : "Passa all'italiano"}
+            aria-label="Cambia lingua"
           >
-            ⚙︎
+            {lang === "it" ? "🇮🇹 IT" : "🇬🇧 EN"}
           </button>
-        ) : null}
+          {view !== "settings" ? (
+            <button
+              className="btn small ghost"
+              aria-label={t("settings")}
+              onClick={() => setView("settings")}
+              title={t("settings")}
+            >
+              ⚙︎
+            </button>
+          ) : (
+            <button
+              className="btn small ghost"
+              aria-label={t("close")}
+              onClick={() => setView("tabs")}
+              title={t("close")}
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </header>
 
       {view === "settings" ? (
-        <SettingsScreen config={config} onSave={handleSaveConfig} />
+        <SettingsScreen
+          config={config}
+          onSave={handleSaveConfig}
+          lang={lang}
+          onLanguageChange={handleLanguageChange}
+        />
       ) : view === "run" && runId != null ? (
-        <RunDetailScreen config={config} runId={runId} onBack={() => setView("tabs")} />
+        <RunDetailScreen
+          config={config}
+          runId={runId}
+          onBack={() => setView("tabs")}
+          lang={lang}
+        />
       ) : (
         <>
           {tab === "chat" ? (
@@ -114,7 +172,7 @@ export default function App() {
             <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />
           ) : null}
           {tab === "runs" ? <RunsScreen config={config} onOpen={openRun} /> : null}
-          {tab === "files" ? <FilesScreen config={config} /> : null}
+          {tab === "files" ? <FilesScreen config={config} lang={lang} /> : null}
           {tab === "approvals" ? (
             <ApprovalsScreen
               config={config}
@@ -148,14 +206,14 @@ export default function App() {
             </span>
             <span>
               {key === "chat"
-                ? "Chat"
+                ? t("chatTab")
                 : key === "workflows"
-                  ? "Workflow"
+                  ? t("workflowsTab")
                   : key === "runs"
-                    ? "Run"
+                    ? t("runsTab")
                     : key === "approvals"
-                      ? "Approvazioni"
-                      : "File"}
+                      ? t("approvalsTab")
+                      : t("filesTab")}
             </span>
             {key === "approvals" && pending > 0 ? (
               <span className="badge">{pending > 9 ? "9+" : pending}</span>

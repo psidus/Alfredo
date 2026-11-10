@@ -4,13 +4,16 @@ import { disablePush, enablePush, pushStatus, sendTestPush } from "../push";
 import type { PushStatus } from "../push";
 import type { ConnectionConfig, SystemStatus } from "../types";
 import { ErrorBanner, usePolling } from "../components/ui";
+import { translations, type Language } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
   onSave: (config: ConnectionConfig) => void;
+  lang?: Language;
+  onLanguageChange?: (lang: Language) => void;
 }
 
-export function SettingsScreen({ config, onSave }: Props) {
+export function SettingsScreen({ config, onSave, lang = "it", onLanguageChange }: Props) {
   const [baseUrl, setBaseUrl] = useState(config.baseUrl);
   const [token, setToken] = useState(config.token);
   const [error, setError] = useState<string | null>(null);
@@ -21,6 +24,8 @@ export function SettingsScreen({ config, onSave }: Props) {
   const [pushMessage, setPushMessage] = useState<string | null>(null);
   const [pushError, setPushError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
+
+  const t = translations[lang];
 
   useEffect(() => {
     void pushStatus().then(setPush);
@@ -44,7 +49,7 @@ export function SettingsScreen({ config, onSave }: Props) {
 
   const save = () => {
     onSave(liveConfig);
-    setStatus("Impostazioni salvate.");
+    setStatus(t.saved);
     setError(null);
   };
 
@@ -54,7 +59,11 @@ export function SettingsScreen({ config, onSave }: Props) {
     setStatus(null);
     try {
       const health = await api.health(liveConfig);
-      setStatus(`Connessione OK · versione ${health.version ?? "?"}`);
+      setStatus(
+        lang === "it"
+          ? `Connessione OK · versione ${health.version ?? "?"}`
+          : `Connection OK · version ${health.version ?? "?"}`
+      );
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -70,7 +79,11 @@ export function SettingsScreen({ config, onSave }: Props) {
     try {
       await enablePush(liveConfig);
       setPush(await pushStatus());
-      setPushMessage("Notifiche attive su questo dispositivo.");
+      setPushMessage(
+        lang === "it"
+          ? "Notifiche attive su questo dispositivo."
+          : "Notifications enabled on this device."
+      );
     } catch (exc) {
       setPushError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -85,7 +98,11 @@ export function SettingsScreen({ config, onSave }: Props) {
     try {
       await disablePush(liveConfig);
       setPush(await pushStatus());
-      setPushMessage("Notifiche disattivate su questo dispositivo.");
+      setPushMessage(
+        lang === "it"
+          ? "Notifiche disattivate su questo dispositivo."
+          : "Notifications disabled on this device."
+      );
     } catch (exc) {
       setPushError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -99,7 +116,11 @@ export function SettingsScreen({ config, onSave }: Props) {
     setPushMessage(null);
     try {
       const delivered = await sendTestPush(liveConfig);
-      setPushMessage(`Notifica inviata a ${delivered} dispositivo/i.`);
+      setPushMessage(
+        lang === "it"
+          ? `Notifica inviata a ${delivered} dispositivo/i.`
+          : `Notification sent to ${delivered} device(s).`
+      );
     } catch (exc) {
       setPushError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -108,14 +129,32 @@ export function SettingsScreen({ config, onSave }: Props) {
   };
 
   return (
-    <div className="screen">
-      <div className="scroll-area">
+    <div className="screen settings-screen">
+      <div className="scroll-area settings-scroll">
+        {/* Card selezione lingua */}
         <div className="card">
-          <h2>Server Alfredo</h2>
-          <p className="muted">
-            Indirizzo della Control API (es. <code>http://192.168.1.20:8000</code>) e token di
-            controllo.
-          </p>
+          <h2>{t.languageTitle}</h2>
+          <p className="muted">{t.languageHint}</p>
+          <div className="actions" style={{ marginTop: "10px" }}>
+            <button
+              className={`btn ${lang === "it" ? "primary" : "ghost"}`}
+              onClick={() => onLanguageChange?.("it")}
+            >
+              🇮🇹 Italiano
+            </button>
+            <button
+              className={`btn ${lang === "en" ? "primary" : "ghost"}`}
+              onClick={() => onLanguageChange?.("en")}
+            >
+              🇬🇧 English
+            </button>
+          </div>
+        </div>
+
+        {/* Card Server */}
+        <div className="card">
+          <h2>{t.serverTitle}</h2>
+          <p className="muted">{t.serverHint}</p>
 
           <div className="field">
             <label htmlFor="base-url">Base URL</label>
@@ -126,12 +165,12 @@ export function SettingsScreen({ config, onSave }: Props) {
               autoCorrect="off"
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="http://192.168.1.20:8000"
+              placeholder="https://inexpugnable-marvis-nonvalid.ngrok-free.app"
             />
           </div>
 
           <div className="field">
-            <label htmlFor="control-token">Control token</label>
+            <label htmlFor="control-token">{t.controlToken}</label>
             <input
               id="control-token"
               type="password"
@@ -148,28 +187,33 @@ export function SettingsScreen({ config, onSave }: Props) {
 
           <div className="actions">
             <button className="btn primary" onClick={save}>
-              Salva
+              {t.save}
             </button>
             <button className="btn" onClick={() => void test()} disabled={busy}>
-              {busy ? "Verifico…" : "Test connessione"}
+              {busy ? t.verifying : t.testConnection}
             </button>
           </div>
         </div>
 
+        {/* Card Sistema e GPU */}
         <div className="card">
-          <h3>Sistema e GPU</h3>
+          <h3>{t.systemGpuTitle}</h3>
           {!system ? (
-            <p className="muted">Dati non disponibili: server non raggiungibile.</p>
+            <p className="muted">
+              {lang === "it"
+                ? "Dati non disponibili: server non raggiungibile."
+                : "Data unavailable: server unreachable."}
+            </p>
           ) : (
             <>
               <p className="muted">
                 {system.gpu.available
-                  ? `${system.gpu.name || "GPU"} · ${((system.gpu.free_mb ?? 0) / 1024).toFixed(1)} GB liberi`
-                  : system.gpu.error || "GPU non rilevata (nvidia-smi assente)"}
+                  ? `${system.gpu.name || "GPU"} · ${((system.gpu.free_mb ?? 0) / 1024).toFixed(1)} GB ${lang === "it" ? "liberi" : "free"}`
+                  : system.gpu.error || (lang === "it" ? "GPU non rilevata" : "GPU not detected")}
               </p>
               <div className="file-row">
                 <div className="file-meta">
-                  <strong>Coda GPU</strong>
+                  <strong>{lang === "it" ? "Coda GPU" : "GPU Queue"}</strong>
                   <span className="muted">
                     {system.queue?.current
                       ? `${system.queue.current.profile}${
@@ -177,11 +221,11 @@ export function SettingsScreen({ config, onSave }: Props) {
                             ? ` · run #${system.queue.current.run_id}`
                             : ""
                         }`
-                      : "libera"}
+                      : lang === "it" ? "libera" : "idle"}
                     {system.queue?.waiting?.length
-                      ? ` · ${system.queue.waiting.length} in attesa${
+                      ? ` · ${system.queue.waiting.length} ${lang === "it" ? "in attesa" : "waiting"}${
                           system.queue.waiting[0].run_id
-                            ? ` dietro run #${system.queue.waiting[0].run_id}`
+                            ? ` behind #${system.queue.waiting[0].run_id}`
                             : ""
                         }${
                           system.queue.waiting[0].eta_s != null
@@ -200,61 +244,58 @@ export function SettingsScreen({ config, onSave }: Props) {
                     </strong>
                     <span className="muted">
                       {profile.fits === false
-                        ? "non entra in VRAM"
+                        ? (lang === "it" ? "non entra in VRAM" : "exceeds VRAM")
                         : profile.fits
-                          ? "entra in VRAM"
-                          : "VRAM non nota"}
+                          ? (lang === "it" ? "entra in VRAM" : "fits VRAM")
+                          : (lang === "it" ? "VRAM non nota" : "unknown VRAM")}
                       {profile.estimated_vram_mb ? ` · ~${profile.estimated_vram_mb} MB` : ""}
-                      {profile.headroom_mb != null ? ` · margine ${profile.headroom_mb} MB` : ""}
-                      {profile.avg_call_s != null ? ` · ~${profile.avg_call_s} s/chiamata` : ""}
+                      {profile.headroom_mb != null ? ` · headroom ${profile.headroom_mb} MB` : ""}
+                      {profile.avg_call_s != null ? ` · ~${profile.avg_call_s} s/call` : ""}
                     </span>
                   </div>
                 </div>
               ))}
               <p className="muted">
-                Chiamate servite: {system.metrics?.served ?? 0} · attese scadute:{" "}
+                {lang === "it" ? "Chiamate servite: " : "Calls served: "}
+                {system.metrics?.served ?? 0} ·{" "}
+                {lang === "it" ? "attese scadute: " : "timeouts: "}
                 {system.metrics?.timeouts ?? 0}
                 {system.metrics?.avg_wait_s != null
-                  ? ` · attesa media ${system.metrics.avg_wait_s.toFixed(1)} s`
-                  : ""}
-                {system.metrics?.evictions
-                  ? ` · cambi modello: ${system.metrics.evictions}`
+                  ? ` · ${lang === "it" ? "attesa media" : "avg wait"} ${system.metrics.avg_wait_s.toFixed(1)} s`
                   : ""}
               </p>
-              {Object.entries(system.metrics?.first_token ?? {}).map(([name, value]) => (
-                <p className="muted" key={name}>
-                  Primo token {name}:{" "}
-                  {value.avg_s != null ? `${value.avg_s.toFixed(2)} s medi` : "n/d"} ·{" "}
-                  {value.count} campioni
-                </p>
-              ))}
             </>
           )}
         </div>
 
+        {/* Card Notifiche push */}
         <div className="card">
-          <h3>Notifiche push</h3>
-          <p className="muted">
-            Ricevi sul telefono le richieste di approvazione anche con l'app chiusa. Richiede la
-            versione servita dal server (<code>/app/</code>) e <code>pywebpush</code> installato.
-          </p>
+          <h3>{t.pushTitle}</h3>
+          <p className="muted">{t.pushHint}</p>
 
           {push === null ? (
-            <p className="muted">Verifico il supporto…</p>
+            <p className="muted">{lang === "it" ? "Verifico il supporto…" : "Checking support…"}</p>
           ) : !push.supported ? (
             <p className="muted">
-              Questo browser non supporta le notifiche push. Su iOS serve iOS 16.4+ con l'app
-              aggiunta alla schermata Home.
+              {lang === "it"
+                ? "Questo browser non supporta le notifiche push. Su iOS serve iOS 16.4+ con l'app aggiunta alla schermata Home."
+                : "This browser does not support push notifications. On iOS, iOS 16.4+ is required with app added to Home Screen."}
             </p>
           ) : push.permission === "denied" ? (
             <p className="banner">
-              Notifiche bloccate dal browser: riabilita i permessi per questo sito dalle
-              impostazioni del telefono.
+              {lang === "it"
+                ? "Notifiche bloccate dal browser: riabilita i permessi per questo sito dalle impostazioni del telefono."
+                : "Notifications blocked by browser: enable site permissions in phone settings."}
             </p>
           ) : (
             <p className="muted">
-              Stato: <strong>{push.subscribed ? "attive" : "non attive"}</strong>
-              {push.endpoint ? " · dispositivo registrato" : ""}
+              {lang === "it" ? "Stato: " : "Status: "}
+              <strong>
+                {push.subscribed
+                  ? (lang === "it" ? "attive" : "active")
+                  : (lang === "it" ? "non attive" : "disabled")}
+              </strong>
+              {push.endpoint ? (lang === "it" ? " · dispositivo registrato" : " · device registered") : ""}
             </p>
           )}
 
@@ -265,15 +306,15 @@ export function SettingsScreen({ config, onSave }: Props) {
             <div className="actions">
               {!push.subscribed ? (
                 <button className="btn primary" onClick={() => void activatePush()} disabled={pushBusy}>
-                  {pushBusy ? "Attivo…" : "Attiva notifiche"}
+                  {pushBusy ? (lang === "it" ? "Attivo…" : "Enabling…") : t.enablePush}
                 </button>
               ) : (
                 <>
                   <button className="btn" onClick={() => void testPush()} disabled={pushBusy}>
-                    {pushBusy ? "Invio…" : "Prova notifica"}
+                    {pushBusy ? (lang === "it" ? "Invio…" : "Sending…") : t.sendTestPush}
                   </button>
                   <button className="btn ghost" onClick={() => void deactivatePush()} disabled={pushBusy}>
-                    Disattiva
+                    {t.disablePush}
                   </button>
                 </>
               )}
@@ -281,21 +322,13 @@ export function SettingsScreen({ config, onSave }: Props) {
           ) : null}
         </div>
 
+        {/* Card Informazioni */}
         <div className="card">
-          <h3>Installazione come app</h3>
+          <h3>{lang === "it" ? "Installazione & Note" : "Installation & Notes"}</h3>
           <p className="muted">
-            Dopo aver aperto questa pagina nel browser del telefono, usa “Aggiungi alla schermata
-            Home” (iOS Safari) o “Installa app” (Chrome Android). L'interfaccia resta disponibile
-            offline; le chiamate al server richiedono la rete.
-          </p>
-        </div>
-
-        <div className="card">
-          <h3>Note</h3>
-          <p className="muted">
-            Il token viene salvato solo su questo dispositivo. La Control API deve essere
-            raggiungibile sulla rete locale e <code>ALFREDO_CONTROL_TOKEN</code> deve coincidere con
-            quello impostato sul server.
+            {lang === "it"
+              ? "Usa 'Installa applicazione' (Chrome su Android) o 'Aggiungi a schermata Home' (Safari su iOS) per usare Alfredo a schermo intero come una vera app nativa."
+              : "Use 'Install app' (Chrome on Android) or 'Add to Home Screen' (Safari on iOS) to use Alfredo full-screen like a native app."}
           </p>
         </div>
       </div>

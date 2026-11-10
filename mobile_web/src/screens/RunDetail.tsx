@@ -12,11 +12,13 @@ import type {
 import { isTerminal, needsApproval } from "../types";
 import { ErrorBanner, Spinner, StatusChip, formatBytes, formatWhen, usePolling } from "../components/ui";
 import { FilePreviewCard } from "../components/FilePreviewCard";
+import type { Language } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
   runId: number;
   onBack: () => void;
+  lang?: Language;
 }
 
 const EVENT_LABELS: Record<string, string> = {
@@ -49,7 +51,7 @@ function eventDetail(event: RunEvent): string {
   return "";
 }
 
-export function RunDetailScreen({ config, runId, onBack }: Props) {
+export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [runFiles, setRunFiles] = useState<RunFile[]>([]);
@@ -184,7 +186,8 @@ export function RunDetailScreen({ config, runId, onBack }: Props) {
     <div className="screen">
       <div className="row between">
         <button className="btn small ghost" onClick={onBack}>
-          ← Indietro
+          <span className="arrow-left-icon">←</span>
+          <span>{lang === "en" ? "Back" : "Indietro"}</span>
         </button>
         <span className="muted">Run #{runId}</span>
       </div>

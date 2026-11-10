@@ -7,16 +7,13 @@ import type {
   RunFile,
   ShareLink,
 } from "../types";
-import {
-  ErrorBanner,
-  Spinner,
-  formatBytes,
-  usePolling,
-} from "../components/ui";
+import { ErrorBanner, Spinner, formatBytes, usePolling } from "../components/ui";
 import { FilePreviewCard } from "../components/FilePreviewCard";
+import type { Language } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
+  lang?: Language;
 }
 
 const KIND_ICONS: Record<string, string> = {
@@ -40,7 +37,7 @@ function parentOf(path: string): string {
   return parts.join("/");
 }
 
-export function FilesScreen({ config }: Props) {
+export function FilesScreen({ config, lang = "it" }: Props) {
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<RunFile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -158,8 +155,10 @@ export function FilesScreen({ config }: Props) {
           className="btn small ghost"
           onClick={() => setPath(parentOf(path))}
           disabled={!path}
+          title={lang === "en" ? "Parent folder" : "Cartella superiore"}
         >
-          ← Su
+          <span className="arrow-left-icon">←</span>
+          <span>{lang === "en" ? "Up" : "Su"}</span>
         </button>
         <button
           className="btn small ghost"
