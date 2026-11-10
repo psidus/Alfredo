@@ -410,6 +410,16 @@ def export_workflow(
                 "model_tier": step.get("model_tier", "default"),
             }
             graph_out.append(node)
+        elif isinstance(step, dict) and step.get("type") not in (None, "task", "agent"):
+            # Control + typed blocks (input/hitl/export/loop/level/llm/tool/router)
+            # have no external task ref: ship them as-is, minus local snapshots.
+            node = {
+                k: v
+                for k, v in step.items()
+                if k not in ("task_snapshot", "task_snapshots")
+            }
+            node.setdefault("id", f"node_{i}")
+            graph_out.append(node)
         elif isinstance(step, dict):
             tid = step.get("task_id")
             node = {
@@ -706,6 +716,11 @@ def import_workflow(
                 "execution_level": node.get("execution_level", 1),
                 "model_tier": node.get("model_tier", "default"),
             })
+        elif node.get("type") not in (None, "task", "agent"):
+            # Control + typed blocks keep their schema unchanged (no task refs).
+            imported = {k: v for k, v in node.items() if k not in ("task_snapshot", "task_snapshots")}
+            imported.setdefault("id", f"node_{i}")
+            graph_out.append(imported)
         else:
             ref = node.get("task")
             if ref not in ref_to_task_id:

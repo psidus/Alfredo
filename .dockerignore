@@ -25,3 +25,7 @@ huggingface_ready_for_vector_db/
 scratch/
 venv_rag/
 
+mobile_web/node_modules/
+config/push_vapid.json
+config/share_secret.txt
+config/automations_state.json

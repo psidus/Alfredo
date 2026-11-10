@@ -31,6 +31,8 @@ from core.master_ai import MasterAI
 from core.crew_builder import build_crew
 from core.notification_manager import NotificationManager
 from core.human_in_the_loop import has_pending_request, provide_human_input
+from core.assistant_engine import AssistantEngine, build_workflow_catalog, should_route
+from core import run_service
 
 # Load environment variables
 load_env()
@@ -50,6 +52,8 @@ logger = logging.getLogger(__name__)
 db = DBManager()
 master_ai = MasterAI()
 notifier = NotificationManager()
+# Free chat and saved-workflow decisions share the same engine used by the dashboard.
+assistant_engine = AssistantEngine(master=master_ai)
 
 # --- Post-processing watchdog (seconds) ---
 # Hard bounds so a workflow cannot sit forever on review or before the final message.
@@ -658,11 +662,168 @@ async def workflow_selection_callback(update: Update, context: ContextTypes.DEFA
     return PLANNING_MODE
 
 
+# ---------------------------------------------------------------------------
+# Unified assistant: free chat + saved workflows (same engine as the dashboard)
+# ---------------------------------------------------------------------------
+
+
+async def _notify_pending_interrupts(context, chat_id: int, run_id: int) -> None:
+    from core.interrupts import notify_interrupt
+
+    pending = await asyncio.to_thread(run_service.pending_interrupts, run_id, str(chat_id))
+    for intr in pending:
+        await asyncio.to_thread(notify_interrupt, intr)
+    if pending:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏸️ In attesa di approvazione. Rispondi qui (anche con 1, 2, …) oppure usa i pulsanti.",
+        )
+
+
+async def _deliver_run_outcome(context, chat_id: int, run_id: int, outcome: dict) -> None:
+    """Send the final result, the next approval request, or the failure."""
+    status = str((outcome or {}).get("status") or "unknown").lower()
+
+    if status in ("waiting_human", "paused"):
+        await _notify_pending_interrupts(context, chat_id, run_id)
+        return
+    if status == "failed":
+        detail = (outcome or {}).get("error") or "errore sconosciuto"
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"❌ Run #{run_id} fallita.\n{detail}"[:3900]
+        )
+        return
+    if status != "completed":
+        await context.bot.send_message(chat_id=chat_id, text=f"Run #{run_id}: stato {status}.")
+        return
+
+    info = await asyncio.to_thread(run_service.get_run, run_id)
+    result = (info.get("display_text") or (outcome or {}).get("result") or "").strip()
+    wf_name = "Workflow"
+    try:
+        workflow = db.read_workflow(info.get("workflow_id"))
+        if workflow:
+            wf_name = workflow.get("name") or wf_name
+    except Exception:
+        pass
+
+    await send_long_message(
+        context=context,
+        chat_id=chat_id,
+        text=f"✅ {wf_name} completato (Run #{run_id}).\n\n{result}",
+        parse_mode=None,
+    )
+
+    for path in (info.get("payload") or {}).get("exports") or []:
+        try:
+            if os.path.isfile(path):
+                with open(path, "rb") as fh:
+                    await context.bot.send_document(chat_id=chat_id, document=fh)
+        except Exception as exc:
+            logger.warning(f"Could not send export {path}: {exc}")
+
+
+async def _start_workflow_run(update, context, workflow_id, inputs, name: str) -> None:
+    chat_id = update.effective_chat.id
+    os.environ["CURRENT_CHAT_ID"] = str(chat_id)
+    run_id = await asyncio.to_thread(run_service.create_run, workflow_id, inputs, "telegram")
+    await context.bot.send_message(chat_id=chat_id, text=f"🚀 Run #{run_id} avviata: {name}.")
+
+    async def _worker():
+        try:
+            outcome = await asyncio.to_thread(
+                run_service.execute_run, run_id, chat_id=str(chat_id)
+            )
+            await _deliver_run_outcome(context, chat_id, run_id, outcome)
+        except Exception as exc:
+            logger.exception(f"Run {run_id} crashed from Telegram")
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"❌ Run #{run_id} interrotta: {exc}"[:3900]
+                )
+            except Exception:
+                pass
+
+    context.application.create_task(_worker())
+
+
+async def _handle_pending_run_interrupt(update, context, user_input: str) -> bool:
+    """Answer a persistent approval for this chat, if one is waiting."""
+    chat_id = update.effective_chat.id
+    pending = await asyncio.to_thread(run_service.pending_interrupts, None, str(chat_id))
+    if not pending:
+        return False
+
+    from core.interrupts import resolve_option
+
+    intr = pending[0]
+    answer = resolve_option(intr, user_input)
+    await update.message.reply_text("⏳ Applico la risposta e riprendo la run…")
+
+    async def _worker():
+        outcome = await asyncio.to_thread(
+            run_service.resume_interrupt, int(intr["id"]), answer
+        )
+        await _deliver_run_outcome(context, chat_id, int(intr["run_id"]), outcome)
+
+    context.application.create_task(_worker())
+    return True
+
+
+async def _continue_direct_workflow(update, context, user_input: str) -> int:
+    """Collect the inputs of a workflow chosen by the decision agent."""
+    pending = dict(context.user_data.get("direct_pending") or {})
+    missing = list(pending.get("missing") or [])
+    inputs = dict(pending.get("inputs") or {})
+    prompts = dict(pending.get("prompts") or {})
+
+    if not missing:
+        context.user_data.pop("direct_pending", None)
+        await _start_workflow_run(
+            update, context, pending.get("workflow_id"), inputs, pending.get("name") or "Workflow"
+        )
+        return ConversationHandler.END
+
+    key = missing.pop(0)
+    inputs[key] = user_input.strip()
+    pending["inputs"] = inputs
+    pending["missing"] = missing
+    context.user_data["direct_pending"] = pending
+
+    if missing:
+        nxt = missing[0]
+        await update.message.reply_text(f"Salvato. Ora mi serve: {prompts.get(nxt) or nxt}")
+        return ConversationHandler.END
+
+    context.user_data.pop("direct_pending", None)
+    await _start_workflow_run(
+        update, context, pending.get("workflow_id"), inputs, pending.get("name") or "Workflow"
+    )
+    return ConversationHandler.END
+
+
 @whitelist_check
 async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_input = update.message.text
+    """Free conversation + direct workflow execution through the shared engine."""
+    user_input = (update.message.text or "").strip()
     chat_id = update.effective_chat.id
 
+    if not user_input:
+        return ConversationHandler.END
+
+    # Cancel a workflow that was waiting for inputs.
+    if context.user_data.get("direct_pending") and user_input.lower() in (
+        "annulla", "cancel", "stop", "/cancel", "/stop",
+    ):
+        context.user_data.pop("direct_pending", None)
+        await update.message.reply_text("Ok, annullato.")
+        return ConversationHandler.END
+
+    # 1. Persistent approvals (survive restarts, work from the dashboard too).
+    if await _handle_pending_run_interrupt(update, context, user_input):
+        return ConversationHandler.END
+
+    # 2. Legacy blocking HITL (batch/loop bodies, dynamic plans).
     if has_pending_request(str(chat_id)):
         provide_human_input(str(chat_id), user_input)
         await context.bot.send_message(
@@ -670,6 +831,11 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return ConversationHandler.END
 
+    # 3. A workflow chosen by the decision agent waiting for declared inputs.
+    if context.user_data.get("direct_pending"):
+        return await _continue_direct_workflow(update, context, user_input)
+
+    # 4. Explicit workflow menu request.
     if _wants_workflow_menu(user_input):
         return await _present_workflow_menu(chat_id, context.bot, context.user_data)
 
@@ -677,61 +843,87 @@ async def free_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "🔎 <i>Alfredo is thinking...</i>", parse_mode=ParseMode.HTML
     )
 
-    context.user_data["base_workflow"] = None
-    context.user_data["chat_history"] = []
-    context.user_data["plan_customized"] = True
-
-    past_context_record = db.get_context(str(chat_id))
-    accumulated_context = past_context_record.get('accumulated_context') if past_context_record else None
-
-    result = await asyncio.to_thread(master_ai.chat_plan, user_input, saved_context=accumulated_context)
-    result = _normalize_planner_result(result, user_input=user_input, base_workflow=None, chat_history=[])
-
-    if result.get("status") == "show_workflows":
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        return await _present_workflow_menu(chat_id, context.bot, context.user_data)
-
-    context.user_data["chat_history"].append({"role": "user", "content": user_input})
-    context.user_data["chat_history"].append({"role": "assistant", "content": result["response"]})
+    history = list(context.user_data.get("chat_history") or [])
+    try:
+        cards = await asyncio.to_thread(build_workflow_catalog)
+    except Exception as cat_err:
+        logger.warning(f"Could not load workflow catalogue: {cat_err}")
+        cards = []
 
     try:
-        await status_msg.edit_text(result["response"])
-    except Exception as edit_err:
-        logger.error(f"Failed to edit free-chat status message: {edit_err}")
-        await context.bot.send_message(chat_id=chat_id, text=result["response"])
+        reply = await asyncio.to_thread(assistant_engine.chat, user_input, history)
+    except Exception as chat_err:
+        logger.error(f"Assistant chat failed: {chat_err}", exc_info=True)
+        reply = f"⚠️ Errore del modello: {chat_err}"
 
-    if result.get("status") == "export" and accumulated_context:
-        plan = result.get("plan", {})
-        exports = plan.get("expected_exports", [])
-        if exports:
-            await status_msg.edit_text(result["response"] + "\n\n<i>Generating requested files...</i>", parse_mode=ParseMode.HTML)
-            try:
-                export_dir = os.path.join("exports", f"chat_{chat_id}")
-                generated_files = await asyncio.to_thread(
-                    master_ai.generate_export_files, 
-                    accumulated_context,  # final_text fallback
-                    exports,
-                    export_dir,           # output_dir
-                    accumulated_context   # global_context
+    turn = None
+    if cards and should_route(user_input, cards):
+        try:
+            candidate = await asyncio.to_thread(assistant_engine.decide, user_input, history)
+            if candidate.action == "run_workflow" and candidate.workflow_id:
+                turn = candidate
+        except Exception as route_err:
+            logger.warning(f"Workflow decision failed: {route_err}")
+
+    context.user_data["chat_history"] = (
+        history
+        + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": reply},
+        ]
+    )[-40:]
+
+    if turn is not None:
+        card = next((c for c in cards if c.id == turn.workflow_id), None)
+        if card:
+            missing = [
+                key
+                for key in card.declared_keys()
+                if not str(turn.inputs.get(key) or "").strip()
+            ]
+            if missing:
+                context.user_data["direct_pending"] = {
+                    "workflow_id": card.id,
+                    "name": card.name,
+                    "inputs": dict(turn.inputs),
+                    "missing": list(missing),
+                    "prompts": {i.key: i.prompt for i in card.inputs},
+                }
+                first = missing[0]
+                question = {i.key: i.prompt for i in card.inputs}.get(first) or first
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+                await send_long_message(
+                    context=context,
+                    chat_id=chat_id,
+                    text=(
+                        f"{reply}\n\n{turn.text or f'Posso avviare «{card.name}».'}\n\n"
+                        f"Per avviare mi serve: {question}"
+                    ).strip(),
+                    parse_mode=None,
                 )
-                for file_path in generated_files:
-                    if os.path.exists(file_path):
-                        with open(file_path, "rb") as f:
-                            await context.bot.send_document(chat_id=chat_id, document=f)
-            except Exception as e:
-                logger.error(f"Dynamic export failed: {e}")
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error generating files: {e}")
-        return PLANNING_MODE
+                return ConversationHandler.END
 
-    # Free-chat ready plan: Master AI review, then user approval, then inputs
-    if result.get("status") == "ready" and result.get("plan"):
-        context.user_data["execution_context"] = {"user_input": user_input}
-        return await review_and_present_plan(update, context, plan=result["plan"])
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await _start_workflow_run(update, context, card.id, dict(turn.inputs), card.name)
+            return ConversationHandler.END
 
-    return PLANNING_MODE
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+    await send_long_message(
+        context=context,
+        chat_id=chat_id,
+        text=reply or "(nessuna risposta)",
+        parse_mode=None,
+    )
+    return ConversationHandler.END
 
 
 async def review_and_present_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: dict = None) -> int:
@@ -1522,6 +1714,33 @@ async def execute_crew(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 global_context = None
 
             logger.info(f"User {user_id}: CrewAI execution finished.")
+
+            # Persistent approval: the graph paused and released the thread.
+            current_run = db.read_run(run_id) if run_id else None
+            if current_run and str(current_run.get("status") or "").lower() in (
+                "waiting_human", "paused",
+            ):
+                context.user_data["paused"] = True
+                from core.interrupts import notify_interrupt
+
+                try:
+                    await status_msg.edit_text(
+                        text=(
+                            "⏸️ <b>In attesa di approvazione.</b>\n"
+                            "<i>Rispondi qui (anche con 1, 2, …) oppure usa i pulsanti.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
+                for intr in await asyncio.to_thread(
+                    run_service.pending_interrupts, run_id, None
+                ):
+                    try:
+                        await asyncio.to_thread(notify_interrupt, intr)
+                    except Exception:
+                        pass
+                return ConversationHandler.END
         except RateLimitError as rle:
             logger.warning(f"RateLimitError caught: {rle}")
             
@@ -1994,7 +2213,43 @@ async def hitl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     
     chat_id = update.effective_chat.id
-    
+
+    # Persistent run interrupts use rint_<interrupt_id>_<option_index>.
+    data = query.data or ""
+    if data.startswith("rint_"):
+        from core.interrupts import get_interrupt, resolve_option
+
+        bits = data.split("_")
+        try:
+            interrupt_id = int(bits[1])
+            idx = int(bits[2]) if len(bits) > 2 else 0
+        except (IndexError, ValueError):
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        intr = await asyncio.to_thread(get_interrupt, interrupt_id)
+        if not intr or str(intr.get("status")) != "pending":
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        chosen = resolve_option(intr, str(idx + 1))
+        try:
+            await query.edit_message_text(
+                text=f"{query.message.text_html or query.message.text}\n\n✅ <b>You chose:</b> {chosen}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            await query.edit_message_reply_markup(reply_markup=None)
+
+        async def _resume():
+            outcome = await asyncio.to_thread(
+                run_service.resume_interrupt, interrupt_id, chosen
+            )
+            await _deliver_run_outcome(context, chat_id, int(intr["run_id"]), outcome)
+
+        context.application.create_task(_resume())
+        return
+
     # Prefer index-based resolution (hitl_{idx}) using options stored on the HITL request.
     chosen_option = None
     parts = (query.data or "").split("_", 1)
@@ -2107,7 +2362,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_context_choice, pattern=r"^context_"))
     application.add_handler(CallbackQueryHandler(handle_restart_button, pattern=r"^restart_bot$"))
     application.add_handler(CallbackQueryHandler(resume_execution_callback, pattern=r"^resume_execution$"))
-    application.add_handler(CallbackQueryHandler(hitl_callback, pattern=r"^hitl_"))
+    application.add_handler(CallbackQueryHandler(hitl_callback, pattern=r"^(hitl_|rint_)"))
 
     # Feedback text handler — catches free text ONLY when awaiting_feedback flag is set.
     # group=1 ensures it runs alongside (but independently from) the ConversationHandler.

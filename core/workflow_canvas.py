@@ -23,8 +23,11 @@ from core.workflow_graph import (
     NODE_TYPE_HITL,
     NODE_TYPE_INPUT,
     NODE_TYPE_LEVEL,
+    NODE_TYPE_LLM,
     NODE_TYPE_LOOP,
+    NODE_TYPE_ROUTER,
     NODE_TYPE_TASK,
+    NODE_TYPE_TOOL,
     compute_loop_frame_ui,
     make_level_node,
     normalize_graph,
@@ -71,6 +74,9 @@ _TYPE_COLORS = {
     NODE_TYPE_EXPORT: "#607D8B",
     NODE_TYPE_LOOP: "#E91E63",
     NODE_TYPE_LEVEL: "#90CAF9",
+    NODE_TYPE_LLM: "#00897B",
+    NODE_TYPE_TOOL: "#6D4C41",
+    NODE_TYPE_ROUTER: "#C62828",
 }
 
 _DEFAULT_SIZES = {
@@ -81,6 +87,9 @@ _DEFAULT_SIZES = {
     NODE_TYPE_INPUT: (180, 90),
     NODE_TYPE_LOOP: (320, 220),
     NODE_TYPE_LEVEL: (DEFAULT_LEVEL_WIDTH, DEFAULT_LEVEL_HEIGHT),
+    NODE_TYPE_LLM: (220, 120),
+    NODE_TYPE_TOOL: (220, 110),
+    NODE_TYPE_ROUTER: (220, 120),
 }
 
 
@@ -220,6 +229,12 @@ def estimate_block_height(
         n_lines = 3
     elif ntype == NODE_TYPE_INPUT:
         n_lines = 3
+    elif ntype == NODE_TYPE_LLM:
+        n_lines = 2 + lines_for(str(node.get("prompt") or ""), 1) + 1
+    elif ntype == NODE_TYPE_TOOL:
+        n_lines = 4
+    elif ntype == NODE_TYPE_ROUTER:
+        n_lines = 4
     else:
         n_lines = 4
 
@@ -512,6 +527,28 @@ def node_card_content(
         return (
             f"<div style='overflow:hidden'>{band}<b>INPUT</b> L{lvl}<br/>{html.escape(keys)}"
             f"<br/><code style='font-size:10px'>{nid}</code></div>"
+        )
+    if ntype == NODE_TYPE_LLM:
+        fmt = html.escape(str(node.get("output_format") or "text"))
+        preview = html.escape((node.get("prompt") or "")[:90])
+        return (
+            f"<div style='overflow:hidden;word-break:break-word'>{band}<b>LLM</b> L{lvl} · {fmt}<br/>"
+            f"<small>{preview}</small><br/>"
+            f"<code style='font-size:10px'>{nid}</code></div>"
+        )
+    if ntype == NODE_TYPE_TOOL:
+        return (
+            f"<div style='overflow:hidden;word-break:break-word'>{band}<b>TOOL</b> L{lvl}<br/>"
+            f"{html.escape(str(node.get('tool_name') or '?'))}<br/>"
+            f"<code style='font-size:10px'>{nid}</code></div>"
+        )
+    if ntype == NODE_TYPE_ROUTER:
+        routes = ", ".join(str(r) for r in (node.get("routes") or [])) or "?"
+        mode = html.escape(str(node.get("router_mode") or "auto"))
+        return (
+            f"<div style='overflow:hidden;word-break:break-word'>{band}<b>ROUTER</b> L{lvl} · {mode}<br/>"
+            f"<small>{html.escape(routes)}</small><br/>"
+            f"<code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_LOOP:
         mode = html.escape(str(node.get("loop_mode") or "for_each"))
