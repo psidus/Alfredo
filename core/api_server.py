@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Header, BackgroundTasks, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from core.db_manager import DBManager
@@ -43,6 +43,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Trust proxy headers (e.g. ngrok, reverse proxies) so request.url preserves https
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
 # CORS — permissive for local development, can be tightened in production
 app.add_middleware(
     CORSMiddleware,
@@ -51,6 +55,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/", include_in_schema=False)
+async def root_to_app_redirect():
+    """Redirect root traffic to the mobile PWA shell."""
+    return RedirectResponse(url="/app/", status_code=307)
 
 # Serve the JavaScript SDK as static files
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -988,4 +997,11 @@ def start_api_server(host: str = "0.0.0.0", port: int = 8000):
             port,
         )
     logger.info(f"🌐 Starting Alfredo API server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
