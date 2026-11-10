@@ -9,7 +9,7 @@ import type {
 } from "../types";
 import { ErrorBanner, Spinner, formatBytes, usePolling } from "../components/ui";
 import { FilePreviewCard } from "../components/FilePreviewCard";
-import type { Language } from "../i18n";
+import { useLanguage, type Language } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
@@ -37,7 +37,11 @@ function parentOf(path: string): string {
   return parts.join("/");
 }
 
-export function FilesScreen({ config, lang = "it" }: Props) {
+export function FilesScreen({ config, lang: propLang }: Props) {
+  const context = useLanguage();
+  const currentLang = propLang || context.lang || "it";
+  const t = context.t;
+
   const [path, setPath] = useState("");
   const [entries, setEntries] = useState<RunFile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -50,14 +54,14 @@ export function FilesScreen({ config, lang = "it" }: Props) {
   const inFlight = useRef(false);
 
   const load = useCallback(
-    async (folder: string) => {
+    async (targetPath: string) => {
       if (inFlight.current) return;
       inFlight.current = true;
       setLoading(true);
+      setError(null);
       try {
-        const listing = await api.listFiles(config, folder);
+        const listing = await api.listFiles(config, targetPath);
         setEntries(listing.entries ?? []);
-        setError(null);
       } catch (exc) {
         setError(exc instanceof ApiError ? exc.message : String(exc));
       } finally {
@@ -69,13 +73,10 @@ export function FilesScreen({ config, lang = "it" }: Props) {
   );
 
   useEffect(() => {
-    setPreview(null);
-    setShare(null);
     void load(path);
-  }, [load, path]);
+  }, [path, load]);
 
-  // Cheap refresh so files produced by a running workflow show up.
-  usePolling(() => void load(path), 15000, true);
+  usePolling(() => void load(path), 12000, Boolean(config.baseUrl));
 
   const uploadFiles = async (files: File[]) => {
     if (!files.length) return;
@@ -83,16 +84,15 @@ export function FilesScreen({ config, lang = "it" }: Props) {
     setError(null);
     try {
       for (const file of files) {
-        setUpload({ name: file.name, sent: 0, total: file.size });
-        await uploadBrowserFile(config, file, path, (progress) => setUpload(progress));
+        await uploadBrowserFile(config, file, path, (p) => setUpload(p));
       }
+      setUpload(null);
       await load(path);
     } catch (exc) {
-      setError(exc instanceof ApiError ? exc.message : String(exc));
+      setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setUpload(null);
       setBusy(false);
-      if (inputRef.current) inputRef.current.value = "";
     }
   };
 
@@ -103,7 +103,6 @@ export function FilesScreen({ config, lang = "it" }: Props) {
     }
     setBusy(true);
     setError(null);
-    setShare(null);
     try {
       setPreview(await api.filePreview(config, entry.path));
     } catch (exc) {
@@ -119,13 +118,13 @@ export function FilesScreen({ config, lang = "it" }: Props) {
     try {
       const blob = await api.downloadFile(config, entry.path);
       const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = entry.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = entry.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -137,7 +136,7 @@ export function FilesScreen({ config, lang = "it" }: Props) {
     setBusy(true);
     setError(null);
     try {
-      setShare(await api.shareFile(config, entry.path, 3600));
+      setShare(await api.shareFile(config, entry.path, 24 * 3600));
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -155,16 +154,16 @@ export function FilesScreen({ config, lang = "it" }: Props) {
           className="btn small ghost"
           onClick={() => setPath(parentOf(path))}
           disabled={!path}
-          title={lang === "en" ? "Parent folder" : "Cartella superiore"}
+          title={currentLang === "en" ? "Parent folder" : "Cartella superiore"}
         >
           <span className="arrow-left-icon">←</span>
-          <span>{lang === "en" ? "Up" : "Su"}</span>
+          <span>{currentLang === "en" ? "Up" : "Su"}</span>
         </button>
         <button
           className="btn small ghost"
           onClick={() => void load(path)}
           disabled={loading}
-          aria-label="Aggiorna"
+          aria-label={t("refresh")}
         >
           ↻
         </button>
@@ -177,14 +176,18 @@ export function FilesScreen({ config, lang = "it" }: Props) {
           <div className="row between">
             <div>
               <h2>{folderName}</h2>
-              <p className="muted">File prodotti dai workflow e caricati da qui.</p>
+              <p className="muted">
+                {currentLang === "en"
+                  ? "Files produced by workflows and uploaded here."
+                  : "File prodotti dai workflow e caricati da qui."}
+              </p>
             </div>
             <button
               className="btn small primary"
               onClick={() => inputRef.current?.click()}
               disabled={busy}
             >
-              Carica qui
+              {currentLang === "en" ? "Upload here" : "Carica qui"}
             </button>
           </div>
           <input
@@ -231,15 +234,17 @@ export function FilesScreen({ config, lang = "it" }: Props) {
           <div className="row between">
             <h3>{folderName}</h3>
             <span className="muted">
-              {loading ? "carico…" : `${entries.length} elementi`}
+              {loading
+                ? t("loading")
+                : `${entries.length} ${currentLang === "en" ? (entries.length === 1 ? "item" : "items") : "elementi"}`}
             </span>
           </div>
           {loading && entries.length === 0 ? (
             <div className="empty row" style={{ justifyContent: "center" }}>
-              <Spinner /> Carico…
+              <Spinner /> {t("loading")}
             </div>
           ) : entries.length === 0 ? (
-            <p className="muted">Cartella vuota.</p>
+            <p className="muted">{t("emptyFolder")}</p>
           ) : (
             entries.map((entry) => (
               <div className="file-row" key={entry.path || entry.name}>
@@ -248,7 +253,7 @@ export function FilesScreen({ config, lang = "it" }: Props) {
                     {iconFor(entry)} {entry.name}
                   </strong>
                   <span className="muted">
-                    {entry.is_dir ? "cartella" : entry.kind}
+                    {entry.is_dir ? (currentLang === "en" ? "folder" : "cartella") : entry.kind}
                     {!entry.is_dir && entry.size != null ? ` · ${formatBytes(entry.size)}` : ""}
                     {entry.modified ? ` · ${entry.modified}` : ""}
                   </span>
@@ -259,7 +264,7 @@ export function FilesScreen({ config, lang = "it" }: Props) {
                     onClick={() => void openPreview(entry)}
                     disabled={busy}
                   >
-                    {entry.is_dir ? "Apri" : "Anteprima"}
+                    {entry.is_dir ? (currentLang === "en" ? "Open" : "Apri") : t("preview")}
                   </button>
                   {!entry.is_dir ? (
                     <>
@@ -268,14 +273,14 @@ export function FilesScreen({ config, lang = "it" }: Props) {
                         onClick={() => void download(entry)}
                         disabled={busy}
                       >
-                        Scarica
+                        {t("download")}
                       </button>
                       <button
                         className="btn small ghost"
                         onClick={() => void createShare(entry)}
                         disabled={busy}
                       >
-                        Link
+                        {t("shareLink")}
                       </button>
                     </>
                   ) : null}
@@ -291,11 +296,14 @@ export function FilesScreen({ config, lang = "it" }: Props) {
 
         {share ? (
           <div className="card">
-            <h3>Link condiviso</h3>
-            <p className="muted">Scade il {share.expires_at}</p>
+            <h3>{currentLang === "en" ? "Shared Link" : "Link condiviso"}</h3>
+            <p className="muted">
+              {currentLang === "en" ? "Expires at " : "Scade il "}
+              {share.expires_at}
+            </p>
             <div className="actions">
               <a className="btn small" href={share.url} target="_blank" rel="noreferrer">
-                Apri link
+                {currentLang === "en" ? "Open link" : "Apri link"}
               </a>
               <button
                 className="btn small ghost"
@@ -303,10 +311,10 @@ export function FilesScreen({ config, lang = "it" }: Props) {
                   void navigator.clipboard?.writeText(share.url);
                 }}
               >
-                Copia
+                {currentLang === "en" ? "Copy" : "Copia"}
               </button>
               <button className="btn small ghost" onClick={() => setShare(null)}>
-                Chiudi
+                {t("close")}
               </button>
             </div>
           </div>

@@ -1,4 +1,5 @@
 import type { FilePreview } from "../types";
+import { useLanguage } from "../i18n";
 
 interface Props {
   preview: FilePreview;
@@ -7,12 +8,13 @@ interface Props {
 
 /** Server-rendered preview (text, table, image or a readable fallback). */
 export function FilePreviewCard({ preview, onClose }: Props) {
+  const { t } = useLanguage();
   return (
     <div className="card">
       <div className="row between">
         <h3>{preview.name}</h3>
         <button className="btn small ghost" onClick={onClose}>
-          Chiudi
+          {t("close")}
         </button>
       </div>
       {preview.error ? <p className="muted">{preview.error}</p> : null}
@@ -39,9 +41,11 @@ export function FilePreviewCard({ preview, onClose }: Props) {
         <p className="muted">{preview.message}</p>
       ) : null}
       {preview.sheets && preview.sheets.length > 1 ? (
-        <p className="muted">Foglio: {preview.sheets[0]}</p>
+        <p className="muted">
+          {t("sheetLabel")}: {preview.sheets[0]}
+        </p>
       ) : null}
-      {preview.truncated ? <p className="muted">Anteprima parziale.</p> : null}
+      {preview.truncated ? <p className="muted">{t("partialPreview")}</p> : null}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../api";
 import type { ConnectionConfig, WorkflowCard } from "../types";
 import { ErrorBanner, Spinner } from "../components/ui";
+import { useLanguage } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
@@ -17,6 +18,7 @@ function WorkflowForm({
   workflow: WorkflowCard;
   onStarted: (runId: number, label: string) => void;
 }) {
+  const { lang, t } = useLanguage();
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,14 +41,14 @@ function WorkflowForm({
   };
 
   return (
-    <div>
+    <div style={{ marginTop: "12px" }}>
       {workflow.inputs.map((input) => (
         <div className="field" key={input.key}>
           <label htmlFor={`wf-${workflow.id}-${input.key}`}>{input.key}</label>
           <input
             id={`wf-${workflow.id}-${input.key}`}
             value={values[input.key] ?? ""}
-            placeholder={input.prompt || "valore"}
+            placeholder={input.prompt || (lang === "en" ? "value" : "valore")}
             onChange={(event) =>
               setValues((prev) => ({ ...prev, [input.key]: event.target.value }))
             }
@@ -55,14 +57,16 @@ function WorkflowForm({
       ))}
 
       {workflow.expected_exports && workflow.expected_exports.length > 0 ? (
-        <p className="muted">Output attesi: {workflow.expected_exports.join(", ")}</p>
+        <p className="muted" style={{ marginTop: "8px" }}>
+          {t("expectedOutputs")}: {workflow.expected_exports.join(", ")}
+        </p>
       ) : null}
 
       <ErrorBanner message={error} />
 
       <div className="actions">
         <button className="btn primary" onClick={() => void start()} disabled={busy}>
-          {busy ? "Avvio…" : "Avvia"}
+          {busy ? t("starting") : t("runButton")}
         </button>
       </div>
     </div>
@@ -70,6 +74,7 @@ function WorkflowForm({
 }
 
 export function WorkflowsScreen({ config, onStarted }: Props) {
+  const { lang, t } = useLanguage();
   const [workflows, setWorkflows] = useState<WorkflowCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -101,21 +106,23 @@ export function WorkflowsScreen({ config, onStarted }: Props) {
       <div className="row between">
         <span className="muted">
           {workflows.length > 0
-            ? `${workflows.length} workflow salvati`
-            : "Nessun workflow ancora"}
+            ? `${workflows.length} ${t("savedWorkflowsCount")}`
+            : t("noWorkflowsYet")}
         </span>
         <button className="btn small ghost" onClick={() => void load()} disabled={loading}>
-          {loading ? <Spinner /> : "Aggiorna"}
+          {loading ? <Spinner /> : t("refresh")}
         </button>
       </div>
 
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
       <div className="scroll-area">
-        {loading && workflows.length === 0 ? <div className="empty">Carico i workflow…</div> : null}
+        {loading && workflows.length === 0 ? (
+          <div className="empty">{t("loadingWorkflows")}</div>
+        ) : null}
 
         {!loading && workflows.length === 0 ? (
-          <div className="empty">Crea un workflow dalla dashboard per vederlo qui.</div>
+          <div className="empty">{t("createWorkflowHint")}</div>
         ) : null}
 
         {sorted.map((workflow) => {
@@ -125,13 +132,35 @@ export function WorkflowsScreen({ config, onStarted }: Props) {
               <button
                 className="row between"
                 onClick={() => setOpenId(open ? null : workflow.id)}
-                style={{ width: "100%", background: "none", border: 0, padding: 0, textAlign: "left" }}
+                style={{
+                  width: "100%",
+                  background: "none",
+                  border: 0,
+                  padding: 0,
+                  textAlign: "left",
+                  alignItems: "center",
+                  cursor: "pointer",
+                }}
               >
-                <span>
-                  <h2>{workflow.name}</h2>
-                  {workflow.description ? <span className="muted">{workflow.description}</span> : null}
+                <span style={{ minWidth: 0, flex: 1, paddingRight: "10px" }}>
+                  <h2 style={{ wordBreak: "break-word" }}>{workflow.name}</h2>
+                  {workflow.description ? (
+                    <span className="muted" style={{ display: "block", marginTop: "2px" }}>
+                      {workflow.description}
+                    </span>
+                  ) : null}
                 </span>
-                <span className="chip">{workflow.inputs.length} input</span>
+                <span
+                  className="chip"
+                  style={{
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                  }}
+                >
+                  {workflow.inputs.length}&nbsp;{lang === "en" ? (workflow.inputs.length === 1 ? t("inputLabel") : t("inputsLabel")) : t("inputLabel")}
+                </span>
               </button>
 
               {open ? (

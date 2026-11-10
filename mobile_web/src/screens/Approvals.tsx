@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { api, ApiError } from "../api";
 import type { ConnectionConfig, Interrupt } from "../types";
 import { ErrorBanner, Spinner, formatWhen, usePolling } from "../components/ui";
+import { useLanguage } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
+  const { lang, t } = useLanguage();
   const [items, setItems] = useState<Interrupt[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,10 +58,12 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
     <div className="screen">
       <div className="row between">
         <span className="muted">
-          {items.length > 0 ? `${items.length} approvazioni in attesa` : "Nessuna approvazione"}
+          {items.length > 0
+            ? `${items.length} ${t("pendingApprovalsCount")}`
+            : t("noApprovalsYet")}
         </span>
         <button className="btn small ghost" onClick={() => void load()} disabled={loading}>
-          {loading ? <Spinner /> : "Aggiorna"}
+          {loading ? <Spinner /> : t("refresh")}
         </button>
       </div>
 
@@ -68,7 +72,7 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
       <div className="scroll-area">
         {!loading && items.length === 0 ? (
           <div className="empty">
-            Quando un workflow si ferma per una conferma, la trovi qui.
+            {t("approvalsEmptyHint")}
           </div>
         ) : null}
 
@@ -78,8 +82,8 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
               <h3>Run #{interrupt.run_id}</h3>
               <span className="chip waiting_human">{interrupt.node_id || "HITL"}</span>
             </div>
-            <p className="muted">{interrupt.question || "Confermi il passaggio?"}</p>
-            <p className="muted">{formatWhen(interrupt.created_at)}</p>
+            <p className="muted">{interrupt.question || t("confirmStep")}</p>
+            <p className="muted">{formatWhen(interrupt.created_at, lang)}</p>
 
             {(interrupt.options ?? []).length > 0 ? (
               <div className="actions">
@@ -101,14 +105,14 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
             ) : null}
 
             <div className="field">
-              <label htmlFor={`answer-${interrupt.id}`}>Risposta / feedback</label>
+              <label htmlFor={`answer-${interrupt.id}`}>{t("answerOrFeedback")}</label>
               <textarea
                 id={`answer-${interrupt.id}`}
                 value={answers[interrupt.id] ?? ""}
                 onChange={(event) =>
                   setAnswers((prev) => ({ ...prev, [interrupt.id]: event.target.value }))
                 }
-                placeholder="Scegli un'opzione o scrivi un feedback…"
+                placeholder={t("answerPlaceholder")}
               />
             </div>
 
@@ -118,10 +122,10 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
                 onClick={() => void answer(interrupt)}
                 disabled={busyId === interrupt.id || !(answers[interrupt.id] ?? "").trim()}
               >
-                {busyId === interrupt.id ? "Invio…" : "Invia e riprendi"}
+                {busyId === interrupt.id ? t("sending") : t("sendAndResume")}
               </button>
               <button className="btn ghost" onClick={() => onOpenRun(interrupt.run_id)}>
-                Apri run
+                {t("openRun")}
               </button>
             </div>
           </div>

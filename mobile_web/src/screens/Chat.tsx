@@ -3,6 +3,7 @@ import { api, ApiError } from "../api";
 import { clearChat, loadChat, saveChat } from "../storage";
 import type { ChatMessage, ConnectionConfig, WorkflowSuggestion } from "../types";
 import { ErrorBanner, TypingDots, usePolling } from "../components/ui";
+import { useLanguage } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
@@ -25,6 +26,7 @@ function SuggestionCard({
   suggestion: WorkflowSuggestion;
   onStarted: (runId: number, label: string) => void;
 }) {
+  const { t } = useLanguage();
   const keys = useMemo(() => suggestionKeys(suggestion), [suggestion]);
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
@@ -61,7 +63,7 @@ function SuggestionCard({
     <div className="suggestion">
       <div className="row between">
         <strong>{suggestion.name || `Workflow #${suggestion.workflow_id}`}</strong>
-        <span className="chip running">proposto</span>
+        <span className="chip running">{t("proposed")}</span>
       </div>
       {suggestion.text ? <div className="muted">{suggestion.text}</div> : null}
 
@@ -71,7 +73,7 @@ function SuggestionCard({
           <input
             id={`sugg-${suggestion.workflow_id}-${key}`}
             value={values[key] ?? ""}
-            placeholder="valore richiesto"
+            placeholder={t("requiredValue")}
             onChange={(event) => setValues((prev) => ({ ...prev, [key]: event.target.value }))}
           />
         </div>
@@ -81,10 +83,12 @@ function SuggestionCard({
 
       <div className="actions">
         <button className="btn primary" onClick={start} disabled={busy || missing.length > 0}>
-          {busy ? "Avvio…" : "Avvia workflow"}
+          {busy ? t("starting") : t("startWorkflow")}
         </button>
         {missing.length > 0 ? (
-          <span className="muted">Mancano: {missing.join(", ")}</span>
+          <span className="muted">
+            {t("missingFields")}: {missing.join(", ")}
+          </span>
         ) : null}
       </div>
     </div>
@@ -92,6 +96,7 @@ function SuggestionCard({
 }
 
 export function ChatScreen({ config, onStarted }: Props) {
+  const { t } = useLanguage();
   const [messages, setMessages] = useState<ChatMessage[]>(() => loadChat());
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -140,7 +145,7 @@ export function ChatScreen({ config, onStarted }: Props) {
         ...prev,
         {
           role: "assistant",
-          content: reply.reply || "(nessuna risposta testuale)",
+          content: reply.reply || t("noTextReply"),
           workflow: reply.workflow ?? null,
         },
       ]);
@@ -154,7 +159,7 @@ export function ChatScreen({ config, onStarted }: Props) {
   return (
     <div className="screen">
       <div className="row between">
-        <span className="muted">Chat libera: l'assistente può proporre un workflow da avviare.</span>
+        <span className="muted">{t("chatHeaderHint")}</span>
         <button
           className="btn small ghost"
           onClick={() => {
@@ -164,7 +169,7 @@ export function ChatScreen({ config, onStarted }: Props) {
           }}
           disabled={messages.length === 0 || busy}
         >
-          Nuova chat
+          {t("newChat")}
         </button>
       </div>
 
@@ -172,8 +177,8 @@ export function ChatScreen({ config, onStarted }: Props) {
 
       {queue && queue.waiting > 0 ? (
         <div className="banner">
-          GPU occupata: {queue.waiting} in coda
-          {queue.behind ? ` · dietro run #${queue.behind}` : ""}
+          {t("gpuBusy")}: {queue.waiting} {t("inQueue")}
+          {queue.behind ? ` · ${t("behindRun")} #${queue.behind}` : ""}
           {queue.eta != null ? ` · ~${Math.round(queue.eta)} s` : ""}
         </div>
       ) : null}
@@ -181,9 +186,9 @@ export function ChatScreen({ config, onStarted }: Props) {
       <div className="chat-log" ref={logRef}>
         {messages.length === 0 ? (
           <div className="empty">
-            Chiedi qualcosa ad Alfredo.
+            {t("chatEmptyPrompt")}
             <br />
-            Es. “Esegui il report termico sui dati di ieri”.
+            {t("chatEmptyExample")}
           </div>
         ) : null}
 
@@ -215,7 +220,7 @@ export function ChatScreen({ config, onStarted }: Props) {
         <textarea
           rows={1}
           value={draft}
-          placeholder="Scrivi un messaggio…"
+          placeholder={t("chatInputPlaceholder")}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
@@ -225,7 +230,7 @@ export function ChatScreen({ config, onStarted }: Props) {
           }}
         />
         <button className="send" onClick={() => void send()} disabled={busy || !draft.trim()}>
-          Invia
+          {t("send")}
         </button>
       </div>
     </div>

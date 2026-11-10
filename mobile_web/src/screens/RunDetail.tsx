@@ -12,7 +12,7 @@ import type {
 import { isTerminal, needsApproval } from "../types";
 import { ErrorBanner, Spinner, StatusChip, formatBytes, formatWhen, usePolling } from "../components/ui";
 import { FilePreviewCard } from "../components/FilePreviewCard";
-import type { Language } from "../i18n";
+import { useLanguage, type Language, type TranslationKey } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
@@ -21,22 +21,33 @@ interface Props {
   lang?: Language;
 }
 
-const EVENT_LABELS: Record<string, string> = {
-  "run.started": "Avviato",
-  "run.paused": "In pausa",
-  "run.finished": "Completato",
-  "run.failed": "Fallito",
-  "run.cancelled": "Annullato",
-  "run.node.started": "Nodo avviato",
-  "run.node.completed": "Nodo completato",
-  "run.node.failed": "Nodo fallito",
-  "run.interrupt.opened": "Approvazione richiesta",
-  "run.interrupt.answered": "Approvazione ricevuta",
-  "automation.fired": "Automazione",
-};
-
-function eventLabel(type: string): string {
-  return EVENT_LABELS[type] ?? type;
+function getEventLabel(type: string, t: (k: TranslationKey) => string): string {
+  switch (type) {
+    case "run.started":
+      return t("evStarted");
+    case "run.paused":
+      return t("evPaused");
+    case "run.finished":
+      return t("evFinished");
+    case "run.failed":
+      return t("evFailed");
+    case "run.cancelled":
+      return t("evCancelled");
+    case "run.node.started":
+      return t("evNodeStarted");
+    case "run.node.completed":
+      return t("evNodeCompleted");
+    case "run.node.failed":
+      return t("evNodeFailed");
+    case "run.interrupt.opened":
+      return t("evInterruptOpened");
+    case "run.interrupt.answered":
+      return t("evInterruptAnswered");
+    case "automation.fired":
+      return t("evAutomation");
+    default:
+      return type;
+  }
 }
 
 function eventDetail(event: RunEvent): string {
@@ -51,7 +62,11 @@ function eventDetail(event: RunEvent): string {
   return "";
 }
 
-export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
+export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props) {
+  const context = useLanguage();
+  const currentLang = propLang || context.lang || "it";
+  const t = context.t;
+
   const [run, setRun] = useState<RunDetail | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [runFiles, setRunFiles] = useState<RunFile[]>([]);
@@ -101,12 +116,12 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
     setShare(null);
     setInterrupt(null);
     setAnswer("");
+    setError(null);
     eventsCursor.current = 0;
-    void load();
-  }, [load]);
+  }, [runId]);
 
-  const finished = run ? isTerminal(run.status) : false;
-  usePolling(() => void load(), 3000, Boolean(run) && !finished);
+  const pollEnabled = !run || !isTerminal(run.status);
+  usePolling(() => void load(), 3000, pollEnabled);
 
   const sendAnswer = async () => {
     if (!interrupt || !answer.trim()) return;
@@ -114,9 +129,9 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
     setError(null);
     try {
       await api.answerInterrupt(config, interrupt.id, answer.trim(), true);
-      setAnswer("");
       setInterrupt(null);
-      window.setTimeout(() => void load(), 400);
+      setAnswer("");
+      await load();
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -125,6 +140,7 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
   };
 
   const cancel = async () => {
+    if (!window.confirm(currentLang === "en" ? "Cancel this run?" : "Annullare questa esecuzione?")) return;
     setBusy(true);
     setError(null);
     try {
@@ -140,7 +156,6 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
   const openPreview = async (file: RunFile) => {
     setBusy(true);
     setError(null);
-    setShare(null);
     try {
       setPreview(await api.filePreview(config, file.path));
     } catch (exc) {
@@ -156,13 +171,13 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
     try {
       const blob = await api.downloadFile(config, file.path);
       const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = file.name;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -174,7 +189,7 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
     setBusy(true);
     setError(null);
     try {
-      setShare(await api.shareFile(config, file.path, 3600));
+      setShare(await api.shareFile(config, file.path, 24 * 3600));
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -182,12 +197,14 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
     }
   };
 
+  const finished = run ? isTerminal(run.status) : false;
+
   return (
     <div className="screen">
       <div className="row between">
         <button className="btn small ghost" onClick={onBack}>
           <span className="arrow-left-icon">←</span>
-          <span>{lang === "en" ? "Back" : "Indietro"}</span>
+          <span>{currentLang === "en" ? "Back" : "Indietro"}</span>
         </button>
         <span className="muted">Run #{runId}</span>
       </div>
@@ -197,23 +214,23 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
       <div className="scroll-area">
         {!run ? (
           <div className="empty row" style={{ justifyContent: "center" }}>
-            <Spinner /> Carico…
+            <Spinner /> {t("loading")}
           </div>
         ) : (
           <>
             <div className="card">
               <div className="row between">
-                <h2>Stato</h2>
-                <StatusChip status={run.status} />
+                <h2>{t("status")}</h2>
+                <StatusChip status={run.status} lang={currentLang} />
               </div>
               <p className="muted">
                 Workflow {run.workflow_id ?? "?"} · {run.source || "?"} ·{" "}
-                {formatWhen(run.started_at)}
+                {formatWhen(run.started_at, currentLang)}
               </p>
               {!finished ? (
                 <div className="actions">
                   <button className="btn small danger" onClick={() => void cancel()} disabled={busy}>
-                    Annulla esecuzione
+                    {t("cancelExecution")}
                   </button>
                 </div>
               ) : null}
@@ -222,14 +239,16 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
             {events.length > 0 ? (
               <div className="card">
                 <div className="row between">
-                  <h3>Avanzamento</h3>
-                  <span className="muted">{events.length} eventi</span>
+                  <h3>{t("eventsTitle")}</h3>
+                  <span className="muted">
+                    {events.length} {currentLang === "en" ? "events" : "eventi"}
+                  </span>
                 </div>
                 <ul className="timeline">
                   {events.map((event) => (
                     <li key={`${event.run_id}-${event.seq}`}>
                       <span className="timeline-seq">#{event.seq}</span>
-                      <span>{eventLabel(event.type)}</span>
+                      <span>{getEventLabel(event.type, t)}</span>
                       {eventDetail(event) ? (
                         <span className="muted"> · {eventDetail(event)}</span>
                       ) : null}
@@ -241,8 +260,8 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
 
             {interrupt ? (
               <div className="card" style={{ borderColor: "rgba(251,191,36,0.5)" }}>
-                <h3>Approvazione richiesta</h3>
-                <p className="muted">{interrupt.question || "Confermi il passaggio?"}</p>
+                <h3>{currentLang === "en" ? "Approval requested" : "Approvazione richiesta"}</h3>
+                <p className="muted">{interrupt.question || t("confirmStep")}</p>
                 <div className="actions">
                   {(interrupt.options ?? []).map((option) => (
                     <button
@@ -261,12 +280,12 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
                   ))}
                 </div>
                 <div className="field">
-                  <label htmlFor="approval-answer">Risposta / feedback</label>
+                  <label htmlFor="approval-answer">{t("answerOrFeedback")}</label>
                   <textarea
                     id="approval-answer"
                     value={answer}
                     onChange={(event) => setAnswer(event.target.value)}
-                    placeholder="Scegli un'opzione o scrivi un feedback…"
+                    placeholder={t("answerPlaceholder")}
                   />
                 </div>
                 <div className="actions">
@@ -275,7 +294,7 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
                     onClick={() => void sendAnswer()}
                     disabled={busy || !answer.trim()}
                   >
-                    {busy ? "Invio…" : "Invia e riprendi"}
+                    {busy ? t("sending") : t("sendAndResume")}
                   </button>
                 </div>
               </div>
@@ -283,14 +302,14 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
 
             {run.result ? (
               <div className="card">
-                <h3>Risultato</h3>
+                <h3>{currentLang === "en" ? "Result" : "Risultato"}</h3>
                 <div className="code">{run.result}</div>
               </div>
             ) : null}
 
             {run.procedure_summary ? (
               <div className="card">
-                <h3>Riepilogo procedura</h3>
+                <h3>{currentLang === "en" ? "Procedure Summary" : "Riepilogo procedura"}</h3>
                 <div className="muted" style={{ whiteSpace: "pre-wrap" }}>
                   {run.procedure_summary}
                 </div>
@@ -299,7 +318,9 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
 
             {runFiles.length > 0 ? (
               <div className="card">
-                <h3>File generati ({runFiles.length})</h3>
+                <h3>
+                  {t("filesExportTitle")} ({runFiles.length})
+                </h3>
                 {runFiles.map((file) => (
                   <div className="file-row" key={file.path || file.name}>
                     <div className="file-meta">
@@ -307,8 +328,9 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
                       <span className="muted">
                         {file.kind}
                         {file.size != null ? ` · ${formatBytes(file.size)}` : ""}
-                        {file.exists === false ? " · non trovato" : ""}
-                        {file.exists !== false && !file.accessible ? " · esterno" : ""}
+                        {file.exists === false
+                          ? (currentLang === "en" ? " · not found" : " · non trovato")
+                          : ""}
                       </span>
                     </div>
                     {file.path && file.exists !== false ? (
@@ -318,37 +340,26 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
                           onClick={() => void openPreview(file)}
                           disabled={busy}
                         >
-                          Anteprima
+                          {t("preview")}
                         </button>
                         <button
                           className="btn small"
                           onClick={() => void download(file)}
                           disabled={busy}
                         >
-                          Scarica
+                          {t("download")}
                         </button>
                         <button
                           className="btn small ghost"
                           onClick={() => void createShare(file)}
                           disabled={busy}
                         >
-                          Link
+                          {t("shareLink")}
                         </button>
                       </div>
                     ) : null}
                   </div>
                 ))}
-              </div>
-            ) : run.exports && run.exports.length > 0 ? (
-              <div className="card">
-                <h3>File generati</h3>
-                <ul className="muted" style={{ margin: 0, paddingLeft: 18 }}>
-                  {run.exports.map((file) => (
-                    <li key={file} style={{ wordBreak: "break-all" }}>
-                      {file}
-                    </li>
-                  ))}
-                </ul>
               </div>
             ) : null}
 
@@ -358,11 +369,14 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
 
             {share ? (
               <div className="card">
-                <h3>Link condiviso</h3>
-                <p className="muted">Scade il {share.expires_at}</p>
+                <h3>{currentLang === "en" ? "Shared link" : "Link condiviso"}</h3>
+                <p className="muted">
+                  {currentLang === "en" ? "Expires at " : "Scade il "}
+                  {share.expires_at}
+                </p>
                 <div className="actions">
                   <a className="btn small" href={share.url} target="_blank" rel="noreferrer">
-                    Apri link
+                    {currentLang === "en" ? "Open link" : "Apri link"}
                   </a>
                   <button
                     className="btn small ghost"
@@ -370,26 +384,12 @@ export function RunDetailScreen({ config, runId, onBack, lang = "it" }: Props) {
                       void navigator.clipboard?.writeText(share.url);
                     }}
                   >
-                    Copia
+                    {currentLang === "en" ? "Copy" : "Copia"}
                   </button>
                   <button className="btn small ghost" onClick={() => setShare(null)}>
-                    Chiudi
+                    {t("close")}
                   </button>
                 </div>
-              </div>
-            ) : null}
-
-            {run.inputs && Object.keys(run.inputs).length > 0 ? (
-              <div className="card">
-                <h3>Input</h3>
-                <div className="code">{JSON.stringify(run.inputs, null, 2)}</div>
-              </div>
-            ) : null}
-
-            {run.handoffs && run.handoffs.length > 0 ? (
-              <div className="card">
-                <h3>Handoff ({run.handoffs.length})</h3>
-                <div className="muted">Dettagli tecnici per nodo disponibili nella dashboard.</div>
               </div>
             ) : null}
           </>

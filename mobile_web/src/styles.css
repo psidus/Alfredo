@@ -255,6 +255,8 @@ button {
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .chip.completed {

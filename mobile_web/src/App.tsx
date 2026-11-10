@@ -10,7 +10,14 @@ import { ApprovalsScreen } from "./screens/Approvals";
 import { SettingsScreen } from "./screens/Settings";
 import { FilesScreen } from "./screens/Files";
 import { usePolling } from "./components/ui";
-import { loadLanguage, saveLanguage, translations, type Language, type TranslationKey } from "./i18n";
+import {
+  LanguageContext,
+  loadLanguage,
+  saveLanguage,
+  translations,
+  type Language,
+  type TranslationKey,
+} from "./i18n";
 
 type View = "tabs" | "settings" | "run";
 
@@ -103,124 +110,126 @@ export default function App() {
   const currentHint = view === "settings" ? t("settingsHint") : currentHeader.hint;
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="header-title-container">
-          <div className="header-title-row">
-            <h1>{currentTitle}</h1>
-            <img
-              src="/app/alfredo_robot.png"
-              alt="Alfredo"
-              className="header-robot-icon"
-              title="Alfredo Assistant"
-            />
+    <LanguageContext.Provider value={{ lang, setLang: handleLanguageChange, toggleLanguage, t }}>
+      <div className="app">
+        <header className="app-header">
+          <div className="header-title-container">
+            <div className="header-title-row">
+              <h1>{currentTitle}</h1>
+              <img
+                src="/app/alfredo_robot.png"
+                alt="Alfredo"
+                className="header-robot-icon"
+                title="Alfredo Assistant"
+              />
+            </div>
+            <p className="hint">{currentHint}</p>
           </div>
-          <p className="hint">{currentHint}</p>
-        </div>
 
-        <div className="header-actions">
-          <button
-            className="btn small ghost lang-toggle-btn"
-            onClick={toggleLanguage}
-            title={lang === "it" ? "Switch to English" : "Passa all'italiano"}
-            aria-label="Cambia lingua"
-          >
-            {lang === "it" ? "🇮🇹 IT" : "🇬🇧 EN"}
-          </button>
-          {view !== "settings" ? (
+          <div className="header-actions">
             <button
-              className="btn small ghost"
-              aria-label={t("settings")}
-              onClick={() => setView("settings")}
-              title={t("settings")}
+              className="btn small ghost lang-toggle-btn"
+              onClick={toggleLanguage}
+              title={lang === "it" ? "Switch to English" : "Passa all'italiano"}
+              aria-label="Cambia lingua"
             >
-              ⚙︎
+              {lang === "it" ? "🇮🇹 IT" : "🇬🇧 EN"}
             </button>
-          ) : (
-            <button
-              className="btn small ghost"
-              aria-label={t("close")}
-              onClick={() => setView("tabs")}
-              title={t("close")}
-            >
-              ✕
-            </button>
-          )}
-        </div>
-      </header>
+            {view !== "settings" ? (
+              <button
+                className="btn small ghost"
+                aria-label={t("settings")}
+                onClick={() => setView("settings")}
+                title={t("settings")}
+              >
+                ⚙︎
+              </button>
+            ) : (
+              <button
+                className="btn small ghost"
+                aria-label={t("close")}
+                onClick={() => setView("tabs")}
+                title={t("close")}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </header>
 
-      {view === "settings" ? (
-        <SettingsScreen
-          config={config}
-          onSave={handleSaveConfig}
-          lang={lang}
-          onLanguageChange={handleLanguageChange}
-        />
-      ) : view === "run" && runId != null ? (
-        <RunDetailScreen
-          config={config}
-          runId={runId}
-          onBack={() => setView("tabs")}
-          lang={lang}
-        />
-      ) : (
-        <>
-          {tab === "chat" ? (
-            <ChatScreen config={config} onStarted={(id) => openRun(id)} />
-          ) : null}
-          {tab === "workflows" ? (
-            <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />
-          ) : null}
-          {tab === "runs" ? <RunsScreen config={config} onOpen={openRun} /> : null}
-          {tab === "files" ? <FilesScreen config={config} lang={lang} /> : null}
-          {tab === "approvals" ? (
-            <ApprovalsScreen
-              config={config}
-              onOpenRun={openRun}
-              onPendingCount={(count) => setPending(count)}
-            />
-          ) : null}
-        </>
-      )}
-
-      <nav className="bottom-nav" aria-label="Navigazione principale">
-        {(["chat", "workflows", "runs", "approvals", "files"] as Tab[]).map((key) => (
-          <button
-            key={key}
-            className={view === "tabs" && tab === key ? "active" : ""}
-            onClick={() => {
-              setTab(key);
-              setView("tabs");
-            }}
-          >
-            <span className="icon" aria-hidden="true">
-              {key === "chat"
-                ? "💬"
-                : key === "workflows"
-                  ? "🧩"
-                  : key === "runs"
-                    ? "📈"
-                    : key === "approvals"
-                      ? "✅"
-                      : "📁"}
-            </span>
-            <span>
-              {key === "chat"
-                ? t("chatTab")
-                : key === "workflows"
-                  ? t("workflowsTab")
-                  : key === "runs"
-                    ? t("runsTab")
-                    : key === "approvals"
-                      ? t("approvalsTab")
-                      : t("filesTab")}
-            </span>
-            {key === "approvals" && pending > 0 ? (
-              <span className="badge">{pending > 9 ? "9+" : pending}</span>
+        {view === "settings" ? (
+          <SettingsScreen
+            config={config}
+            onSave={handleSaveConfig}
+            lang={lang}
+            onLanguageChange={handleLanguageChange}
+          />
+        ) : view === "run" && runId != null ? (
+          <RunDetailScreen
+            config={config}
+            runId={runId}
+            onBack={() => setView("tabs")}
+            lang={lang}
+          />
+        ) : (
+          <>
+            {tab === "chat" ? (
+              <ChatScreen config={config} onStarted={(id) => openRun(id)} />
             ) : null}
-          </button>
-        ))}
-      </nav>
-    </div>
+            {tab === "workflows" ? (
+              <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />
+            ) : null}
+            {tab === "runs" ? <RunsScreen config={config} onOpen={openRun} /> : null}
+            {tab === "files" ? <FilesScreen config={config} lang={lang} /> : null}
+            {tab === "approvals" ? (
+              <ApprovalsScreen
+                config={config}
+                onOpenRun={openRun}
+                onPendingCount={(count) => setPending(count)}
+              />
+            ) : null}
+          </>
+        )}
+
+        <nav className="bottom-nav" aria-label="Navigazione principale">
+          {(["chat", "workflows", "runs", "approvals", "files"] as Tab[]).map((key) => (
+            <button
+              key={key}
+              className={view === "tabs" && tab === key ? "active" : ""}
+              onClick={() => {
+                setTab(key);
+                setView("tabs");
+              }}
+            >
+              <span className="icon" aria-hidden="true">
+                {key === "chat"
+                  ? "💬"
+                  : key === "workflows"
+                    ? "🧩"
+                    : key === "runs"
+                      ? "📈"
+                      : key === "approvals"
+                        ? "✅"
+                        : "📁"}
+              </span>
+              <span>
+                {key === "chat"
+                  ? t("chatTab")
+                  : key === "workflows"
+                    ? t("workflowsTab")
+                    : key === "runs"
+                      ? t("runsTab")
+                      : key === "approvals"
+                        ? t("approvalsTab")
+                        : t("filesTab")}
+              </span>
+              {key === "approvals" && pending > 0 ? (
+                <span className="badge">{pending > 9 ? "9+" : pending}</span>
+              ) : null}
+            </button>
+          ))}
+        </nav>
+      </div>
+    </LanguageContext.Provider>
   );
 }

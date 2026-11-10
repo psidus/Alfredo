@@ -1,8 +1,10 @@
+import { createContext, useContext } from "react";
+
 export type Language = "it" | "en";
 
 export const translations = {
   it: {
-    // Header & Nav
+    // Header & Navigation
     assistantTitle: "Alfredo",
     assistantHint: "assistente libero",
     workflowsTitle: "Workflow",
@@ -25,7 +27,7 @@ export const translations = {
     close: "Chiudi",
     settings: "Impostazioni",
 
-    // Common
+    // Common actions & status
     up: "Su",
     back: "Indietro",
     save: "Salva",
@@ -37,10 +39,23 @@ export const translations = {
     delete: "Elimina",
     download: "Scarica",
     status: "Stato",
+    cancel: "Annulla",
+    confirm: "Conferma",
+    justNow: "adesso",
+    minAgo: "min fa",
+    hoursAgo: "h fa",
 
-    // Language selector
-    languageTitle: "Lingua / Language",
-    languageHint: "Seleziona la lingua dell'interfaccia.",
+    // Status chips
+    statusNeedsYou: "attende te",
+    statusCompleted: "completato",
+    statusError: "errore",
+    statusRunning: "in corso",
+    statusPaused: "in pausa",
+    statusCancelled: "annullato",
+
+    // Language
+    languageTitle: "Lingua dell'applicazione",
+    languageHint: "Scegli la lingua preferita per i testi dell'applicazione.",
 
     // Settings
     serverTitle: "Server Alfredo",
@@ -49,37 +64,106 @@ export const translations = {
     systemGpuTitle: "Sistema e GPU",
     pushTitle: "Notifiche push",
     pushHint: "Ricevi notifiche sul telefono quando Alfredo richiede un'approvazione umana.",
-    enablePush: "Abilita notifiche",
-    disablePush: "Disabilita notifiche",
-    sendTestPush: "Invia notifica di test",
+    enablePush: "Attiva notifiche",
+    disablePush: "Disattiva",
+    sendTestPush: "Prova notifica",
+    installNotesTitle: "Installazione & Note",
+    installNotesHint: "Usa 'Installa applicazione' (Chrome su Android) o 'Aggiungi a schermata Home' (Safari su iOS) per usare Alfredo a schermo intero come una vera app nativa.",
+    gpuQueue: "Coda GPU",
+    gpuIdle: "libera",
+    callsServed: "Chiamate servite",
+    timeouts: "attese scadute",
+    avgWait: "attesa media",
 
     // Chat
-    chatPlaceholder: "Scrivi un messaggio o chiedi un workflow…",
+    chatHeaderHint: "Chat libera: l'assistente può proporre un workflow da avviare.",
+    newChat: "Nuova chat",
+    chatEmptyPrompt: "Chiedi qualcosa ad Alfredo.",
+    chatEmptyExample: "Es. “Esegui il report termico sui dati di ieri”.",
+    chatInputPlaceholder: "Scrivi un messaggio…",
     send: "Invia",
-    emptyChat: "Nessun messaggio ancora. Scrivi qualcosa per iniziare!",
+    gpuBusy: "GPU occupata",
+    inQueue: "in coda",
+    behindRun: "dietro run",
+    proposed: "proposto",
+    requiredValue: "valore richiesto",
+    startWorkflow: "Avvia workflow",
+    starting: "Avvio…",
+    missingFields: "Mancano",
+    noTextReply: "(nessuna risposta testuale)",
 
     // Workflows
-    startWorkflow: "Avvia",
-    runningWorkflow: "In avvio…",
-    noWorkflows: "Nessun workflow salvato disponibile.",
+    savedWorkflowsCount: "workflow salvati",
+    noWorkflowsYet: "Nessun workflow ancora",
+    loadingWorkflows: "Carico i workflow…",
+    createWorkflowHint: "Crea un workflow dalla dashboard per vederlo qui.",
+    inputLabel: "input",
+    inputsLabel: "input",
+    expectedOutputs: "Output attesi",
+    runButton: "Avvia",
+
+    // Runs
+    autoRefreshEvery5s: "Aggiornamento automatico ogni 5 s",
+    loadingRuns: "Carico le esecuzioni…",
+    noRunsYet: "Nessuna esecuzione. Avvia un workflow dalla chat o dalla lista.",
 
     // Approvals
-    noApprovals: "Nessuna approvazione in attesa.",
-    approve: "Approva",
-    reject: "Rifiuta",
-    inputPrompt: "Inserisci risposta…",
+    pendingApprovalsCount: "approvazioni in attesa",
+    noApprovalsYet: "Nessuna approvazione",
+    approvalsEmptyHint: "Quando un workflow si ferma per una conferma, la trovi qui.",
+    answerOrFeedback: "Risposta / feedback",
+    answerPlaceholder: "Scegli un'opzione o scrivi un feedback…",
+    sendAndResume: "Invia e riprendi",
+    sending: "Invio…",
+    openRun: "Apri run",
+    confirmStep: "Confermi il passaggio?",
+
+    // RunDetail
+    pausedNeedsApproval: "In pausa: richiesta approvazione",
+    answerToContinue: "Rispondi per continuare",
+    sendAnswer: "Invia risposta",
+    manualPause: "Pausa manuale",
+    pauseExecution: "Metti in pausa",
+    resumeExecution: "Riprendi",
+    cancelExecution: "Annulla esecuzione",
+    eventsTitle: "Eventi",
+    filesExportTitle: "File ed export",
+    noFilesGenerated: "Nessun file generato finora.",
+    partialPreview: "Anteprima parziale.",
+    sheetLabel: "Foglio",
+
+    // Run Events
+    evStarted: "Avviato",
+    evPaused: "In pausa",
+    evFinished: "Completato",
+    evFailed: "Fallito",
+    evCancelled: "Annullato",
+    evNodeStarted: "Nodo avviato",
+    evNodeCompleted: "Nodo completato",
+    evNodeFailed: "Nodo fallito",
+    evInterruptOpened: "Approvazione richiesta",
+    evInterruptAnswered: "Approvazione ricevuta",
+    evAutomation: "Automazione",
 
     // Files
-    upload: "Carica",
-    newFolder: "Nuova cartella",
+    loadingFiles: "Carico i file…",
     emptyFolder: "Questa cartella è vuota.",
+    newFolder: "Nuova cartella",
+    folderNamePlaceholder: "Nome cartella…",
+    create: "Crea",
+    uploadFile: "Carica file",
+    uploading: "Caricamento in corso…",
+    shareLink: "Condividi",
+    linkCopied: "Link copiato negli appunti!",
+    copyLink: "Copia link",
+    preview: "Anteprima",
   },
   en: {
-    // Header & Nav
+    // Header & Navigation
     assistantTitle: "Alfredo",
     assistantHint: "freeform assistant",
     workflowsTitle: "Workflows",
-    workflowsHint: "run a saved process",
+    workflowsHint: "launch a saved process",
     runsTitle: "Runs",
     runsHint: "history & real-time status",
     approvalsTitle: "Approvals",
@@ -98,7 +182,7 @@ export const translations = {
     close: "Close",
     settings: "Settings",
 
-    // Common
+    // Common actions & status
     up: "Up",
     back: "Back",
     save: "Save",
@@ -110,10 +194,23 @@ export const translations = {
     delete: "Delete",
     download: "Download",
     status: "Status",
+    cancel: "Cancel",
+    confirm: "Confirm",
+    justNow: "just now",
+    minAgo: "m ago",
+    hoursAgo: "h ago",
 
-    // Language selector
-    languageTitle: "Language / Lingua",
-    languageHint: "Choose interface language.",
+    // Status chips
+    statusNeedsYou: "needs you",
+    statusCompleted: "completed",
+    statusError: "error",
+    statusRunning: "running",
+    statusPaused: "paused",
+    statusCancelled: "cancelled",
+
+    // Language
+    languageTitle: "Application Language",
+    languageHint: "Choose your preferred language for the application interface.",
 
     // Settings
     serverTitle: "Alfredo Server",
@@ -123,33 +220,109 @@ export const translations = {
     pushTitle: "Push Notifications",
     pushHint: "Receive alerts on your phone when Alfredo requires human approval.",
     enablePush: "Enable notifications",
-    disablePush: "Disable notifications",
+    disablePush: "Disable",
     sendTestPush: "Send test notification",
+    installNotesTitle: "Installation & Notes",
+    installNotesHint: "Use 'Install app' (Chrome on Android) or 'Add to Home Screen' (Safari on iOS) to use Alfredo full-screen like a native app.",
+    gpuQueue: "GPU Queue",
+    gpuIdle: "idle",
+    callsServed: "Calls served",
+    timeouts: "timeouts",
+    avgWait: "avg wait",
 
     // Chat
-    chatPlaceholder: "Type a message or ask for a workflow…",
+    chatHeaderHint: "Freeform chat: the assistant can suggest workflows to run.",
+    newChat: "New chat",
+    chatEmptyPrompt: "Ask Alfredo anything.",
+    chatEmptyExample: "E.g. “Run the thermal report on yesterday's data”.",
+    chatInputPlaceholder: "Type a message…",
     send: "Send",
-    emptyChat: "No messages yet. Say hello to get started!",
+    gpuBusy: "GPU busy",
+    inQueue: "in queue",
+    behindRun: "behind run",
+    proposed: "suggested",
+    requiredValue: "required value",
+    startWorkflow: "Start workflow",
+    starting: "Starting…",
+    missingFields: "Missing",
+    noTextReply: "(no text reply)",
 
     // Workflows
-    startWorkflow: "Run",
-    runningWorkflow: "Starting…",
-    noWorkflows: "No saved workflows available.",
+    savedWorkflowsCount: "saved workflows",
+    noWorkflowsYet: "No workflows yet",
+    loadingWorkflows: "Loading workflows…",
+    createWorkflowHint: "Create a workflow from the desktop dashboard to see it here.",
+    inputLabel: "input",
+    inputsLabel: "inputs",
+    expectedOutputs: "Expected outputs",
+    runButton: "Run",
+
+    // Runs
+    autoRefreshEvery5s: "Auto-refreshing every 5 s",
+    loadingRuns: "Loading runs…",
+    noRunsYet: "No runs yet. Start a workflow from chat or from the list.",
 
     // Approvals
-    noApprovals: "No pending approvals.",
-    approve: "Approve",
-    reject: "Reject",
-    inputPrompt: "Type your answer…",
+    pendingApprovalsCount: "pending approvals",
+    noApprovalsYet: "No approvals",
+    approvalsEmptyHint: "When a workflow pauses for human confirmation, you will find it here.",
+    answerOrFeedback: "Answer / feedback",
+    answerPlaceholder: "Select an option or type feedback…",
+    sendAndResume: "Send and resume",
+    sending: "Sending…",
+    openRun: "Open run",
+    confirmStep: "Confirm this step?",
+
+    // RunDetail
+    pausedNeedsApproval: "Paused: approval required",
+    answerToContinue: "Answer to continue",
+    sendAnswer: "Submit answer",
+    manualPause: "Manual pause",
+    pauseExecution: "Pause",
+    resumeExecution: "Resume",
+    cancelExecution: "Cancel run",
+    eventsTitle: "Events",
+    filesExportTitle: "Files & exports",
+    noFilesGenerated: "No files generated yet.",
+    partialPreview: "Partial preview.",
+    sheetLabel: "Sheet",
+
+    // Run Events
+    evStarted: "Started",
+    evPaused: "Paused",
+    evFinished: "Completed",
+    evFailed: "Failed",
+    evCancelled: "Cancelled",
+    evNodeStarted: "Node started",
+    evNodeCompleted: "Node completed",
+    evNodeFailed: "Node failed",
+    evInterruptOpened: "Approval requested",
+    evInterruptAnswered: "Approval received",
+    evAutomation: "Automation",
 
     // Files
-    upload: "Upload",
-    newFolder: "New folder",
+    loadingFiles: "Loading files…",
     emptyFolder: "This folder is empty.",
+    newFolder: "New folder",
+    folderNamePlaceholder: "Folder name…",
+    create: "Create",
+    uploadFile: "Upload file",
+    uploading: "Uploading…",
+    shareLink: "Share",
+    linkCopied: "Link copied to clipboard!",
+    copyLink: "Copy link",
+    preview: "Preview",
   },
 } as const;
 
 export type TranslationKey = keyof typeof translations.it;
+
+export interface LanguageContextValue {
+  lang: Language;
+  setLang: (lang: Language) => void;
+  toggleLanguage: () => void;
+  t: (key: TranslationKey) => string;
+}
 
 const LANG_KEY = "alfredo.lang.v1";
 
@@ -172,4 +345,15 @@ export function saveLanguage(lang: Language): void {
   } catch {
     // ignore
   }
+}
+
+export const LanguageContext = createContext<LanguageContextValue>({
+  lang: "it",
+  setLang: () => {},
+  toggleLanguage: () => {},
+  t: (key: TranslationKey) => translations.it[key] || "",
+});
+
+export function useLanguage() {
+  return useContext(LanguageContext);
 }
