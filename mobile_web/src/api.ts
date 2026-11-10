@@ -232,6 +232,7 @@ export const api = {
     const headers: Record<string, string> = {
       Accept: "application/json",
       "Content-Type": "application/octet-stream",
+      "ngrok-skip-browser-warning": "true",
     };
     if (config.token) headers["X-Control-Token"] = config.token;
     let response: Response;

@@ -33,10 +33,13 @@ start http://localhost:8000/app
 echo.
 echo ===============================================================
 echo [AVVIO TUNNEL NGROK]
-echo Copia l'indirizzo HTTPS (es: https://xxxx.ngrok-free.app) e 
-echo aggiungi /app alla fine (es: https://xxxx.ngrok-free.app/app)
-echo per aprirlo e installarlo sul tuo telefono Android!
+echo Indirizzo statico assegnato:
+echo https://inexpugnable-marvis-nonvalid.ngrok-free.app/app
+echo.
+echo Aprilo dal browser del telefono (es. Google Chrome su Android).
+echo NOTA: Se compare la schermata blu di ngrok, clicca su "Visit Site"
+echo e poi premi i tre puntini in alto a destra e seleziona "Installa app".
 echo ===============================================================
 echo.
 
-ngrok http 8000
+ngrok http --domain=inexpugnable-marvis-nonvalid.ngrok-free.app 8000
