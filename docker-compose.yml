@@ -75,6 +75,7 @@ services:
       - ./tools:/app/tools
       - ./config:/app/config
       - ./sdk:/app/sdk
+      - ./mobile_web:/app/mobile_web
       - ./.env:/app/.env
       - ./bot.py:/app/bot.py
     restart: unless-stopped
