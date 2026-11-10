@@ -23,17 +23,25 @@ def create_docker_shortcut():
             ['powershell', '-NoProfile', '-Command', '[Environment]::GetFolderPath("Desktop")'], 
             text=True
         ).strip()
-        if main_desktop and os.path.exists(main_desktop):
+        if main_desktop and os.path.exists(main_desktop) and main_desktop not in desktop_dirs:
             desktop_dirs.append(main_desktop)
     except Exception:
         pass
 
-    user_desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop')
-    if user_desktop and os.path.exists(user_desktop) and user_desktop not in desktop_dirs:
-        desktop_dirs.append(user_desktop)
+    user_profile = os.environ.get('USERPROFILE', '')
+    potential_desktops = [
+        os.path.join(user_profile, 'Desktop'),
+        os.path.join(user_profile, 'OneDrive', 'Desktop'),
+        os.path.join(os.environ.get('OneDrive', ''), 'Desktop'),
+        os.path.join(os.environ.get('OneDriveConsumer', ''), 'Desktop'),
+        os.path.join(os.environ.get('OneDriveCommercial', ''), 'Desktop')
+    ]
+    for d in potential_desktops:
+        if d and os.path.exists(d) and d not in desktop_dirs:
+            desktop_dirs.append(d)
 
     if not desktop_dirs:
-        desktop_dirs.append(os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop'))
+        desktop_dirs.append(os.path.join(user_profile, 'Desktop'))
 
     # 2. Create the Shortcut on each Desktop location via PowerShell
     for desktop in desktop_dirs:
