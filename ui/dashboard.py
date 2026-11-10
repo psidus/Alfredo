@@ -27,6 +27,7 @@ from core.workflow_graph import (
     NODE_TYPE_LEVEL,
     NODE_TYPE_LOOP,
     NODE_TYPE_TASK,
+    INPUT_REF,
     canonicalize_graph,
     graph_to_dot,
     new_node_id,
@@ -121,6 +122,21 @@ def sanitize_input(text: str) -> str:
     # Basic attempt to neutralize SQL comments
     text = text.replace('--', '')
     return text.strip()
+
+def get_alfredo_robot_b64() -> str:
+    """Return base64 data URI of the desktop Alfredo robot icon."""
+    try:
+        import base64
+        for candidate in ["ui/alfredo_robot.png", "ui/favicon.ico", "logo.png"]:
+            if os.path.exists(candidate):
+                with open(candidate, "rb") as f:
+                    data = f.read()
+                mime = "image/png" if candidate.endswith(".png") else "image/x-icon"
+                return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+    except Exception:
+        pass
+    return ""
+
 
 def sanitize_filename(name: str) -> str:
     """
@@ -1178,7 +1194,7 @@ def render_api_vault():
                     default_master_index = idx
                     break
             
-        col_master_model, col_master_save = st.columns([4, 1])
+        col_master_model, col_master_save = st.columns([4, 1], vertical_alignment="bottom")
         with col_master_model:
             selected_master_model_str = st.selectbox(
                 "Select Model for Master AI (System Orchestrator)", 
@@ -1188,8 +1204,6 @@ def render_api_vault():
                 help="Select the model that Master AI will use for routing intents and refining agent output."
             )
         with col_master_save:
-            st.write("") # Spacer
-            st.write("") # Spacer
             if st.button("💾 Save Model", use_container_width=True, key="save_master_model_btn"):
                 if selected_master_model_str:
                     chosen_model_name = selected_master_model_str.split(" / ", 1)[-1]
@@ -1206,7 +1220,7 @@ def render_api_vault():
                     default_agent_index = idx
                     break
             
-        col_agent_model, col_agent_save = st.columns([4, 1])
+        col_agent_model, col_agent_save = st.columns([4, 1], vertical_alignment="bottom")
         with col_agent_model:
             selected_default_agent_model_str = st.selectbox(
                 "Select Default Model for Agents", 
@@ -1216,8 +1230,6 @@ def render_api_vault():
                 help="Select the default model that all agents will use if a task doesn't override it."
             )
         with col_agent_save:
-            st.write("") # Spacer
-            st.write("") # Spacer
             if st.button("💾 Save Default Model", use_container_width=True, key="save_default_agent_model_btn"):
                 if selected_default_agent_model_str:
                     chosen_agent_model_name = selected_default_agent_model_str.split(" / ", 1)[-1]
@@ -1622,9 +1634,9 @@ def render_api_vault():
                 )
                 st.rerun()
             except sqlite3.IntegrityError:
-                st.error(f"Il modello '{model_name}' è già presente nel database.")
+                st.error(f"Model '{model_name}' is already in the database.")
             except Exception as e:
-                st.error(f"Errore durante l'aggiunta del modello: {e}")
+                st.error(f"Error adding model: {e}")
 
         models = db.read_all_models()
         if models:
@@ -2108,14 +2120,14 @@ def render_task_builder():
 
         task_name = st.text_input(
             "Task Name / Label (Optional)",
-            placeholder="e.g. analisi_database",
-            help="Give this task a unique name to reference its output in other tasks (e.g. `{task:analisi_database}`). Leave empty to use Task ID instead.",
+            placeholder="e.g. market_analysis",
+            help="Give this task a unique name so other tasks can reference its output (e.g. `{task:market_analysis}`). Leave empty to use the Task ID instead. The task is a shared asset: saving here updates every workflow node still linked to the template.",
             key="task_name_input"
         )
         description = st.text_area("Task Description", height=100, key="task_desc_area",
-                                    help="Use `{variable_name}` to insert dynamic values from Required Inputs. E.g. `Crea un logo con sfumature {colore}`")
+                                    help="Use `{variable_name}` for values declared in Required Inputs, `{previous_result}` / `{context}` for the previous step, `{user_input}` for the message that started the run. E.g. `Write a launch plan for {product}`")
         expected_output = st.text_area("Expected Output", height=150, key="task_output_area",
-                                       help="You can also use `{variable_name}` placeholders here.")
+                                       help="Same placeholders work here. Ports wired in the canvas are filled by the graph and never asked to the operator.")
 
         # --- Write Tool Instruction Injection ---
         WRITE_TOOLS_MAP = {
@@ -2316,8 +2328,8 @@ def render_task_builder():
         agent_specialization = st.text_input(
             "Agent Specialization (Optional)",
             value=default_specialization,
-            placeholder="e.g. chemical thermodynamics and biofuel combustion properties",
-            help="Dynamically narrows the assigned agent's role and backstory for this specific task, without creating a new agent.",
+            placeholder="e.g. thermochemistry and combustion properties",
+            help="Narrows the assigned agent's role and backstory for this task only, without creating a new agent.",
             key="task_specialization_input"
         )
         if agent_specialization:
@@ -2365,7 +2377,7 @@ def render_task_builder():
                     st.session_state[cb_key] = tool_id in default_tools
             
             # 2. Search box for filtering tools
-            search_query = st.text_input("🔍 Cerca Tool", placeholder="Cerca tool per nome o descrizione...", key="tool_search_input", label_visibility="collapsed")
+            search_query = st.text_input("🔍 Search tools", placeholder="Search tools by name or description...", key="tool_search_input", label_visibility="collapsed")
             st.markdown("<div style='margin-top: 8px;'></div>", unsafe_allow_html=True)
             
             # Filter tools list based on search query
@@ -2425,7 +2437,7 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                             unsafe_allow_html=True
                                         )
                 else:
-                    st.info("Nessun tool corrisponde alla ricerca.")
+                    st.info("No tools match your search.")
 
             # Compile selected tools from all checkboxes state
             selected_tools = [t for t in AVAILABLE_TOOLS if st.session_state.get(f"cb_task_{t}", False)]
@@ -2537,8 +2549,11 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
 
         # --- Guided Required Inputs ---
         st.markdown("---")
-        st.markdown("**🔑 Required Inputs** — *Variables asked in chat before execution*")
-        st.caption("The answer will replace `{variable_name}` in the prompts.")
+        st.markdown("**🔑 Required Inputs** — *Variables asked before execution*")
+        st.caption(
+            "Each key becomes a `{variable_name}` placeholder in the prompts. A port wired in the "
+            "canvas is **not** asked here: the graph fills it."
+        )
         
         # Table Header
         if st.session_state.temp_required_inputs:
@@ -3498,6 +3513,815 @@ def render_workflow_share_hub(db):
                 st.error(f"Import failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Shared UI layer: run inputs, status badges, approvals, workspace/system panels
+# ---------------------------------------------------------------------------
+
+BUILTIN_PLACEHOLDERS = {
+    "previous_result",
+    "context",
+    "user_input",
+    "flexible_input",
+    "specialization",
+    "run_id",
+    "today",
+    "task",
+}
+
+_PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_]+)\}")
+
+
+def workflow_required_inputs(workflow, tasks) -> dict:
+    """Inputs a run must ask the operator for.
+
+    Declared ``required_inputs`` and ``input`` nodes are authoritative. Ports
+    wired from another node are resolved by the graph, so they are never asked.
+    """
+    if not workflow:
+        return {}
+
+    task_map = {t.get("id"): t for t in (tasks or []) if isinstance(t, dict)}
+    raw_graph = workflow.get("task_ids_json") or workflow.get("task_ids") or []
+    if isinstance(raw_graph, str):
+        try:
+            raw_graph = json.loads(raw_graph)
+        except Exception:
+            raw_graph = []
+    if not isinstance(raw_graph, list):
+        raw_graph = []
+
+    prompts: dict = {}
+    graph_ports = set()
+    task_ids = []
+
+    def _visit(node):
+        if isinstance(node, (int, str)) and str(node).lstrip("-").isdigit():
+            task_ids.append(int(node))
+            return
+        if not isinstance(node, dict):
+            return
+        ntype = node.get("type")
+        if ntype == NODE_TYPE_INPUT:
+            for item in node.get("keys") or node.get("inputs") or []:
+                if isinstance(item, str) and item.strip():
+                    prompts.setdefault(item.strip(), item.strip())
+                elif isinstance(item, dict) and item.get("key"):
+                    key = str(item["key"]).strip()
+                    prompts.setdefault(key, str(item.get("prompt") or key))
+        imap = node.get("inputs_map") or {}
+        if isinstance(imap, dict):
+            for port, binding in imap.items():
+                if not isinstance(binding, dict):
+                    continue
+                if binding.get("from") == INPUT_REF:
+                    key = str(binding.get("key") or port).strip()
+                    if key:
+                        prompts.setdefault(key, key)
+                else:
+                    graph_ports.add(str(port))
+        if node.get("task_id") is not None:
+            try:
+                task_ids.append(int(node["task_id"]))
+            except (TypeError, ValueError):
+                pass
+        for child_key in ("nodes", "children", "body_node_ids", "task_ids", "steps"):
+            for child in node.get(child_key) or []:
+                _visit(child)
+
+    for step in raw_graph:
+        _visit(step)
+
+    for tid in task_ids:
+        task = task_map.get(tid)
+        if not task:
+            continue
+        for item in task.get("required_inputs") or []:
+            if isinstance(item, dict) and item.get("key"):
+                key = str(item["key"]).strip()
+                prompts.setdefault(key, str(item.get("prompt") or key))
+
+    for tid in task_ids:
+        task = task_map.get(tid)
+        if not task:
+            continue
+        text = f"{task.get('description') or ''}\n{task.get('expected_output') or ''}"
+        for key in re.findall(r"\{([a-zA-Z0-9_]+)\}", text):
+            if key in BUILTIN_PLACEHOLDERS or key in graph_ports:
+                continue
+            prompts.setdefault(key, key)
+
+    return {
+        key: prompt
+        for key, prompt in prompts.items()
+        if key and key not in BUILTIN_PLACEHOLDERS and key not in graph_ports
+    }
+
+
+def run_status_badge(status) -> str:
+    """Small, uniform label for a run status (shared by every run list)."""
+    key = str(status or "").strip().lower()
+    return {
+        "running": "🔵 Running",
+        "queued": "⏳ Queued",
+        "completed": "🟢 Completed",
+        "failed": "🔴 Failed",
+        "stopped": "⏹️ Stopped",
+        "cancelled": "⏹️ Cancelled",
+        "paused": "⏸️ Paused",
+        "waiting_human": "🙋 Waiting for approval",
+    }.get(key, str(status) if status else "unknown")
+
+
+def _human_size(size) -> str:
+    try:
+        value = float(size or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def render_interrupt_queue(pending, *, prefix: str = "ui", empty_hint: str = "") -> None:
+    """Render the persistent human approvals (``core.interrupts`` rows)."""
+    if not pending:
+        if empty_hint:
+            st.caption(empty_hint)
+        return
+
+    from core.run_service import cancel_run, start_resume_interrupt
+
+    st.markdown(f"#### 🙋 Pending approvals ({len(pending)})")
+    for intr in pending:
+        iid = intr.get("id")
+        run_id = intr.get("run_id")
+        question = str(intr.get("question") or "Approve this step?")
+        options = [str(o) for o in (intr.get("options") or []) if str(o).strip()]
+        with st.container(border=True):
+            st.markdown(f"**Run #{run_id}** · {question}")
+            if intr.get("node_id"):
+                st.caption(f"node `{intr['node_id']}`")
+            if options:
+                cols = st.columns(min(len(options), 4))
+                for idx, option in enumerate(options[:4]):
+                    if cols[idx].button(
+                        option,
+                        key=f"{prefix}_opt_{iid}_{idx}",
+                        use_container_width=True,
+                    ):
+                        start_resume_interrupt(int(iid), option)
+                        st.rerun()
+            text = st.text_input(
+                "Or answer in plain text (e.g. \u00abok\u00bb, or feedback)",
+                key=f"{prefix}_text_{iid}",
+                placeholder="ok",
+            )
+            col_send, col_cancel = st.columns([1, 1])
+            with col_send:
+                if st.button("📨 Send", key=f"{prefix}_send_{iid}", use_container_width=True):
+                    if not text.strip():
+                        st.warning("Write an answer first.")
+                    else:
+                        start_resume_interrupt(iid, text.strip())
+                        st.rerun()
+            with col_cancel:
+                if st.button("⏹️ Cancel run", key=f"{prefix}_cancel_{iid}", use_container_width=True):
+                    cancel_run(run_id)
+                    st.rerun()
+            st.divider()
+
+
+def _run_summary_line(run: dict) -> str:
+    return (
+        f"{run_status_badge(run.get('status'))} · Run #{run.get('id')} · "
+        f"started `{run.get('started_at') or '—'}` · source `{run.get('source') or 'manual'}`"
+    )
+
+
+def _render_run_panel(db):
+    """Run a workflow, or route a request, through ``run_service``.
+
+    Everything goes through the single run entry point so a run started from the
+    dashboard behaves exactly like one started from Telegram or the app: it emits
+    events, shows up in Run History, waits its turn on the GPU gate and can be
+    cancelled from any client.
+    """
+    from core.run_service import (
+        cancel_run,
+        list_recent_runs,
+        pending_interrupts,
+        start_execution,
+        start_run,
+    )
+
+    st.subheader("🧪 Run Workflows")
+    st.caption(
+        "Test the pipeline, or run a saved workflow. Runs go through **run_service**: they emit "
+        "events, respect the GPU queue and can be cancelled from any client."
+    )
+
+    try:
+        pending = pending_interrupts()
+    except Exception as exc:  # noqa: BLE001 - the page must never crash
+        pending = []
+        st.warning(f"Could not read pending approvals: {exc}")
+    render_interrupt_queue(pending, prefix="asm")
+
+    exec_mode = st.radio(
+        "Execution mode",
+        ["Direct Workflow Execution", "Natural Language Routing (Master AI)"],
+        horizontal=True,
+        key="wf_exec_mode",
+    )
+    st.markdown("---")
+
+    workflows = db.read_all_workflows()
+    if not workflows:
+        st.info("No workflows available. Create one above first.")
+        return
+    wf_options = {w["name"]: w["id"] for w in workflows}
+
+    if exec_mode.startswith("Natural"):
+        test_prompt = st.text_area(
+            "Describe what you want in plain language",
+            key="wf_test_prompt",
+            placeholder="e.g. Analyse the files in the workspace and write a summary report",
+            height=100,
+        )
+        if st.button("🧠 Route and run", type="primary"):
+            if not test_prompt.strip():
+                st.error("Please enter a request.")
+                return
+            try:
+                with st.spinner("Master AI is choosing the workflow…"):
+                    routing = MasterAI().evaluate_intent(test_prompt)
+                st.json(routing)
+                if routing.get("status") == "success" and routing.get("workflow_id"):
+                    inputs = routing.get("extracted_params") or {}
+                    run_id = start_run(int(routing["workflow_id"]), inputs, source="dashboard")
+                    st.success(
+                        f"Run **#{run_id}** queued. Follow it in **Run History** or in the "
+                        "Assistant."
+                    )
+                else:
+                    st.warning(
+                        "Master AI could not route this request. Reason: "
+                        f"{routing.get('message', 'no matching workflow')}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"❌ Routing failed: {exc}")
+                import traceback
+
+                st.code(traceback.format_exc())
+        return
+
+    selected_name = st.selectbox("Select Workflow to Run", options=list(wf_options.keys()), key="wf_run_select")
+    wf_id = wf_options[selected_name]
+    workflow = db.read_workflow(wf_id)
+    tasks = db.read_all_tasks()
+    required_inputs = workflow_required_inputs(workflow, tasks)
+
+    st.markdown("### Required inputs")
+    if not required_inputs:
+        st.info(
+            "This workflow declares no run inputs. Inputs filled by data wiring in the canvas "
+            "are resolved by the graph, not asked here."
+        )
+    values = {}
+    for key, prompt in sorted(required_inputs.items()):
+        values[key] = st.text_input(
+            prompt or key,
+            key=f"wf_run_input_{key}_{wf_id}",
+            placeholder=key,
+            help=f"Placeholder `{{{key}}}` — passed to the run as `{key}`.",
+        )
+    if workflow and workflow.get("expected_exports"):
+        st.caption("Expected outputs: " + ", ".join(workflow.get("expected_exports") or []))
+
+    try:
+        recent = [r for r in list_recent_runs(limit=60) if r.get("workflow_id") == wf_id]
+    except Exception:  # noqa: BLE001
+        recent = []
+
+    active = next((r for r in recent if str(r.get("status")).lower() == "running"), None)
+    paused = [r for r in recent if str(r.get("status")).lower() == "paused"]
+
+    st.markdown("### Start a new run")
+    if st.button("🚀 Execute Workflow", type="primary", key=f"wf_execute_{wf_id}"):
+        missing = [k for k, v in values.items() if not str(v).strip()]
+        if missing:
+            st.error("Please provide: " + ", ".join(f"`{m}`" for m in missing))
+        else:
+            try:
+                run_id = start_run(wf_id, values, source="dashboard")
+                st.success(f"Run **#{run_id}** queued. It runs in the background: follow it below.")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not start the run: {exc}")
+
+    if active:
+        st.info(f"**This workflow is running now** · Run #{active.get('id')}.")
+        if st.button("🛑 Cancel active run", key=f"wf_cancel_{active.get('id')}"):
+            cancel_run(active.get("id"))
+            st.rerun()
+
+    for run in paused:
+        st.warning(f"⚠️ Run #{run.get('id')} is paused. Resume it from the approvals queue above.")
+
+    if recent:
+        st.markdown("### Recent runs of this workflow")
+        for run in recent[:8]:
+            st.caption(_run_summary_line(run))
+            col_resume, col_cancel = st.columns([1, 1])
+            status = str(run.get("status") or "").lower()
+            if status in ("paused", "queued"):
+                if col_resume.button("▶️ Resume", key=f"wf_resume_{run.get('id')}"):
+                    start_execution(run.get("id"))
+                    st.rerun()
+            if status in ("running", "paused", "queued"):
+                if col_cancel.button("🛑 Cancel", key=f"wf_cancel_row_{run.get('id')}"):
+                    cancel_run(run.get("id"))
+                    st.rerun()
+
+
+def _render_event_timeline(run_id: int, *, wf_map=None, limit: int = 300) -> None:
+    """Timeline of ``run_events`` for one run (the append-only event log)."""
+    from core import events
+
+    wf_map = wf_map or {}
+    header_left, header_right = st.columns([4, 1])
+    with header_left:
+        st.markdown(f"#### 🧾 Event timeline · Run #{run_id}")
+    with header_right:
+        if st.button("🔄 Refresh", key=f"ev_refresh_{run_id}", use_container_width=True):
+            st.rerun()
+
+    try:
+        rows = events.tail(after_seq=0, run_id=int(run_id), limit=limit)
+        last_seq = events.latest_seq(int(run_id))
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read the event log: {exc}")
+        return
+
+    if not rows:
+        st.info(
+            "No events recorded for this run. Runs started before the event log existed "
+            "(or outside run_service) have no timeline."
+        )
+        return
+
+    st.caption(f"{len(rows)} events · latest seq `{last_seq}` · showing the first {limit}.")
+    for entry in rows:
+        seq = entry.get("seq")
+        etype = str(entry.get("type") or "")
+        created = entry.get("created_at") or entry.get("ts") or ""
+        payload = entry.get("payload") or {}
+        icon = {
+            "run.started": "▶️",
+            "run.finished": "✅",
+            "run.failed": "❌",
+            "run.cancelled": "⏹️",
+            "run.paused": "⏸️",
+            "run.node.started": "⚙️",
+            "run.node.completed": "✔️",
+            "run.node.failed": "✖️",
+            "run.interrupt.opened": "🙋",
+            "run.interrupt.answered": "💬",
+            "automation.fired": "⏰",
+            "system.model.switch": "🧠",
+        }.get(etype, "•")
+        label = str(payload.get("node_id") or payload.get("role") or payload.get("message") or "")
+        st.markdown(f"`#{seq:02d}` {icon} **{etype}** · `{created}` {('· ' + label) if label else ''}")
+        if payload:
+            with st.expander(f"payload · seq {seq}", expanded=False):
+                st.json(payload)
+        st.caption("")
+
+    _render_run_artifacts(run_id)
+
+
+def _render_run_artifacts(run_id: int) -> None:
+    """Files a run exported into the workspace jail, with signed download links."""
+    try:
+        from core import files as ws_files
+        from core.run_service import get_run
+
+        run = get_run(int(run_id))
+        artifacts = ws_files.describe_run_exports(run) if run else []
+    except Exception:  # noqa: BLE001 - artifacts are a nice-to-have
+        return
+    if not artifacts:
+        return
+
+    st.divider()
+    st.markdown("#### 📦 Artifacts")
+    links = st.session_state.setdefault("run_artifact_links", {})
+    for item in artifacts:
+        name = item.get("name") or item.get("path") or "file"
+        path = item.get("path") or ""
+        if not (item.get("accessible") and item.get("exists")):
+            st.caption(f"`{name}` · not available (outside the workspace jail)")
+            continue
+        col_info, col_link = st.columns([3, 1])
+        col_info.markdown(f"`{path}` · {_human_size(item.get('size'))} · {item.get('kind') or ''}")
+        link_key = f"{run_id}:{path}"
+        if col_link.button("🔗 Link", key=f"ev_art_{run_id}_{abs(hash(path))}", help="Signed download link"):
+            try:
+                url, expires = _share_link(path, 24)
+                links[link_key] = (url, expires)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"No link: {exc}")
+        if link_key in links:
+            url, expires = links[link_key]
+            st.code(url, language=None)
+            st.caption(f"Expires: {expires}")
+
+
+def _share_link(rel_path: str, ttl_hours: int = 24) -> str:
+    """Signed URL for one file: public base if configured, else the local API."""
+    from core import files as ws_files
+
+    info = ws_files.create_share_token(rel_path, ttl_seconds=int(ttl_hours) * 3600)
+    base = (os.getenv("ALFREDO_PUBLIC_URL") or "").rstrip("/")
+    if not base:
+        base = f"http://localhost:{os.getenv('ALFREDO_API_PORT', '8000')}"
+    return f"{base}/api/files/shared/{info['token']}", info["expires_at"]
+
+
+def _render_file_preview(rel_path: str) -> None:
+    """Server-side preview of one workspace file (no full download needed)."""
+    from core import files as ws_files
+
+    try:
+        info = ws_files.preview(rel_path)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Preview not available: {exc}")
+        return
+
+    kind = info.get("kind")
+    st.markdown(f"**Preview:** `{rel_path}` · {_human_size(info.get('size'))} · {info.get('modified', '')}")
+
+    if kind == "image" and info.get("data_uri"):
+        st.image(info["data_uri"], use_container_width=True)
+    elif kind == "table":
+        rows = info.get("rows") or []
+        if rows:
+            header, *body = rows
+            st.dataframe(
+                [dict(zip(header, row)) for row in body],
+                use_container_width=True,
+                hide_index=True,
+            )
+            if info.get("truncated"):
+                st.caption("Table truncated for the preview.")
+        else:
+            st.info("Empty table.")
+    elif kind in ("text", "pdf", "doc"):
+        text = info.get("text") or ""
+        st.code(text or "(no extractable text)", language=info.get("language") or None)
+        if info.get("truncated"):
+            st.caption("Preview truncated — download the file for the full content.")
+    elif kind == "too_large":
+        st.info(info.get("message") or "File too large to preview.")
+    else:
+        st.info(info.get("message") or info.get("error") or "No preview for this file type.")
+
+
+def _render_workspace_files() -> None:
+    """Browse the workspace jail: breadcrumbs, preview, download, share links."""
+    from core import files as ws_files
+
+    state_key = "ws_current_dir"
+    current = str(st.session_state.get(state_key) or "").strip("/")
+    parts = [p for p in current.split("/") if p]
+
+    st.caption(
+        "Read-only browser of `workspace/`. Paths are resolved inside the jail: nothing outside "
+        "it is reachable. Hidden folders (e.g. `.uploads`) are skipped on purpose."
+    )
+
+    crumb_cols = st.columns([1.3] + [1.2] * len(parts) + [3]) if parts else st.columns([1.3, 4])
+    if crumb_cols[0].button("🏠 workspace", key="ws_crumb_root", use_container_width=True):
+        st.session_state[state_key] = ""
+        st.session_state.pop("ws_preview_path", None)
+        st.rerun()
+    for i, part in enumerate(parts):
+        if crumb_cols[i + 1].button(part, key=f"ws_crumb_{i}", use_container_width=True):
+            st.session_state[state_key] = "/".join(parts[: i + 1])
+            st.session_state.pop("ws_preview_path", None)
+            st.rerun()
+
+    try:
+        listing = ws_files.list_files(current)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Cannot open `{current or 'workspace'}`: {exc}")
+        return
+
+    entries = listing.get("entries") or []
+    if not entries:
+        st.info("This folder is empty.")
+    else:
+        icons = {
+            "folder": "📁",
+            "image": "🖼️",
+            "pdf": "📕",
+            "table": "📊",
+            "doc": "📄",
+            "text": "📝",
+            "archive": "🗜️",
+        }
+        for entry in entries:
+            is_dir = bool(entry.get("is_dir"))
+            col_name, col_size, col_date, col_action = st.columns([4, 1.1, 1.7, 1.3])
+            icon = icons.get(entry.get("kind"), "📄")
+            if col_name.button(
+                f"{icon} {entry['name']}",
+                key=f"ws_open_{entry['path']}",
+                use_container_width=True,
+            ):
+                if is_dir:
+                    st.session_state[state_key] = entry["path"]
+                    st.session_state.pop("ws_preview_path", None)
+                else:
+                    st.session_state["ws_preview_path"] = entry["path"]
+                st.rerun()
+            col_size.caption("" if is_dir else _human_size(entry.get("size")))
+            col_date.caption(entry.get("modified") or "—")
+            if is_dir:
+                col_action.caption("")
+            else:
+                size = int(entry.get("size") or 0)
+                if size <= 10 * 1024 * 1024:
+                    try:
+                        payload = ws_files.resolve(entry["path"]).read_bytes()
+                        col_action.download_button(
+                            "⬇️",
+                            data=payload,
+                            file_name=entry["name"],
+                            mime=entry.get("mime"),
+                            key=f"ws_dl_{entry['path']}",
+                            use_container_width=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        col_action.caption("n/a")
+                else:
+                    col_action.caption(">10 MB")
+
+    if listing.get("truncated"):
+        st.caption("Listing truncated: too many entries in this folder.")
+
+    preview_path = st.session_state.get("ws_preview_path")
+    if preview_path:
+        st.divider()
+        col_head, col_close = st.columns([5, 1])
+        col_head.markdown(f"### 📄 {preview_path}")
+        if col_close.button("✖ Close", key="ws_close_preview", use_container_width=True):
+            st.session_state.pop("ws_preview_path", None)
+            st.rerun()
+        _render_file_preview(preview_path)
+
+        share_col, ttl_col = st.columns([1.4, 1])
+        ttl_hours = ttl_col.number_input(
+            "Link valid for (hours)",
+            min_value=1,
+            max_value=168,
+            value=24,
+            step=1,
+            key=f"ws_share_ttl_{preview_path}",
+        )
+        if share_col.button("🔗 Create share link", key=f"ws_share_{preview_path}"):
+            try:
+                url, expires = _share_link(preview_path, int(ttl_hours))
+                st.session_state["ws_share_result"] = (url, expires, preview_path)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not create the link: {exc}")
+        share_result = st.session_state.get("ws_share_result")
+        if share_result and share_result[2] == preview_path:
+            st.code(share_result[0], language=None)
+            st.caption(f"Expires: {share_result[1]} · anyone with the link can download until then.")
+
+    st.divider()
+    with st.expander("🧹 Upload sessions & limits", expanded=False):
+        st.caption(
+            "The app uploads files in resumable chunks (`core/uploads.py`). Interrupted sessions "
+            "live in `workspace/.uploads` and expire automatically."
+        )
+        st.markdown(
+            "- Max file size: `ALFREDO_MAX_UPLOAD_MB` (default 512)\n"
+            "- Session TTL: `ALFREDO_UPLOAD_TTL_MINUTES` (default 1440)\n"
+        )
+        if st.button("🧹 Clean expired upload sessions", key="ws_clean_uploads"):
+            try:
+                from core import uploads
+
+                removed = uploads.cleanup_stale()
+                st.success(f"Removed {removed} expired upload session(s).")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Cleanup failed: {exc}")
+
+
+def _render_gpu_panel() -> None:
+    """VRAM, admission queue and latency metrics from the GPU gate."""
+    try:
+        from core.gpu_gate import GPU_GATE
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"GPU gate unavailable: {exc}")
+        return
+
+    if st.button("🔄 Refresh", key="gpu_refresh"):
+        st.rerun()
+
+    try:
+        status = GPU_GATE.status()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read the GPU status: {exc}")
+        return
+
+    gpu = status.get("gpu") or {}
+    if not gpu.get("available"):
+        st.warning(
+            "No NVIDIA GPU detected (or `nvidia-smi` is not reachable). The gate stays "
+            "pass-through: local model calls are not blocked."
+        )
+        if gpu.get("error"):
+            st.caption(f"`{gpu['error']}`")
+    else:
+        st.markdown(f"**{gpu.get('name') or 'GPU'}** · index {gpu.get('index')}")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total VRAM", f"{gpu.get('total_mb') or 0} MB")
+        m2.metric("Used", f"{gpu.get('used_mb') or 0} MB")
+        m3.metric("Free", f"{gpu.get('free_mb') or 0} MB")
+        m4.metric("Desktop reserve", f"{gpu.get('reserve_mb') or 0} MB")
+
+    st.markdown("#### Profiles")
+    profiles = status.get("profiles") or {}
+    if profiles:
+        st.dataframe(
+            [
+                {
+                    "profile": name,
+                    "model": info.get("model"),
+                    "ctx": info.get("context_tokens"),
+                    "estimated VRAM (MB)": info.get("estimated_vram_mb"),
+                    "headroom (MB)": info.get("headroom_mb"),
+                    "fits": "✅" if info.get("fits") else "—",
+                    "avg call (s)": info.get("avg_call_s"),
+                }
+                for name, info in profiles.items()
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("No profiles configured.")
+
+    st.markdown("#### Admission queue")
+    queue = status.get("queue") or {}
+    current = queue.get("current")
+    waiting = queue.get("waiting") or []
+    if current:
+        st.info(
+            f"Running: profile **{current.get('profile')}** · model `{current.get('model')}` · "
+            f"run #{current.get('run_id')} · elapsed {current.get('elapsed_s')}s"
+        )
+    else:
+        st.caption("GPU free: no active profile.")
+    if waiting:
+        st.dataframe(
+            [
+                {
+                    "position": item.get("position"),
+                    "profile": item.get("profile"),
+                    "model": item.get("model"),
+                    "run": item.get("run_id"),
+                    "waiting (s)": item.get("waiting_s"),
+                    "eta (s)": item.get("eta_s"),
+                }
+                for item in waiting
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("Queue empty.")
+
+    metrics = status.get("metrics") or {}
+    first_token = metrics.get("first_token") or {}
+    f1, f2, f3, f4 = st.columns(4)
+    f1.metric("Served", metrics.get("served", 0))
+    f2.metric("Rejected", metrics.get("rejected", 0))
+    f3.metric("Evictions", metrics.get("evictions", 0))
+    ttft = first_token.get("avg_s") if isinstance(first_token, dict) else None
+    f4.metric("TTFT", f"{ttft:.2f} s" if isinstance(ttft, (int, float)) else "—")
+    if status.get("loaded_model"):
+        st.caption(f"Loaded model: `{status['loaded_model']}`")
+    if status.get("preload_error"):
+        st.caption(f"Last preload error: `{status['preload_error']}`")
+
+
+def _render_push_panel() -> None:
+    """Web Push: registered devices, VAPID key and a test notification."""
+    try:
+        from core import push
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Push module unavailable: {exc}")
+        return
+
+    st.caption(
+        "Web Push lets the phone receive approval requests and run notifications. The VAPID "
+        "key is generated once and kept on disk: changing it invalidates every subscription."
+    )
+    available = push.is_available()
+    if available:
+        st.success("`pywebpush` is installed: sending is enabled.")
+    else:
+        st.warning("`pywebpush` is missing (`pip install pywebpush`): notifications cannot be sent.")
+
+    try:
+        subs = push.list_subscriptions()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read the subscriptions: {exc}")
+        subs = []
+
+    st.metric("Registered devices", len(subs))
+    if subs:
+        for sub in subs:
+            col_info, col_action = st.columns([4, 1])
+            endpoint = str(sub.get("endpoint") or "")
+            col_info.markdown(
+                f"`{endpoint[:60]}…` · created `{sub.get('created_at') or '—'}` · "
+                f"user `{sub.get('user_agent') or '—'}`"
+            )
+            if col_action.button("🗑️", key=f"push_del_{sub.get('id')}", help="Remove this device"):
+                try:
+                    push.remove_subscription(subscription_id=sub.get("id"))
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Remove failed: {exc}")
+    else:
+        st.info("No device registered yet. Open the mobile app and enable notifications.")
+
+    col_key, col_test = st.columns([3, 1])
+    try:
+        col_key.code(push.public_key(), language=None)
+    except Exception as exc:  # noqa: BLE001
+        col_key.caption(f"VAPID key unavailable: {exc}")
+    if col_test.button("🔔 Send test", use_container_width=True, disabled=not available):
+        try:
+            sent = push.send_test_notification()
+            st.toast(f"Sent to {sent} device(s)", icon="🔔")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Test failed: {exc}")
+
+
+def render_workspace_system():
+    """Workspace jail, GPU gate, Web Push and the global event log."""
+    st.header("Workspace & System")
+    st.caption(
+        "Files, GPU admission, push devices and the run event log: the operational side of "
+        "the stack, in one place."
+    )
+    tab_files, tab_gpu, tab_push, tab_events = st.tabs(
+        ["📁 Workspace", "🖥️ GPU & Queue", "🔔 Push", "🧾 Event log"]
+    )
+    with tab_files:
+        _render_workspace_files()
+    with tab_gpu:
+        _render_gpu_panel()
+    with tab_push:
+        _render_push_panel()
+    with tab_events:
+        from core import events
+
+        col_limit, col_refresh = st.columns([3, 1])
+        limit = col_limit.slider("Events to show", 20, 500, 150, step=10, key="ev_global_limit")
+        if col_refresh.button("🔄 Refresh", use_container_width=True, key="ev_global_refresh"):
+            st.rerun()
+        try:
+            rows = events.tail(after_seq=0, limit=int(limit))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not read the event log: {exc}")
+            rows = []
+        if not rows:
+            st.info("No events yet. Start a run to populate the timeline.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "seq": row.get("seq"),
+                        "run": row.get("run_id"),
+                        "type": row.get("type"),
+                        "created": row.get("created_at"),
+                        "payload": json.dumps(row.get("payload") or {}, ensure_ascii=False)[:120],
+                    }
+                    for row in reversed(rows)
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
 def render_workflow_assembler():
     """Renders Tab 4: UI for creating, viewing, and exporting workflows."""
     db = get_db_manager()
@@ -3704,7 +4528,12 @@ def render_workflow_assembler():
             else:
                 st.subheader("Create a New Workflow")
             
-            workflow_name = st.text_input("Workflow Name", key="wf_name_input")
+            workflow_name = st.text_input(
+                "Workflow Name",
+                key="wf_name_input",
+                placeholder="e.g. Weekly market research",
+                help="This name is the workflow's identity everywhere: the Telegram picker, Run History and the API.",
+            )
             requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
         
             try:
@@ -3746,15 +4575,23 @@ def render_workflow_assembler():
 
         
             st.markdown("---")
+            st.markdown("### Canvas")
             editor_mode = st.radio(
                 "Editor mode",
                 ["Canvas (drag & drop)", "Lanes (classic)"],
                 horizontal=True,
+                label_visibility="collapsed",
                 key="wf_editor_mode",
                 help="Canvas: palette + React Flow board, task write-through, structured loops. Lanes: level columns.",
             )
 
             if editor_mode.startswith("Canvas"):
+                st.caption(
+                    "Blocks auto-fit text and snap inside Level columns (75% width). "
+                    "Agent name is a banner on the first task — no separate agent chips. "
+                    "Delete: 🗑 below, **Backspace** on the canvas, or node menu. "
+                    "Task left/right dots are for wiring; Level dots do nothing."
+                )
                 canvas_ok = False
                 try:
                     from ui.workflow_canvas_panel import render_canvas_palette_and_board
@@ -4518,244 +5355,8 @@ def render_workflow_assembler():
         render_workflow_share_hub(db)
 
     with tab_test:
-        st.subheader("🧪 Run Workflows")
-        st.markdown("Test the integration between **Master AI**, **Crew Builder**, and **Tools**, or directly run a specific workflow.")
-    
-        exec_mode = st.radio("Execution Mode", ["Direct Workflow Execution", "Natural Language Routing (Master AI)"], horizontal=True)
-        st.markdown("---")
+        _render_run_panel(db)
 
-        if exec_mode == "Natural Language Routing (Master AI)":
-            test_prompt = st.text_input("Enter a natural language request", placeholder="e.g. Analizza i file e scrivi un report...")
-        
-            if st.button("🚀 Execute Integration Test", type="primary"):
-                if not test_prompt:
-                    st.error("Please enter a prompt.")
-                else:
-                    with st.status("Running Integration Test...", expanded=True) as status:
-                        try:
-                            # 1. Master AI Routing
-                            st.write("🧠 **Master AI** is analyzing the intent...")
-                            master = MasterAI()
-                            routing = master.evaluate_intent(test_prompt)
-                            st.json(routing)
-                        
-                            if routing.get('status') == 'success' and routing.get('workflow_id'):
-                                wf_id = routing['workflow_id']
-                                st.write(f"✅ Route found: **Workflow ID {wf_id}**")
-                            
-                                # 2. Crew Building
-                                st.write("🛠️ **Crew Builder** is assembling the agents...")
-                                crew = build_crew(wf_id)
-                            
-                                # 3. Execution
-                                st.write("⚡ **Executing Workflow...**")
-                                inputs = routing.get('extracted_params', {})
-                                run_id = db.create_run(wf_id, status='running', inputs=inputs)
-                            
-                                try:
-                                    from core.crew_builder import execute_run_with_resume
-                                    result = execute_run_with_resume(
-                                        run_id, 
-                                        status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
-                                    )
-                                
-                                    db.update_run(run_id, status='completed', result=str(result))
-                                    notifier = NotificationManager()
-                                    workflow = db.read_workflow(wf_id)
-                                    wf_name = workflow["name"] if workflow else f"Workflow {wf_id}"
-                                    notifier.notify_workflow_completion(wf_name, result)
-                                    st.success("✅ Execution Complete!")
-                                    st.markdown("### Final Output")
-                                    st.markdown(str(result))
-                                except Exception as e:
-                                    db.update_run(run_id, status='failed', result=str(e))
-                                    raise e
-                            else:
-                                st.warning(f"⚠️ Master AI could not route this request. Reason: {routing.get('message', 'No matching workflow')}")
-                        
-                            status.update(label="Test Finished", state="complete")
-                        except Exception as e:
-                            st.error(f"❌ Error during test: {e}")
-                            import traceback
-                            st.code(traceback.format_exc())
-                            status.update(label="Test Failed", state="error")
-        
-        else:
-            # Direct Workflow Execution
-            workflows = db.read_all_workflows()
-            if not workflows:
-                st.info("No workflows available.")
-            else:
-                wf_options = {w['id']: w['name'] for w in workflows}
-                selected_wf_id = st.selectbox("Select Workflow to Run", options=list(wf_options.keys()), format_func=lambda x: wf_options[x])
-                
-                if selected_wf_id:
-                    selected_wf = next((w for w in workflows if w['id'] == selected_wf_id), None)
-                    st.markdown(f"**Executing:** {selected_wf['name']}")
-                    
-                    # Parse required inputs from task descriptions
-                    tasks = db.read_all_tasks()
-                    task_map = {t['id']: t for t in tasks}
-                    
-                    # Extract all task IDs using the previously defined _extract_tids logic
-                    def _extract_tids_local(steps):
-                        tids = []
-                        for step in steps:
-                            if isinstance(step, int):
-                                tids.append(step)
-                            elif isinstance(step, dict):
-                                if step.get("type") == "batch_loop":
-                                    tids.extend(_extract_tids_local(step.get("task_ids", [])))
-                                elif "task_id" in step:
-                                    tids.append(step["task_id"])
-                        return tids
-                    
-                    try:
-                        t_ids_field = selected_wf.get('task_ids_json') or selected_wf.get('task_ids', '[]')
-                        raw_tids = t_ids_field if isinstance(t_ids_field, list) else json.loads(t_ids_field)
-                        flat_tids = _extract_tids_local(raw_tids)
-                    except Exception as e:
-                        flat_tids = []
-                        st.error(f"Error parsing workflow tasks: {e}")
-                        
-                    import re
-                    required_vars = set()
-                    var_prompts = {}
-                    for tid in flat_tids:
-                        t = task_map.get(tid)
-                        if t and t.get('description'):
-                            # Find all {var} patterns
-                            matches = re.findall(r'\{([a-zA-Z0-9_]+)\}', t['description'])
-                            for m in matches:
-                                if m not in ['previous_result']: # Ignore built-in crewai vars
-                                    required_vars.add(m)
-                        if t and t.get('required_inputs'):
-                            for ri in t['required_inputs']:
-                                if isinstance(ri, dict) and 'key' in ri and 'prompt' in ri:
-                                    var_prompts[ri['key']] = ri['prompt']
-                                    
-                    st.markdown("### Required Inputs")
-                    user_inputs = {}
-                    if not required_vars:
-                        st.info("This workflow does not require any dynamic inputs.")
-                    else:
-                        for var in sorted(list(required_vars)):
-                            placeholder = var_prompts.get(var, f"e.g. Enter value for {var}")
-                            # Give a sensible default placeholder
-                            if var == 'context':
-                                val = st.text_input(f"Value for `{var}` (Optional)", key=f"input_{var}_{selected_wf_id}", value="N/A", placeholder=placeholder)
-                            elif var == 'document_type':
-                                val = st.selectbox(f"Value for `{var}` (Optional)", ["Pure Components", "BIPs", "eNRTL", "Unknown/Mixed"], key=f"input_{var}_{selected_wf_id}")
-                            else:
-                                val = st.text_input(f"Value for `{var}`", key=f"input_{var}_{selected_wf_id}", placeholder=placeholder)
-                            user_inputs[var] = val
-                            
-                    st.markdown("### Paused Runs")
-                    from core.crew_builder import PauseExecution
-                    
-                    runs = db.read_all_runs()
-                    paused_runs = [r for r in runs if r.get('status') == 'paused' and r.get('workflow_id') == selected_wf_id]
-                    
-                    if paused_runs:
-                        for pr in paused_runs:
-                            st.warning(f"⚠️ Run #{pr['id']} was paused due to rate limits or errors. Progress has been saved.")
-                            if st.button(f"▶️ Resume Run #{pr['id']}", key=f"resume_{pr['id']}", type="primary"):
-                                with st.status(f"Resuming Run #{pr['id']}...", expanded=True) as status:
-                                    try:
-                                        from core.crew_builder import execute_run_with_resume
-                                        result = execute_run_with_resume(
-                                            pr['id'], 
-                                            status_callback=lambda tidx, tot, role, status="completed": st.write(f"Task {tidx}/{tot} ({role}): {status}")
-                                        )
-                                        db.update_run(pr['id'], status='completed', result=str(result))
-                                        st.success("✅ Execution Complete!")
-                                        st.markdown(str(result))
-                                    except PauseExecution as e:
-                                        st.warning(f"⚠️ Workflow Paused: {e}")
-                                        st.info("You can resume this run later from the 'Paused Runs' section above.")
-                                        status.update(label="Execution Paused", state="complete")
-                                    except Exception as e:
-                                        db.update_run(pr['id'], status='failed', result=str(e))
-                                        st.error(f"❌ Error during execution: {e}")
-                                        import traceback
-                                        st.code(traceback.format_exc())
-                                        status.update(label="Execution Failed", state="error")
-                                    else:
-                                        status.update(label="Execution Finished", state="complete")
-                    
-                    st.markdown("### Start New Run")
-                    if st.button("🚀 Execute Workflow", type="primary"):
-                        # Validate inputs
-                        missing = [k for k in required_vars if not user_inputs.get(k) and k not in ['context', 'document_type']]
-                        if missing:
-                            st.error(f"Please provide values for: {', '.join(missing)}")
-                        else:
-                            with st.status("Queuing Workflow...", expanded=True) as status:
-                                try:
-                                    # Create Run Record
-                                    run_id = db.create_run(selected_wf_id, status='running', inputs=user_inputs)
-                                    
-                                    import threading
-                                    def _run_workflow_bg(r_id, wf_name):
-                                        try:
-                                            from core.crew_builder import execute_run_with_resume
-                                            result = execute_run_with_resume(r_id)
-                                            db = DBManager()
-                                            current_run = db.read_run(r_id)
-                                            if current_run and current_run.get('status') in ['stopped', 'failed', 'cancelled', 'paused']:
-                                                db.update_run(r_id, result=str(result))
-                                            else:
-                                                db.update_run(r_id, status='completed', result=str(result))
-                                                from core.notification_manager import NotificationManager
-                                                notifier = NotificationManager()
-                                                notifier.notify_workflow_completion(wf_name, result)
-                                        except Exception as e:
-                                            try:
-                                                db = DBManager()
-                                                current_run = db.read_run(r_id)
-                                                if current_run and current_run.get('status') in ['stopped', 'failed', 'cancelled', 'paused']:
-                                                    pass
-                                                else:
-                                                    db.update_run(r_id, status='failed', result=str(e))
-                                            except Exception:
-                                                pass
-
-                                    thread = threading.Thread(target=_run_workflow_bg, args=(run_id, selected_wf['name']), daemon=True)
-                                    thread.start()
-                                    
-                                    st.success(f"✅ Workflow queued successfully (Run ID: {run_id})!")
-                                    st.info("🔄 It is now running in the background. You can safely change tabs to 'History & Monitoring' to view its real-time progress without interrupting it.")
-                                except PauseExecution as e:
-                                    st.warning(f"⚠️ Workflow Paused: {e}")
-                                    st.info("You can resume this run later from the 'Paused Runs' section above.")
-                                except Exception as e:
-                                    db.update_run(run_id, status='failed', result=str(e))
-                                    st.error(f"Failed to queue workflow: {e}")
-                    
-                    # Check for active running instances of this workflow
-                    active_runs = [r for r in db.read_all_runs(limit=10) if r['workflow_id'] == selected_wf_id and r['status'] == 'running']
-                    if active_runs:
-                        ar = active_runs[0]
-                        st.markdown("---")
-                        
-                        # Extract in-flight tasks for better visibility
-                        in_flight = ar.get('in_flight_tasks', '[]')
-                        try:
-                            if isinstance(in_flight, str):
-                                in_flight_list = json.loads(in_flight)
-                            else:
-                                in_flight_list = in_flight
-                            in_flight_str = ", ".join(str(t) for t in in_flight_list if t)
-                            if not in_flight_str: in_flight_str = "Initializing..."
-                        except Exception:
-                            in_flight_str = "Unknown"
-                            
-                        st.info(f"🔄 **This workflow is currently running in the background** (Run ID: {ar['id']}).\n\n**Currently Executing:** {in_flight_str}")
-                        
-                        if st.button("🛑 Stop Active Run", type="secondary", key=f"stop_{ar['id']}"):
-                            db.update_run(active_runs[0]['id'], status='stopped')
-                            st.success("Run stopped successfully. It may take a few seconds to halt.")
-                            st.rerun()
 
 def render_tool_factory():
     """Renders the Tool Factory tab."""
@@ -4921,6 +5522,15 @@ def render_history_monitoring():
     ])
 
     with tab_runs:
+        try:
+            from core.run_service import pending_interrupts
+
+            pending = pending_interrupts()
+        except Exception as exc:  # noqa: BLE001 - the page must never crash
+            pending = []
+            st.warning(f"Could not read pending approvals: {exc}")
+        render_interrupt_queue(pending, prefix="hist")
+
         col1, col2, col3, col4 = st.columns([1.2, 1.2, 1.2, 2.4])
         with col1:
             if st.button("🗑️ Clear All", type="primary", use_container_width=True):
@@ -5003,21 +5613,25 @@ def render_history_monitoring():
                         if run.get('result'):
                             st.code(run['result'], language=None)
                     with col_actions:
-                        if status in ['failed', 'running']:
+                        if status in ['failed', 'running', 'paused', 'queued']:
                             if st.button("🔄", key=f"res_run_{run['id']}", help="Resume"):
-                                with st.spinner("Resuming..."):
-                                    try:
-                                        from core.crew_builder import execute_run_with_resume
-                                        last_output, _ = execute_run_with_resume(run['id'])
-                                        db.update_run(run['id'], status='completed', result=last_output)
-                                        st.rerun()
-                                    except Exception as e:
-                                        db.update_run(run['id'], status='failed', result=str(e))
-                                        st.rerun()
-                        if status == 'running':
-                            if st.button("🛑", key=f"stop_run_{run['id']}", help="Stop"):
-                                db.update_run(run['id'], status='stopped')
+                                from core.run_service import start_execution
+
+                                try:
+                                    start_execution(run['id'])
+                                    st.toast("Run resumed", icon="🔄")
+                                except Exception as e:  # noqa: BLE001
+                                    st.error(f"Resume failed: {e}")
                                 st.rerun()
+                        if status in ['running', 'paused', 'queued']:
+                            if st.button("🛑", key=f"stop_run_{run['id']}", help="Stop"):
+                                from core.run_service import cancel_run
+
+                                cancel_run(run['id'])
+                                st.rerun()
+                        if st.button("🧾", key=f"ev_run_{run['id']}", help="Event timeline"):
+                            st.session_state["ev_selected_run"] = int(run['id'])
+                            st.rerun()
                         if st.button("🗑️", key=f"del_run_{run['id']}", help="Delete"):
                             db.delete_run(run['id'])
                             st.rerun()
@@ -5030,6 +5644,14 @@ def render_history_monitoring():
                 st.caption(f"📁 Archive ({len(older_runs)})")
                 for run in older_runs:
                     _render_run_card(run)
+
+        ev_run = st.session_state.get("ev_selected_run")
+        if ev_run:
+            st.divider()
+            if st.button("✖ Close timeline", key="ev_close", use_container_width=False):
+                st.session_state.pop("ev_selected_run", None)
+                st.rerun()
+            _render_event_timeline(int(ev_run), wf_map=wf_map)
 
     with tab_auto:
         if not auto_engine:
@@ -5192,9 +5814,9 @@ def render_local_training():
             type=["csv", "txt", "json", "jsonl", "pdf"],
             accept_multiple_files=True,
         )
-        if st.button("Genera Dataset ChatML", type="primary"):
+        if st.button("Generate ChatML Dataset", type="primary"):
             if uploaded_files:
-                st.info("Salvataggio file e conversione in ChatML...")
+                st.info("Saving file and converting to ChatML...")
                 saved_paths = []
                 for f in uploaded_files:
                     save_dir = ft.RAW_DATASET_DIR
@@ -5210,11 +5832,11 @@ def render_local_training():
                         f"{result['total_entries']} esempi da {len(result['processed_files'])} file."
                     )
                 else:
-                    st.error("Nessun esempio generato. Controlla i file e i messaggi sotto.")
+                    st.error("No examples generated. Check files and messages below.")
                 for err in result.get("errors") or []:
                     st.warning(err)
             else:
-                st.warning("Carica almeno un file prima.")
+                st.warning("Upload at least one file first.")
 
         st.markdown("---")
         ok, ds_msg, ds_count = ft.ensure_dataset_ready()
@@ -5224,7 +5846,7 @@ def render_local_training():
             if preview:
                 st.dataframe(preview, use_container_width=True)
             else:
-                st.info("Dataset presente ma anteprima vuota.")
+                st.info("Dataset present but preview is empty.")
         else:
             st.info(ds_msg)
 
@@ -5246,7 +5868,7 @@ def render_local_training():
             )
             if "llama" in base_model.lower():
                 st.caption(
-                    "Llama gated: imposta `HUGGINGFACE_TOKEN` nel `.env` e accetta la licenza su HuggingFace."
+                    "Llama gated: set `HUGGINGFACE_TOKEN` in `.env` and accept the license on HuggingFace."
                 )
 
         with col2:
@@ -5271,11 +5893,11 @@ def render_local_training():
             st.warning(ds_info)
 
         st.markdown("---")
-        if st.button("Avvia Addestramento 🚀", type="primary", use_container_width=True):
+        if st.button("Start Training 🚀", type="primary", use_container_width=True):
             result = ft.start_training_process({"model": base_model, "preset": preset})
             if result.get("ok"):
                 st.success(result["message"])
-                st.info("Apri il tab Monitoring per seguire progressi e log.")
+                st.info("Open the Monitoring tab to track progress and logs.")
             else:
                 st.error(result.get("message", "Avvio training fallito."))
 
@@ -5291,25 +5913,25 @@ def render_local_training():
         pct = min(100, int((step / total) * 100))
         label = f"Step {step}/{total} — Loss: {loss:.4f}"
         if done:
-            label += " ✅ Completato"
+            label += " ✅ Completed"
         elif running:
-            label += " ⏳ In corso"
+            label += " ⏳ In progress"
         st.progress(pct, text=label)
 
         col_a, col_b = st.columns(2)
         with col_a:
             auto_refresh = st.checkbox("Auto-refresh (3s)", value=running and not done)
         with col_b:
-            if st.button("Aggiorna ora"):
+            if st.button("Refresh now"):
                 st.rerun()
 
         loss_history = ft.read_loss_history()
         if loss_history:
             st.line_chart(pd.DataFrame({"Loss": loss_history}))
         elif running:
-            st.info("In attesa dei primi valori di loss...")
+            st.info("Waiting for first loss values...")
         else:
-            st.caption("Nessuna curva loss ancora. Avvia un training per vedere i dati reali.")
+            st.caption("No loss curve yet. Start training to see real data.")
 
         with st.expander("Training Logs", expanded=True):
             st.code(ft.read_training_logs(), language="text")
@@ -5320,13 +5942,13 @@ def render_local_training():
 
     with tab_chat:
         st.subheader("Inference Test")
-        st.markdown("Testa l'adapter LoRA salvato in `storage/adapters/temp` dopo il training.")
+        st.markdown("Test the LoRA adapter saved in `storage/adapters/temp` after training.")
         if not os.path.isdir(ft.ADAPTER_DIR):
-            st.warning("Nessun adapter trovato. Completa prima un training.")
-        prompt = st.chat_input("Di' qualcosa al modello fine-tuned...")
+            st.warning("No adapter found. Complete training first.")
+        prompt = st.chat_input("Say something to the fine-tuned model...")
         if prompt:
             st.chat_message("user").write(prompt)
-            with st.spinner("Generazione in corso..."):
+            with st.spinner("Generating..."):
                 resp = ft.run_inference(prompt, ft.ADAPTER_DIR)
             st.chat_message("assistant").write(resp)
 
@@ -5700,9 +6322,9 @@ def main():
     def show_guide():
         st.markdown("""
 ### 🤖 What is Alfredo?
-**Alfredo** is an AI OS / agent orchestrator. You build a team of agents, wire them into workflows, then run those workflows with natural language from this dashboard or from **Telegram**.
+**Alfredo** is an AI OS / agent orchestrator. You build a team of agents, wire them into workflows, then run those workflows with natural language from this dashboard, from **Telegram**, or from the **mobile app**.
 
-Under the hood: **Master AI** plans and routes; **CrewAI** runs the crew; your data and keys stay in your machine (`.env` + database).
+Under the hood: **Master AI** plans and routes; **CrewAI** runs the crew; `core/run_service.py` is the single entry point for every run; every run writes an append-only **event log** (`run_events`); human checkpoints are stored in the database, so they survive a restart. Your data and keys stay on your machine (`.env` + database).
 
 **Golden rule (do this order):**
 1. Put API keys → 2. Register models → 3. Create agents → 4. Create tasks → 5. Assemble a workflow → 6. Chat / Telegram.
@@ -5716,15 +6338,43 @@ Use the left navigation. Click each page once so you know where things live.
 |------|----------------|
 | **🔐 API Vault** | Save provider API keys, register LLM models, pick Master AI + default agent model, Ollama URL, VRAM limit. **Start here.** |
 | **🧱 Asset Builder** | Three tabs: **Knowledge Base** (RAG / documents), **Agent Caserma** (agents), **Tool Factory** (tools for agents). |
-| **📋 Task Builder** | Create tasks assigned to an agent (description, inputs, tools, HITL, specialization). |
-| **🧩 Workflow Assembler** | Build the workflow graph: Canvas (drag & drop) or Lanes. Blocks: Level, Task, Batch, HITL, Export, Input, Loop. |
-| **📊 History & Monitoring** | Past runs, logs, status of executions. |
+| **📋 Task Builder** | Create tasks assigned to an agent (description, inputs, tools, HITL, specialization, tool profile, output schema). |
+| **🧩 Workflow Assembler** | Build the workflow graph: Canvas (drag & drop) or Lanes. Blocks: Level, Task, Batch, HITL, Export, Input, Loop, LLM, Tool, Router. Also the **Run Workflows** tab. |
+| **📊 History & Monitoring** | Run History (with event timeline and approvals), automation triggers, MCP servers + long-term memory, Git rollback. |
+| **🖥️ Workspace & System** | Workspace file browser (preview, download, share links), GPU/queue telemetry, Web Push subscriptions, event log browser. |
 | **🪖 Local Model Training** | Optional fine-tuning / local training helpers (advanced). |
 | **🔗 My Apps** | Connect external apps (env keys for DB/API) and link workflows to them. |
 
-**Sidebar (top):**
-- **🤖** (robot button) → this guide.
-- **Main area (top left):** **🟢 Start / 🔴 Stop Bot Telegram** and **🤖 Telegram Bot Config**.
+**Top bar (main area):**
+- **🟢 Start / 🔴 Stop Bot Telegram** — runs `bot.py` as a background process.
+- **🤖 Telegram Bot Config** — token + allowed user IDs (written to `.env`).
+- **🤖 robot button (far right)** — the **Assistant**: free chat, workflow launcher, pending approvals and recent runs, in a dialog. It is not a page any more.
+
+**Sidebar (top):** the **🤖** button opens this guide.
+
+---
+
+### 🧭 Where each feature lives (control ↔ capability)
+
+Use this table when you cannot find a switch. Every backend service added for the app has one owner in the UI.
+
+| Backend | What it does | Where you control it |
+|---|---|---|
+| `run_service` | Single entry point: create, execute, cancel, resume | **Run Workflows** tab, **History → Run History**, **Assistant** |
+| `events` | Per-run append-only timeline (`run_events`) | **History → Run History → 🧾** and **Workspace & System → Event log** |
+| `interrupts` | Persistent human approvals (survive restart) | **🙋 Pending approvals** at the top of *Run History* and of the *Run Workflows* tab; also in the **Assistant** |
+| `automation_scheduler` | Triggers + persistent state + catch-up | **History → Triggers & Watchdog** |
+| `files` | Workspace jail: list, preview, download, share token | **Workspace & System → Workspace** |
+| `files.describe_run_exports` | Files a run exported, per run | **History → Run History → 🧾 → 📦 Artifacts** (signed link per file) |
+| `uploads` | Resumable chunked uploads (app side) | **Workspace → Upload sessions & limits** (limits + cleanup) |
+| `gpu_gate` | Single-flight GPU slot, profiles, queue, TTFT | **Workspace & System → GPU & Queue** |
+| `push` | Web Push (VAPID) subscriptions + test | **Workspace & System → Push** |
+| `task_library` | Shared task templates ↔ per-workflow instances | **Task Builder** banner, **Workflow Assembler → Istanze e template** |
+| `workflow_package` | Export/import `.alfredo.json`, compatibility check | **Share / Hub** tab and **Saved Workflows → package export** |
+| `git_workspace` | Checkpoints and rollback of the workspace | **History → Git Rollback** |
+| `mcp_client` / `long_term_memory` | External MCP servers, Mem0 facts | **History → MCP & Memory** |
+| `assistant_engine` | Free chat + workflow decision | **🤖 Assistant** dialog |
+| `api_server` / `push` / mobile | REST + streaming for the PWA | **My Apps** (API keys/snippets), **Workspace & System → Push** |
 
 ---
 
@@ -5852,6 +6502,29 @@ Use these in **Description** or **Expected Output**:
 
 ---
 
+### 🖥️ GPU & routing (queue, profiles, TTFT)
+Local models are serialized through **one GPU slot** (`core/gpu_gate.py`): no more two runs fighting for VRAM.
+- **Workspace & System → GPU & Queue** shows total/used/free VRAM, the **fast** and **deep** profiles with their headroom, the admission queue (who is running, who is waiting) and the average **Time To First Token**.
+- Each profile is sized by env (`ALFREDO_GPU_FAST_*`, `ALFREDO_GPU_DEEP_*`). If a profile does not fit, the gate rejects it instead of crashing the machine.
+- A model preload/eviction is written to the event log as `system.model.switch`, so you can see it in the timeline of the run.
+- If `nvidia-smi` is not reachable the gate stays pass-through (nothing is blocked), and the tab tells you so.
+
+### 📦 Files, artifacts & share links
+- Everything the agents write lands in **`workspace/`** (a jail: paths cannot escape it). **Workspace & System → Workspace** browses it with breadcrumbs, preview for images / tables / PDF / DOCX, download and a **signed share link** (1–168 hours).
+- A share link is an HMAC token with a TTL, signed with `ALFREDO_SHARE_SECRET` (or a secret generated once next to the config). Nothing outside the jail can be linked.
+- **Run History → 🧾 → 📦 Artifacts** lists the files a run exported, with the same kind of signed link.
+- Uploads from the app are resumable and chunked (`core/uploads.py`): a dropped connection resumes instead of restarting. Interrupted sessions live in `workspace/.uploads` and are cleaned by **Upload sessions & limits → Clean expired upload sessions** (also automatic at startup).
+
+### 🙋 Pending approvals & Event timeline
+- When a task has **Pause for Human Validation**, or a HITL block runs, Alfredo opens a persistent interrupt. It lives in the database: a restart does not lose it.
+- The approval appears at the top of **Run Workflows**, at the top of **Run History**, in the **Assistant** and on the phone (Web Push). You can answer with a preset option or free text; feedback is passed back to the node.
+- **Event timeline** (`🧾` on a run) is the append-only log of that run: `run.started`, node by node, interrupts, model switches, finish/failure. It is what the app streams live.
+
+### ⏰ Automations
+**History → Triggers & Watchdog** creates schedules (cron-like) and event triggers, shows the next 48 hours and catches up on triggers missed while the dashboard was off. Trigger state is persistent, so a restart does not duplicate or lose a firing.
+
+---
+
 ### 🛠️ Model & tool compatibility
 - ✅ **Cloud** (OpenAI, Gemini, Anthropic, Groq, …): tools / function-calling OK.
 - 🧠 **Local Ollama / LM Studio**: support is **per model** (`supports_tools`), with Auto guess available when you add models.
@@ -5922,18 +6595,38 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             margin-top: 0 !important;
             padding-top: 0 !important;
         }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button,
         [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button {
-            background: transparent !important;
+            background-color: transparent !important;
+            background-image: url('""" + get_alfredo_robot_b64() + """') !important;
+            background-repeat: no-repeat !important;
+            background-position: center !important;
+            background-size: contain !important;
             border: none !important;
             box-shadow: none !important;
-            padding: 0.1rem 0.2rem !important;
-            min-height: auto !important;
-            font-size: 1.55rem !important;
-            line-height: 1 !important;
+            width: 2.2rem !important;
+            height: 2.2rem !important;
+            min-height: 2.2rem !important;
+            min-width: 2.2rem !important;
+            padding: 0 !important;
+            color: transparent !important;
+            cursor: pointer !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            transition: transform 0.15s ease, opacity 0.15s ease !important;
         }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button:hover,
         [data-testid="stSidebar"] [data-testid="stColumn"]:has(+ [data-testid="stColumn"] .sidebar-brand-marker) .stButton > button:hover {
-            background: rgba(128, 128, 128, 0.12) !important;
-            border-radius: 8px !important;
+            opacity: 0.85 !important;
+            transform: scale(1.08) !important;
+            background-color: transparent !important;
+            box-shadow: none !important;
+            border: none !important;
+        }
+        [data-testid="stSidebar"] .st-key-sidebar_guide_btn button * {
+            display: none !important;
+            visibility: hidden !important;
         }
         [data-testid="stSidebar"] .sidebar-brand-block {
             margin-top: 0 !important;
@@ -5986,11 +6679,51 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         margin-top: 2rem !important;
         padding-top: 0 !important;
         gap: 0.85rem !important;
-        width: 50% !important;
-        max-width: 50% !important;
+        width: 100% !important;
+        max-width: 100% !important;
         margin-bottom: 1rem !important;
         align-items: center !important;
         justify-content: flex-start !important;
+    }
+    /* Assistant: robot icon button without circle, filling container, same height as start bot */
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn {
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        width: 100% !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button {
+        width: 100% !important;
+        min-width: 100% !important;
+        height: 2.9rem !important;
+        min-height: 2.9rem !important;
+        padding: 0 !important;
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        font-size: 2.6rem !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        transition: transform 0.15s ease, opacity 0.15s ease !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button p,
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button div {
+        font-size: 2.6rem !important;
+        line-height: 1 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) .st-key-assistant_open_btn.st-key-assistant_open_btn button:hover {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        transform: scale(1.1) !important;
+        opacity: 0.85 !important;
     }
     [data-testid="stMain"] .st-key-telegram_toolbar > [data-testid="stLayoutWrapper"],
     [data-testid="stMain"] [data-testid="stHorizontalBlock"]:has(.st-key-top_bot_toggle) > [data-testid="stLayoutWrapper"] {
@@ -6034,16 +6767,46 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         box-sizing: border-box !important;
         margin: 0 !important;
     }
+    /* Modal / Dialog styling: fixed height, white title, dark close button */
+    [data-testid="stDialog"] > div:first-child {
+        max-height: 85vh !important;
+        height: 85vh !important;
+    }
+    [data-testid="stDialog"] h2,
+    [data-testid="stDialog"] [data-testid="stHeadingWithActionElements"] h2 {
+        color: #ffffff !important;
+    }
+    [data-testid="stDialog"] button[aria-label="Close"] {
+        background-color: #1e293b !important;
+        color: #ffffff !important;
+        border-radius: 8px !important;
+        border: 1px solid #334155 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
+
+    @st.dialog("🤖 Alfredo Assistant", width="large")
+    def show_assistant():
+        try:
+            import importlib
+            import ui.views.assistant as assistant_mod
+            importlib.reload(assistant_mod)
+            assistant_mod.render_assistant(compact=True)
+        except Exception as exc:  # noqa: BLE001 - never break the toolbar
+            st.error(f"Assistant unavailable: {exc}")
 
     bot_running = is_bot_running()
     btn_label = "🔴 Stop Bot Telegram" if bot_running else "🟢 Start Bot Telegram"
 
-    with st.container(horizontal=True, key="telegram_toolbar"):
+    toolbar_bot, toolbar_config, toolbar_spacer, toolbar_assistant = st.columns(
+        [1.15, 1.15, 4.8, 1.0], vertical_alignment="center", gap="small"
+    )
+
+    with toolbar_bot:
         if st.button(btn_label, use_container_width=True, key="top_bot_toggle"):
             toggle_bot()
             st.rerun()
+    with toolbar_config:
         with st.popover("🤖 Telegram Bot Config", use_container_width=True, key="top_tg_config"):
             st.markdown("### Telegram Vault")
             st.markdown("Configure your bot credentials for remote control.")
@@ -6075,6 +6838,9 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
                         safe_set_key(env_path, "TELEGRAM_ALLOWED_USER_IDS", new_tg_ids.strip())
                     st.success("Telegram configuration saved to .env!")
                     st.rerun()
+    with toolbar_assistant:
+        if st.button("🤖", key="assistant_open_btn", help="Alfredo Assistant — chat and workflows", use_container_width=True):
+            show_assistant()
 
 
     # Guide moved to st.dialog
@@ -6091,7 +6857,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
         try:
             render_api_vault()
         except Exception as e:
-            st.error(f"Errore nel caricamento di API Vault & Model Registry: {e}")
+            st.error(f"Error loading API Vault & Model Registry: {e}")
             st.exception(e)
 
     def page_asset_builder():
@@ -6101,42 +6867,42 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             try:
                 render_knowledge_base()
             except Exception as e:
-                st.error(f"Errore nel caricamento del Database: {e}")
+                st.error(f"Error loading Database: {e}")
                 st.exception(e)
                 
         with tab_agents:
             try:
                 render_agent_caserma()
             except Exception as e:
-                st.error(f"Errore nel caricamento di Agent Caserma: {e}")
+                st.error(f"Error loading Agent Caserma: {e}")
                 st.exception(e)
 
         with tab_tools:
             try:
                 render_tool_factory()
             except Exception as e:
-                st.error(f"Errore nel caricamento di Tool Factory: {e}")
+                st.error(f"Error loading Tool Factory: {e}")
                 st.exception(e)
 
     def page_task_builder():
         try:
             render_task_builder()
         except Exception as e:
-            st.error(f"Errore nel caricamento di Task Builder: {e}")
+            st.error(f"Error loading Task Builder: {e}")
             st.exception(e)
 
     def page_workflow_assembler():
         try:
             render_workflow_assembler()
         except Exception as e:
-            st.error(f"Errore nel caricamento di Workflow Assembler: {e}")
+            st.error(f"Error loading Workflow Assembler: {e}")
             st.exception(e)
 
     def page_history_monitoring():
         try:
             render_history_monitoring()
         except Exception as e:
-            st.error(f"Errore nel caricamento di History & Monitoring: {e}")
+            st.error(f"Error loading History & Monitoring: {e}")
             st.exception(e)
 
     def page_my_apps():
@@ -6153,12 +6919,20 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             st.error(f"Error loading Local Training: {e}")
             st.exception(e)
 
+    def page_workspace_system():
+        try:
+            render_workspace_system()
+        except Exception as e:
+            st.error(f"Error loading Workspace & System: {e}")
+            st.exception(e)
+
     pages = [
         st.Page(page_api_vault, title="API Vault", icon="🔐"),
         st.Page(page_asset_builder, title="Asset Builder", icon="🧱"),
         st.Page(page_task_builder, title="Task Builder", icon="📋"),
         st.Page(page_workflow_assembler, title="Workflow Assembler", icon="🧩"),
         st.Page(page_history_monitoring, title="History & Monitoring", icon="📊"),
+        st.Page(page_workspace_system, title="Workspace & System", icon="🖥️"),
         st.Page(page_local_training, title="Local Model Training", icon="🪖"),
         st.Page(page_my_apps, title="My Apps", icon="🔗")
     ]

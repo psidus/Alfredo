@@ -70,7 +70,7 @@ class NotificationManager:
             label = label[: max(0, budget - 1)] + "…"
         return prefix + label
 
-    def send_telegram_notification(self, message, chat_id=None, options=None):
+    def send_telegram_notification(self, message, chat_id=None, options=None, callback_prefix="hitl"):
         """Sends a notification message via Telegram Bot API using built-in urllib."""
         if not self.bot_token:
             logger.error("TELEGRAM_BOT_TOKEN not found in environment.")
@@ -102,7 +102,7 @@ class NotificationManager:
                 inline_keyboard = []
                 for idx, opt in enumerate(options):
                     # Index-only callback_data stays well under Telegram's 64-byte limit.
-                    callback_data = f"hitl_{idx}"
+                    callback_data = f"{callback_prefix}_{idx}"
                     inline_keyboard.append([{
                         "text": self._short_button_label(idx, opt),
                         "callback_data": callback_data,

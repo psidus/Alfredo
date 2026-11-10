@@ -30,6 +30,13 @@ NODE_TYPE_HITL = "hitl"
 NODE_TYPE_EXPORT = "export"
 NODE_TYPE_LOOP = "loop"
 NODE_TYPE_LEVEL = "level"
+# Typed execution blocks (see core.node_executor)
+NODE_TYPE_LLM = "llm"
+NODE_TYPE_TOOL = "tool"
+NODE_TYPE_ROUTER = "router"
+
+# ``agent`` is accepted as a synonym of ``task`` (CrewAI agent + task).
+NODE_TYPE_AGENT = "agent"
 
 NODE_TYPES = (
     NODE_TYPE_INPUT,
@@ -39,11 +46,28 @@ NODE_TYPES = (
     NODE_TYPE_EXPORT,
     NODE_TYPE_LOOP,
     NODE_TYPE_LEVEL,
+    NODE_TYPE_LLM,
+    NODE_TYPE_TOOL,
+    NODE_TYPE_ROUTER,
 )
 
-EXECUTABLE_TYPES = {NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_LOOP}
+TYPED_EXECUTABLE_TYPES = (NODE_TYPE_LLM, NODE_TYPE_TOOL, NODE_TYPE_ROUTER)
+
+EXECUTABLE_TYPES = {
+    NODE_TYPE_TASK,
+    NODE_TYPE_BATCH,
+    NODE_TYPE_LOOP,
+    NODE_TYPE_LLM,
+    NODE_TYPE_TOOL,
+    NODE_TYPE_ROUTER,
+}
+# Typed blocks executed by core.node_executor (no CrewAI agent involved).
+TYPED_NODE_TYPES = {NODE_TYPE_LLM, NODE_TYPE_TOOL, NODE_TYPE_ROUTER}
 CONTROL_TYPES = {NODE_TYPE_HITL, NODE_TYPE_EXPORT, NODE_TYPE_INPUT, NODE_TYPE_LEVEL}
-CONTENT_TYPES = {NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_HITL, NODE_TYPE_EXPORT, NODE_TYPE_INPUT}
+CONTENT_TYPES = {
+    NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_HITL, NODE_TYPE_EXPORT, NODE_TYPE_INPUT,
+    NODE_TYPE_LLM, NODE_TYPE_TOOL, NODE_TYPE_ROUTER,
+}
 
 LOOP_MODE_FOR_EACH = "for_each"
 LOOP_MODE_WHILE = "while"
@@ -67,8 +91,16 @@ def infer_node_type(step: Any) -> str:
     if not isinstance(step, dict):
         return NODE_TYPE_TASK
     explicit = (step.get("type") or "").strip().lower()
+    if explicit == NODE_TYPE_AGENT:
+        return NODE_TYPE_TASK
     if explicit in NODE_TYPES:
         return explicit
+    if "tool_name" in step and "task_id" not in step:
+        return NODE_TYPE_TOOL
+    if "routes" in step and "task_id" not in step:
+        return NODE_TYPE_ROUTER
+    if ("prompt" in step or "system_prompt" in step) and "task_id" not in step:
+        return NODE_TYPE_LLM
     if "task_ids" in step and "task_id" not in step:
         return NODE_TYPE_BATCH
     if step.get("task_id") is not None:
@@ -168,6 +200,31 @@ def normalize_node(step: Any, index: int = 0, prev_id: Optional[str] = None) -> 
             node["body_node_ids"] = list(node["body_node_ids"] or [])
         if not isinstance(node["body_levels"], list):
             node["body_levels"] = list(node["body_levels"] or [])
+    elif ntype == NODE_TYPE_LLM:
+        node.setdefault("prompt", "")
+        node.setdefault("system_prompt", "")
+        try:
+            node["temperature"] = float(node.get("temperature", 0.2))
+        except (TypeError, ValueError):
+            node["temperature"] = 0.2
+        node.setdefault("output_format", "text")
+        if node["output_format"] not in ("text", "json"):
+            node["output_format"] = "text"
+        node.setdefault("append_previous", True)
+    elif ntype == NODE_TYPE_TOOL:
+        node.setdefault("tool_name", "")
+        if not isinstance(node.get("tool_args"), dict):
+            node["tool_args"] = {}
+        node.setdefault("append_previous", False)
+    elif ntype == NODE_TYPE_ROUTER:
+        if not isinstance(node.get("routes"), list):
+            node["routes"] = list(node.get("routes") or [])
+        node["routes"] = [str(r) for r in node["routes"] if str(r).strip()]
+        if not isinstance(node.get("rules"), list):
+            node["rules"] = []
+        mode = str(node.get("router_mode") or "auto").strip().lower()
+        node["router_mode"] = mode if mode in ("auto", "rules", "llm") else "auto"
+        node.setdefault("default_route", node["routes"][0] if node["routes"] else "")
     # task: task_id may be missing if orphaned
 
     return node
@@ -397,6 +454,12 @@ def _validate_structured_loops(
     for loop in loops:
         lid = loop["id"]
         body = resolve_loop_body_ids(graph, loop)
+        for nid in loop.get("body_node_ids") or []:
+            member = by_id.get(nid)
+            if member and member.get("type") in TYPED_EXECUTABLE_TYPES:
+                errors.append(
+                    f"Loop {lid}: typed block {nid} cannot be a loop body member yet."
+                )
         if not body and loop.get("scope") != LOOP_SCOPE_WORKFLOW:
             errors.append(f"Loop {lid}: empty body (pick nodes or levels).")
         for nid in body:
@@ -514,6 +577,7 @@ def validate_graph(
         if n.get("type") == NODE_TYPE_LOOP:
             body_claimed.update(resolve_loop_body_ids(graph, n))
 
+    node_types = {n["id"]: n.get("type") for n in graph if n.get("id")}
     for n in graph:
         nid = n.get("id") or "?"
         ntype = n.get("type")
@@ -567,11 +631,75 @@ def validate_graph(
                     errors.append(f"Level node {nid}: level must be >= 1.")
             except (TypeError, ValueError):
                 errors.append(f"Level node {nid}: invalid level.")
+        elif ntype == NODE_TYPE_LLM:
+            if not (n.get("prompt") or "").strip():
+                errors.append(f"Node {nid}: llm block needs a prompt.")
+            if n.get("output_format") not in (None, "text", "json"):
+                errors.append(f"Node {nid}: llm output_format must be 'text' or 'json'.")
+        elif ntype == NODE_TYPE_TOOL:
+            if not (n.get("tool_name") or "").strip():
+                errors.append(f"Node {nid}: tool block needs tool_name.")
+            if not isinstance(n.get("tool_args", {}), dict):
+                errors.append(f"Node {nid}: tool_args must be an object.")
+        elif ntype == NODE_TYPE_ROUTER:
+            routes = [str(r) for r in (n.get("routes") or [])]
+            if len(set(routes)) < 2:
+                errors.append(f"Router {nid}: needs at least two distinct routes.")
+            default = str(n.get("default_route") or "")
+            if default and default not in routes:
+                errors.append(f"Router {nid}: default_route {default!r} is not one of the routes.")
+            for r_idx, rule in enumerate(n.get("rules") or []):
+                if not isinstance(rule, dict):
+                    errors.append(f"Router {nid}: rule #{r_idx + 1} must be an object.")
+                    continue
+                if str(rule.get("route") or "") not in routes:
+                    errors.append(f"Router {nid}: rule #{r_idx + 1} targets an unknown route.")
+                if not any(k in rule for k in ("pattern", "equals", "contains", "exists")):
+                    errors.append(
+                        f"Router {nid}: rule #{r_idx + 1} needs one of pattern/equals/contains/exists."
+                    )
+        elif ntype == NODE_TYPE_HITL:
+            typed_parents = [
+                d for d in (n.get("depends_on") or []) if node_types.get(d) in TYPED_NODE_TYPES
+            ]
+            if typed_parents:
+                errors.append(
+                    f"Node {nid}: HITL after typed blocks {typed_parents} is not supported yet "
+                    f"(move the checkpoint upstream, e.g. inside the agent task)."
+                )
         elif ntype == NODE_TYPE_LOOP:
             if n.get("loop_mode") not in LOOP_MODES:
                 errors.append(f"Node {nid}: invalid loop_mode {n.get('loop_mode')!r}.")
             if n.get("scope") not in LOOP_SCOPES:
                 errors.append(f"Node {nid}: invalid loop scope {n.get('scope')!r}.")
+
+    # Route gates must reference an existing router that runs first.
+    routers = {n["id"]: n for n in graph if n.get("type") == NODE_TYPE_ROUTER}
+    for n in graph:
+        gate = n.get("when_route")
+        if not gate:
+            continue
+        nid = n.get("id") or "?"
+        if not isinstance(gate, dict):
+            errors.append(f"Node {nid}: when_route must be an object.")
+            continue
+        src = str(gate.get("from") or "")
+        router = routers.get(src)
+        if not router:
+            errors.append(f"Node {nid}: when_route.from {src!r} is not a router node.")
+            continue
+        if src not in (n.get("depends_on") or []):
+            errors.append(f"Node {nid}: when_route.from {src!r} must also be in depends_on.")
+        routes = {str(r) for r in (router.get("routes") or [])}
+        wanted = gate.get("in")
+        if wanted is None and gate.get("equals") is not None:
+            wanted = [gate.get("equals")]
+        if not isinstance(wanted, list) or not wanted:
+            errors.append(f"Node {nid}: when_route needs 'in' (list) or 'equals'.")
+            continue
+        for value in wanted:
+            if str(value) not in routes:
+                errors.append(f"Node {nid}: when_route value {value!r} is not a route of {src!r}.")
 
     if not any(n.get("type") == NODE_TYPE_LOOP for n in graph):
         cycle_graph = [n for n in graph if n.get("type") != NODE_TYPE_LEVEL]
@@ -719,7 +847,10 @@ def desugar_graph_for_runtime(
         n = by_id.get(node_id)
         if not n:
             return []
-        if n.get("type") in (NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_LOOP):
+        if n.get("type") in (
+            NODE_TYPE_TASK, NODE_TYPE_BATCH, NODE_TYPE_LOOP,
+            NODE_TYPE_LLM, NODE_TYPE_TOOL, NODE_TYPE_ROUTER,
+        ):
             return [node_id]
         if n.get("type") == NODE_TYPE_INPUT:
             return []
@@ -884,6 +1015,9 @@ def graph_to_dot(
         NODE_TYPE_EXPORT: "folder",
         NODE_TYPE_LOOP: "component",
         NODE_TYPE_LEVEL: "box",
+        NODE_TYPE_LLM: "ellipse",
+        NODE_TYPE_TOOL: "cylinder",
+        NODE_TYPE_ROUTER: "diamond",
     }
     for n in graph:
         nid = n.get("id") or "unknown"
@@ -904,6 +1038,12 @@ def graph_to_dot(
             label = f"INPUT\\n({nid})"
         elif ntype == NODE_TYPE_LOOP:
             label = f"LOOP {n.get('loop_mode')}\\n({nid})"
+        elif ntype == NODE_TYPE_LLM:
+            label = f"LLM\\n({nid})"
+        elif ntype == NODE_TYPE_TOOL:
+            label = f"{n.get('tool_name') or 'tool'}\\n({nid})"
+        elif ntype == NODE_TYPE_ROUTER:
+            label = f"ROUTER\\n({nid})"
         elif ntype == NODE_TYPE_LEVEL:
             label = f"LEVEL {n.get('level', '?')}\\n({nid})"
         shape = shape_map.get(ntype, "box")
@@ -956,7 +1096,10 @@ def collect_task_ids(graph: Sequence[Any]) -> List[int]:
         if not isinstance(step, dict):
             continue
         ntype = infer_node_type(step)
-        if ntype in (NODE_TYPE_INPUT, NODE_TYPE_HITL, NODE_TYPE_EXPORT, NODE_TYPE_LOOP, NODE_TYPE_LEVEL):
+        if ntype in (
+            NODE_TYPE_INPUT, NODE_TYPE_HITL, NODE_TYPE_EXPORT, NODE_TYPE_LOOP, NODE_TYPE_LEVEL,
+            NODE_TYPE_LLM, NODE_TYPE_TOOL, NODE_TYPE_ROUTER,
+        ):
             continue
         if ntype == NODE_TYPE_BATCH:
             for tid in step.get("task_ids") or []:

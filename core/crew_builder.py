@@ -66,6 +66,14 @@ from core.scientific_scout import (
     ensure_grounded_digest,
     parse_scientific_search_output,
 )
+from core.node_executor import (
+    NodeExecutionError,
+    RunState,
+    execute_typed_node,
+    node_is_enabled,
+    node_kind,
+)
+from core.task_library import resolve_task_record
 from core.workflow_contracts import (
     WORKER_HANDOFF_DIRECTIVE,
     MODEL_TIER_SIMPLE,
@@ -722,7 +730,7 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
     step_def / model_tier: optional DAG node metadata (tool_profile, model_tier).
     All DAG agents are workers; Master AI is the sole orchestrator.
     """
-    task_record = db.read_task(task_id)
+    task_record = resolve_task_record(task_id, step_def, db)
     if not task_record:
         raise ValueError(f"Task ID {task_id} not found in database.")
 
@@ -1189,10 +1197,22 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             if task_outputs.get(f"{n_id}_completed") == True:
                 completed_nodes.add(n_id)
                 node_outputs[n_id] = task_outputs.get(f"{n_id}_final_output", "")
+        elif node_kind(data.get("step_def") or {}):
+            # Typed nodes (llm/tool/router) have no task_id: persisted by node id.
+            if f"__typed__{n_id}" in task_outputs:
+                completed_nodes.add(n_id)
+                node_outputs[n_id] = task_outputs.get(f"__typed__{n_id}", "")
         else:
             if data.get("task_id") is not None and str(data["task_id"]) in task_outputs:
                 completed_nodes.add(n_id)
                 node_outputs[n_id] = task_outputs[str(data["task_id"])]
+
+    # Router decisions persist across restarts (and are needed to skip branches).
+    route_choices = {
+        key[len("__route__"):]: value
+        for key, value in task_outputs.items()
+        if isinstance(key, str) and key.startswith("__route__") and isinstance(value, str)
+    }
 
     for n_id in completed_nodes:
         data = dag_nodes[n_id]
@@ -1214,10 +1234,32 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     task_outputs_lock = threading.Lock()
     handoffs = []
     completed_order = []
+
+    # --- Typed-node runtime helpers (llm / tool) ------------------------------
+    _master_local = threading.local()
+
+    def _complete(messages, temperature=0.2, force_json=False):
+        """Single structured completion through the shared MasterAI plumbing."""
+        master = getattr(_master_local, "master", None)
+        if master is None:
+            from core.master_ai import MasterAI
+
+            master = MasterAI()
+            _master_local.master = master
+        return master._call_llm_with_retry(
+            model=master._get_model_string(),
+            messages=messages,
+            temperature=temperature,
+            force_json_mode=force_json,
+        )
+
+    def _resolve_tool(name):
+        return ALLOWED_TOOLS.get(name)
+
     
-    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output="", step_def=None, node_id=""):
+    def _execute_task_instance(task_id, current_inputs, log_msg, task_idx=None, parent_output="", step_def=None, node_id="", allow_pause=False):
         task_obj = _build_task(task_id, agents_cache, step_def=step_def)
-        task_record = db.read_task(task_id) or {}
+        task_record = resolve_task_record(task_id, step_def, db)
         bibliographic = _is_bibliographic_deliverable(task_record)
         if not bibliographic:
             _inject_memory_tools(task_obj.agent, task_obj, read_memory_tool, write_memory_tool)
@@ -1232,7 +1274,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             tids = step.get('task_ids', []) if isinstance(step, dict) and step.get('type') == 'batch_loop' else [step if isinstance(step, int) else step.get('task_id')]
             for tid in tids:
                 try:
-                    t_rec = db.read_task(tid)
+                    t_rec = resolve_task_record(tid, step, db)
                     if t_rec: workflow_tasks.append(t_rec)
                     else: workflow_tasks.append({'id': tid, 'name': None, 'description': '', 'agent_id': None})
                 except Exception:
@@ -1316,7 +1358,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         if status_callback and task_idx is not None:
             try:
                 agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
-                t_rec = db.read_task(task_id)
+                t_rec = task_record
                 a_rec = db.read_agent(t_rec["agent_id"]) if t_rec and t_rec.get("agent_id") else None
                 mid = (t_rec or {}).get("model_id") or (a_rec or {}).get("model_id")
                 status_callback(task_idx, len(task_ids), agent_role, "running", _model_label(mid))
@@ -1338,7 +1380,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 err_str = str(e).lower()
                 if "503" in err_str or "unavailable" in err_str or "rate" in err_str:
                     logging.warning(f"Rate limit / 503 encountered: {e}")
-                    t_rec = db.read_task(task_id) if task_id else None
+                    t_rec = task_record if task_id else None
                     mid = (t_rec or {}).get("model_id")
                     raise RateLimitError(
                         f"Model 503/unavailable: {e}",
@@ -1399,7 +1441,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         agent_role = task_obj.agent.role if task_obj.agent else "Unknown"
         _auto_save_to_memory(memory_manager, task_id, task_out, agent_role)
 
-        t_rec = db.read_task(task_id)
+        t_rec = resolve_task_record(task_id, step_def, db)
         task_title = (t_rec.get("name") or t_rec.get("description", "")[:50]) if t_rec else f"Task {task_id}"
         git_cp = git_ws.checkpoint_step(
             run_id=run_id,
@@ -1428,9 +1470,10 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         needs_hitl = bool(t_rec and t_rec.get('human_validation')) or (
             task_id is not None and int(task_id) in human_validation_task_ids
         )
-        if t_rec and chat_id and needs_hitl:
+        if t_rec and needs_hitl:
             from core.master_ai import MasterAI
-            from core.human_in_the_loop import request_human_input
+            # Runs started from the API/dashboard have no Telegram chat.
+            interrupt_chat = str(chat_id) if chat_id not in (None, "", "None") else None
             master_ai = MasterAI()
             question, options = master_ai.format_validation_request(
                 task_out, 
@@ -1447,7 +1490,65 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 if "⏪ Annulla Modifiche File (Git Rollback)" not in options:
                     options.append("⏪ Annulla Modifiche File (Git Rollback)")
 
-            user_feedback = request_human_input(chat_id, question, options=options, task_id=f"task_{task_id}")
+            # --- Persistent approval: pause the run and free the thread ---------
+            # Batch/loop bodies keep the legacy blocking path (see allow_pause).
+            if allow_pause and run_id:
+                from core.interrupts import notify_interrupt, open_interrupt
+
+                interrupt_node = node_id or f"node_{task_idx if task_idx is not None else task_id}"
+                interrupt_options = list(options or [])
+                interrupt_id = open_interrupt(
+                    run_id=run_id,
+                    node_id=interrupt_node,
+                    task_id=int(task_id) if task_id is not None else None,
+                    chat_id=interrupt_chat,
+                    kind="hitl",
+                    question=question,
+                    options=interrupt_options,
+                    payload={
+                        "task_out": task_out,
+                        "agent_role": agent_role,
+                        "task_description": t_rec.get("description", ""),
+                        "pre_step_sha": pre_step_sha,
+                        "git_committed": bool(git_cp.get("committed")),
+                    },
+                )
+                with task_outputs_lock:
+                    task_outputs[f"__interrupt__{interrupt_node}"] = interrupt_id
+                    db.update_run(run_id, status="waiting_human", task_outputs=task_outputs)
+                logger.info(
+                    "Run %s paused for human approval (interrupt %s, node %s).",
+                    run_id, interrupt_id, interrupt_node,
+                )
+                try:
+                    if interrupt_chat:
+                        notify_interrupt(
+                            {
+                                "id": interrupt_id,
+                                "run_id": run_id,
+                                "node_id": interrupt_node,
+                                "chat_id": interrupt_chat,
+                                "question": question,
+                                "options": interrupt_options,
+                            }
+                        )
+                except Exception as notify_err:  # noqa: BLE001
+                    logger.warning("Could not notify interrupt %s: %s", interrupt_id, notify_err)
+                raise PauseExecution(f"waiting_human:{interrupt_id}")
+
+            # --- Legacy blocking approval (batch/loop bodies, dynamic engine) ---
+            from core.human_in_the_loop import request_human_input
+
+            if not interrupt_chat:
+                # No transport can answer (e.g. run started from the mobile API):
+                # never block a thread for an hour waiting for nobody.
+                logger.info(
+                    "Human validation skipped for %s: the run has no chat channel.",
+                    node_id or task_id,
+                )
+                user_feedback = None
+            else:
+                user_feedback = request_human_input(interrupt_chat, question, options=options, task_id=f"task_{task_id}")
             if user_feedback == "SYSTEM_ABORT":
                 if git_cp.get("committed") and pre_step_sha:
                     git_ws.rollback_to_commit(pre_step_sha, reason="Run abortita durante HITL")
@@ -1555,6 +1656,51 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 step_def = dict(step_def)
                 step_def["_node_outputs_snapshot"] = outputs_snapshot
 
+            # --- Typed nodes (llm / tool / router): one call, no agent ----------
+            kind = node_kind(step_def or {})
+            if kind:
+                state = RunState(
+                    run_id=run_id,
+                    workflow_id=workflow_id,
+                    inputs=dict(inputs or {}),
+                    node_outputs=dict(outputs_snapshot),
+                    routes=dict(route_choices),
+                )
+                if not node_is_enabled(step_def, state):
+                    logging.info("Node %s skipped: route gate not matched.", n_id)
+                    with task_outputs_lock:
+                        node_outputs[n_id] = ""
+                        task_outputs[f"__typed__{n_id}"] = ""
+                        completed_order.append(n_id)
+                    return ""
+
+                previous = parent_output
+                parents = [p for p in (step_def.get("depends_on") or []) if p]
+                if parents:
+                    previous = state.output_of(parents[-1]) or parent_output
+                try:
+                    out = execute_typed_node(
+                        kind,
+                        step_def,
+                        state,
+                        complete=_complete,
+                        resolve_tool=_resolve_tool,
+                        previous=previous,
+                    )
+                except NodeExecutionError as exc:
+                    raise RuntimeError(f"Node {n_id} ({kind}) failed: {exc}") from exc
+
+                with task_outputs_lock:
+                    node_outputs[n_id] = out
+                    task_outputs[f"__typed__{n_id}"] = out
+                    if kind == "router":
+                        route_choices[n_id] = out
+                        task_outputs[f"__route__{n_id}"] = out
+                    completed_order.append(n_id)
+                    db.update_run(run_id, task_outputs=task_outputs)
+                logging.info("Typed node %s (%s) completed.", n_id, kind)
+                return out
+
             def _run_body_once(iter_inputs, iter_parent):
                 last = iter_parent
                 local_snap = dict(outputs_snapshot)
@@ -1642,6 +1788,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     parent_output=parent_output,
                     step_def=step_def,
                     node_id=n_id,
+                    allow_pause=True,
                 )
                 node_outputs[n_id] = out
                 with task_outputs_lock:
@@ -1722,6 +1869,23 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
     last_output_overall = ""
 
+    def _emit_node_event(event_type: str, node_id, **extra) -> None:
+        if not run_id:
+            return
+        try:
+            from core import events as _events
+
+            step = dag_nodes.get(node_id, {}).get("step_def")
+            name = (step.get("name") if isinstance(step, dict) else "") or ""
+            _events.emit(
+                int(run_id),
+                event_type,
+                {"node_id": str(node_id), "name": name, **extra},
+                db=db,
+            )
+        except Exception:  # noqa: BLE001 - event logging is best effort
+            logging.debug("Could not emit %s for node %s", event_type, node_id, exc_info=True)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
         
@@ -1754,6 +1918,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
             if ready_queue:
                 for n_id in ready_queue:
+                    _emit_node_event("run.node.started", n_id)
                     futures[executor.submit(execute_node, n_id)] = n_id
                     in_flight.add(n_id)
                 ready_queue.clear()
@@ -1774,6 +1939,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     if res:
                         last_output_overall = res
                 except RateLimitError as e:
+                    _emit_node_event("run.node.failed", n_id, reason="rate_limit", error=str(e))
                     logging.warning(f"Node {n_id} hit rate limit. Pausing workflow: {e}")
                     db.update_run(run_id, status='paused')
                     break
@@ -1781,14 +1947,29 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     logging.warning(f"Workflow execution paused: {e}")
                     break
                 except Exception as e:
+                    _emit_node_event("run.node.failed", n_id, error=str(e))
                     logging.error(f"Node {n_id} failed: {e}")
                     raise
-                    
+
+                _emit_node_event("run.node.completed", n_id)
                 completed_nodes.add(n_id)
                 for dep in dependents[n_id]:
                     in_degree[dep] -= 1
                     if in_degree[dep] == 0:
                         ready_queue.append(dep)
+
+    # A paused/cancelled run must not run post-processing or be marked completed.
+    _state = db.read_run(run_id) or {}
+    _state_status = str(_state.get("status") or "").lower()
+    if _state_status in ("paused", "waiting_human", "cancelled", "stopped", "failed"):
+        logging.info("Run %s stopped before post-processing (status=%s).", run_id, _state_status)
+        return last_output_overall, json.dumps(
+            {
+                "paused": _state_status in ("paused", "waiting_human"),
+                "status": _state_status,
+            },
+            ensure_ascii=False,
+        )
 
     all_records = memory_manager.dump_all_records()
     global_context = json.dumps(all_records, indent=2, ensure_ascii=False)
@@ -2420,6 +2601,22 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
 
     last_output_overall = ""
 
+    def _emit_dynamic_node_event(event_type: str, n_id, **extra) -> None:
+        if not run_id:
+            return
+        try:
+            from core import events as _events
+
+            tdata = dag_nodes.get(n_id, {}).get("task_data") or {}
+            _events.emit(
+                int(run_id),
+                event_type,
+                {"node_id": str(n_id), "name": tdata.get("name") or "", **extra},
+                db=db,
+            )
+        except Exception:  # noqa: BLE001 - event logging is best effort
+            logging.debug("Could not emit %s for node %s", event_type, n_id, exc_info=True)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {}
         
@@ -2439,6 +2636,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
         while ready_queue or in_flight:
             if ready_queue:
                 for n_id in ready_queue:
+                    _emit_dynamic_node_event("run.node.started", n_id)
                     futures[executor.submit(execute_dynamic_node, n_id)] = n_id
                     in_flight.add(n_id)
                 ready_queue.clear()
@@ -2459,9 +2657,11 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                     if res:
                         last_output_overall = res
                 except Exception as e:
+                    _emit_dynamic_node_event("run.node.failed", n_id, error=str(e))
                     logging.error(f"Node {n_id} failed: {e}")
                     raise
-                    
+
+                _emit_dynamic_node_event("run.node.completed", n_id)
                 completed_nodes.add(n_id)
                 for dep in dependents[n_id]:
                     in_degree[dep] -= 1
