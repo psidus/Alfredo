@@ -328,6 +328,53 @@ def preview(
     return {**info, "kind": "binary", "message": "Anteprima non supportata: scarica il file."}
 
 
+def write_file(
+    rel_path: str,
+    content: str,
+    *,
+    root: Optional[Path] = None,
+    overwrite: bool = True,
+) -> Dict[str, Any]:
+    """Write text content to a file inside the workspace safely."""
+    path = resolve(rel_path, root=root, must_exist=False)
+    if path.is_dir():
+        raise FileAccessError("Target path is a directory")
+    if not overwrite and path.exists():
+        raise FileAccessError("File already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return describe(rel_path, root=root)
+
+
+def delete_path(
+    rel_path: str,
+    *,
+    root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Delete a file or folder inside the workspace safely."""
+    clean = clean_relative(rel_path)
+    if not clean:
+        raise FileAccessError("Cannot delete root workspace directory")
+    path = resolve(rel_path, root=root, must_exist=True)
+    base = _root(root)
+    if path == base:
+        raise FileAccessError("Cannot delete root workspace directory")
+
+    is_dir = path.is_dir()
+    if is_dir:
+        import shutil
+
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+    return {
+        "status": "deleted",
+        "path": clean,
+        "is_dir": is_dir,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Run exports
 # ---------------------------------------------------------------------------
@@ -463,6 +510,7 @@ __all__ = [
     "WORKSPACE_ROOT",
     "clean_relative",
     "create_share_token",
+    "delete_path",
     "describe",
     "describe_run_exports",
     "kind_of",
@@ -472,4 +520,5 @@ __all__ = [
     "resolve",
     "share_secret",
     "verify_share_token",
+    "write_file",
 ]

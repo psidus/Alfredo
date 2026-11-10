@@ -144,6 +144,21 @@ export function FilesScreen({ config, lang: propLang }: Props) {
     }
   };
 
+  const handleDelete = async (entry: RunFile) => {
+    const promptMsg = entry.is_dir ? t("confirmDeleteFolder") : t("confirmDeleteFile");
+    if (!window.confirm(promptMsg)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteFile(config, entry.path);
+      await load(path);
+    } catch (exc) {
+      setError(exc instanceof ApiError ? exc.message : String(exc));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const segments = path.split("/").filter(Boolean);
   const folderName = segments.length ? segments[segments.length - 1] : "Workspace";
 
@@ -295,6 +310,23 @@ export function FilesScreen({ config, lang: propLang }: Props) {
                       </button>
                     </>
                   ) : null}
+                  <button
+                    className="btn-trash"
+                    title={t("delete")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDelete(entry);
+                    }}
+                    disabled={busy}
+                    aria-label={`Delete ${entry.name}`}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      <line x1="10" y1="11" x2="10" y2="17" />
+                      <line x1="14" y1="11" x2="14" y2="17" />
+                    </svg>
+                  </button>
                 </div>
               </div>
             ))

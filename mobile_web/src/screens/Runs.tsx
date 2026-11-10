@@ -26,6 +26,16 @@ export function RunsScreen({ config, onOpen }: Props) {
     }
   }, [config]);
 
+  const handleDeleteRun = async (runId: number) => {
+    if (!window.confirm(t("confirmDeleteRun"))) return;
+    try {
+      await api.deleteRun(config, runId);
+      setRuns((prev) => prev.filter((r) => r.run_id !== runId));
+    } catch (exc) {
+      setError(exc instanceof ApiError ? exc.message : String(exc));
+    }
+  };
+
   usePolling(() => void load(), 5000);
 
   return (
@@ -50,7 +60,25 @@ export function RunsScreen({ config, onOpen }: Props) {
             <button className="list-item" key={run.run_id} onClick={() => onOpen(run.run_id)}>
               <div className="row between">
                 <strong>Run #{run.run_id}</strong>
-                <StatusChip status={run.status} lang={lang} />
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <StatusChip status={run.status} lang={lang} />
+                  <button
+                    className="btn-trash"
+                    title={t("delete")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDeleteRun(run.run_id);
+                    }}
+                    aria-label={`Delete Run #${run.run_id}`}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6" />
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      <line x1="10" y1="11" x2="10" y2="17" />
+                      <line x1="14" y1="11" x2="14" y2="17" />
+                    </svg>
+                  </button>
+                </div>
               </div>
               <div className="row wrap muted" style={{ gap: 8 }}>
                 <span>workflow {run.workflow_id ?? "?"}</span>

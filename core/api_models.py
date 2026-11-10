@@ -92,6 +92,7 @@ class WorkflowSuggestion(BaseModel):
 class ChatResponse(BaseModel):
     reply: str = ""
     workflow: Optional[WorkflowSuggestion] = None
+    started_run_id: Optional[int] = None
 
 
 class DecideRequest(BaseModel):

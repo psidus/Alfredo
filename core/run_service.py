@@ -363,6 +363,28 @@ def cancel_run(run_id: int, db: Any = None) -> bool:
             db.close()
 
 
+def delete_run_record(run_id: int, db: Any = None) -> bool:
+    """Delete a run record and its associated interrupts from the database."""
+    owns_db = db is None
+    if db is None:
+        from core.db_manager import DBManager
+
+        db = DBManager()
+    try:
+        rid = int(run_id)
+        try:
+            from core.interrupts import cancel_for_run
+
+            cancel_for_run(rid, db=db)
+        except Exception:
+            pass
+        count = db.delete_run(rid)
+        return bool(count and count > 0)
+    finally:
+        if owns_db:
+            db.close()
+
+
 # ---------------------------------------------------------------------------
 # Human approvals (persistent interrupts)
 # ---------------------------------------------------------------------------
@@ -478,6 +500,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "cancel_run",
     "create_run",
+    "delete_run_record",
     "execute_run",
     "get_run",
     "is_active",

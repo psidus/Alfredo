@@ -800,7 +800,7 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
             )
             if not compatible:
                 logging.warning(
-                    f"⚠️ Task {task_id} ('{task_record.get('name', '')}') requires tier "
+                    f"⚠️ Task {task_id} ('{task_record.get('name') or ''}') requires tier "
                     f"{task_required_tier.name} but model '{model_name}' is insufficient: {reason}"
                 )
                 # Store warning for bot-level notification
@@ -888,7 +888,7 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
         expected_output=base_expected,
         agent=agent_instance,
         tools=task_tools,
-        async_execution=('[ASYNC]' in task_record.get('name', '')),
+        async_execution=('[ASYNC]' in (task_record.get('name') or '')),
         **pydantic_kwargs,
     )
     # Attach runtime metadata for handoff enforcement (not part of CrewAI)
@@ -2148,7 +2148,7 @@ def build_dynamic_crew(plan: dict, default_model_id=None):
             expected_output=base_expected,
             agent=agent_instance,
             tools=task_tools,
-            async_execution=('[ASYNC]' in task_data.get('name', '')),
+            async_execution=('[ASYNC]' in (task_data.get('name') or '')),
             **kwargs
         )
         crew_tasks.append(task)
@@ -2470,7 +2470,7 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
                 expected_output=base_expected,
                 agent=agent_instance,
                 tools=task_tools,
-                async_execution=('[ASYNC]' in task_data.get('name', '')),
+                async_execution=('[ASYNC]' in (task_data.get('name') or '')),
                 **kwargs
             )
 

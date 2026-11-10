@@ -177,6 +177,9 @@ export const api = {
   cancelRun: (config: ConnectionConfig, runId: number) =>
     request<{ run_id: number; status: string }>(config, "POST", `/api/runs/${runId}/cancel`),
 
+  deleteRun: (config: ConnectionConfig, runId: number) =>
+    request<{ run_id: number; status: string }>(config, "DELETE", `/api/runs/${runId}`),
+
   runEvents: (config: ConnectionConfig, runId: number, afterSeq = 0, limit = 200) =>
     request<RunEventPage>(
       config,
@@ -207,6 +210,13 @@ export const api = {
     request<FileListing>(
       config,
       "GET",
+      `/api/files?path=${encodeURIComponent(path)}`,
+    ),
+
+  deleteFile: (config: ConnectionConfig, path: string) =>
+    request<{ status: string; path: string; is_dir: boolean }>(
+      config,
+      "DELETE",
       `/api/files?path=${encodeURIComponent(path)}`,
     ),
 

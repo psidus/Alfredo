@@ -106,6 +106,8 @@ export const translations = {
     autoRefreshEvery5s: "Aggiornamento automatico ogni 5 s",
     loadingRuns: "Carico le esecuzioni…",
     noRunsYet: "Nessuna esecuzione. Avvia un workflow dalla chat o dalla lista.",
+    confirmDeleteRun: "Vuoi eliminare questa esecuzione dallo storico?",
+    deleteRunError: "Impossibile eliminare la run",
 
     // Approvals
     pendingApprovalsCount: "approvazioni in attesa",
@@ -157,6 +159,8 @@ export const translations = {
     linkCopied: "Link copiato negli appunti!",
     copyLink: "Copia link",
     preview: "Anteprima",
+    confirmDeleteFile: "Vuoi davvero eliminare questo file?",
+    confirmDeleteFolder: "Vuoi davvero eliminare questa cartella e tutto il suo contenuto?",
   },
   en: {
     // Header & Navigation
@@ -261,6 +265,8 @@ export const translations = {
     autoRefreshEvery5s: "Auto-refreshing every 5 s",
     loadingRuns: "Loading runs…",
     noRunsYet: "No runs yet. Start a workflow from chat or from the list.",
+    confirmDeleteRun: "Delete this run from history?",
+    deleteRunError: "Could not delete run",
 
     // Approvals
     pendingApprovalsCount: "pending approvals",
@@ -312,6 +318,8 @@ export const translations = {
     linkCopied: "Link copied to clipboard!",
     copyLink: "Copy link",
     preview: "Preview",
+    confirmDeleteFile: "Are you sure you want to delete this file?",
+    confirmDeleteFolder: "Are you sure you want to delete this folder and all its contents?",
   },
 } as const;
 

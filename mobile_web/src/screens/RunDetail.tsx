@@ -153,6 +153,19 @@ export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props
     }
   };
 
+  const handleDeleteRun = async () => {
+    if (!window.confirm(t("confirmDeleteRun"))) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteRun(config, runId);
+      onBack();
+    } catch (exc) {
+      setError(exc instanceof ApiError ? exc.message : String(exc));
+      setBusy(false);
+    }
+  };
+
   const openPreview = async (file: RunFile) => {
     setBusy(true);
     setError(null);
@@ -244,7 +257,13 @@ export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props
                     {t("cancelExecution")}
                   </button>
                 </div>
-              ) : null}
+              ) : (
+                <div className="actions">
+                  <button className="btn small danger" onClick={() => void handleDeleteRun()} disabled={busy}>
+                    {t("delete")} {currentLang === "en" ? "Run" : "Esecuzione"}
+                  </button>
+                </div>
+              )}
             </div>
 
             {events.length > 0 ? (

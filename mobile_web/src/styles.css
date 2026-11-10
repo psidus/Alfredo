@@ -243,6 +243,30 @@ button {
   background: rgba(248, 113, 113, 0.08);
 }
 
+.btn-trash {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  line-height: 1;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+.btn-trash:hover,
+.btn-trash:focus {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.12);
+}
+.btn-trash:active {
+  transform: scale(0.92);
+}
+
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;

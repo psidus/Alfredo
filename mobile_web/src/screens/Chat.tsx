@@ -96,17 +96,88 @@ function SuggestionCard({
 }
 
 export function ChatScreen({ config, onStarted }: Props) {
-  const { t } = useLanguage();
+  const { lang, t } = useLanguage();
   const [messages, setMessages] = useState<ChatMessage[]>(() => loadChat());
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeRunIds, setActiveRunIds] = useState<number[]>(() => {
+    try {
+      const stored = localStorage.getItem("alfredo_active_runs");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
   const [queue, setQueue] = useState<{
     waiting: number;
     behind: number | null;
     eta: number | null;
   } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("alfredo_active_runs", JSON.stringify(activeRunIds));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [activeRunIds]);
+
+  useEffect(() => {
+    void api.runs(config, 5).then((recent) => {
+      const running = recent.filter((r) => r.status === "running").map((r) => r.run_id);
+      if (running.length > 0) {
+        setActiveRunIds((prev) => [...new Set([...prev, ...running])]);
+      }
+    }).catch(() => {});
+  }, [config]);
+
+  usePolling(
+    async () => {
+      if (activeRunIds.length === 0) return;
+      for (const runId of activeRunIds) {
+        try {
+          const detail = await api.run(config, runId);
+          if (detail.status === "completed" || detail.status === "failed") {
+            setActiveRunIds((prev) => prev.filter((id) => id !== runId));
+            const isOk = detail.status === "completed";
+            const icon = isOk ? "✅" : "⚠️";
+            const title = isOk
+              ? (lang === "en" ? `Run #${runId} completed!` : `L'esecuzione #${runId} è stata completata con successo!`)
+              : (lang === "en" ? `Run #${runId} failed.` : `L'esecuzione #${runId} è terminata con errore.`);
+
+            let summary = "";
+            if (detail.result) {
+              try {
+                const parsed = JSON.parse(detail.result);
+                summary = parsed.final_result || parsed.action_plan || detail.result;
+              } catch {
+                summary = detail.result;
+              }
+            }
+            if (summary.length > 400) {
+              summary = summary.slice(0, 400) + "...";
+            }
+
+            const content = `${icon} **${title}**\n\n${summary}`.trim();
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content,
+                started_run_id: runId,
+              },
+            ]);
+          }
+        } catch {
+          // Ignore network glitch
+        }
+      }
+    },
+    4000,
+    activeRunIds.length > 0,
+  );
 
   const refreshQueue = useCallback(async () => {
     try {
@@ -141,12 +212,18 @@ export function ChatScreen({ config, onStarted }: Props) {
     setError(null);
     try {
       const reply = await api.chat(config, text, history);
+      if (reply.started_run_id) {
+        setActiveRunIds((prev) =>
+          prev.includes(reply.started_run_id!) ? prev : [...prev, reply.started_run_id!],
+        );
+      }
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
           content: reply.reply || t("noTextReply"),
           workflow: reply.workflow ?? null,
+          started_run_id: reply.started_run_id ?? null,
         },
       ]);
     } catch (exc) {
@@ -195,16 +272,45 @@ export function ChatScreen({ config, onStarted }: Props) {
         {messages.map((message, index) =>
           message.role === "assistant" && message.workflow ? (
             <div className="assistant-block" key={`${message.role}-${index}`}>
-              <div className="bubble assistant">{message.content}</div>
+              <div className="bubble assistant">
+                {message.content}
+                {message.started_run_id ? (
+                  <div style={{ marginTop: "0.5rem" }}>
+                    <button
+                      className="btn small primary"
+                      onClick={() => onStarted(message.started_run_id!, `Run #${message.started_run_id}`)}
+                      style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                    >
+                      <span>🚀</span>
+                      <span>{t("openRun")} #{message.started_run_id}</span>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <SuggestionCard
                 config={config}
                 suggestion={message.workflow}
-                onStarted={onStarted}
+                onStarted={(runId, label) => {
+                  setActiveRunIds((prev) => (prev.includes(runId) ? prev : [...prev, runId]));
+                  onStarted(runId, label);
+                }}
               />
             </div>
           ) : (
             <div key={`${message.role}-${index}`} className={`bubble ${message.role}`}>
               {message.content}
+              {message.started_run_id ? (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <button
+                    className="btn small primary"
+                    onClick={() => onStarted(message.started_run_id!, `Run #${message.started_run_id}`)}
+                    style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                  >
+                    <span>🚀</span>
+                    <span>{t("openRun")} #{message.started_run_id}</span>
+                  </button>
+                </div>
+              ) : null}
             </div>
           ),
         )}

@@ -450,13 +450,24 @@ async def control_assistant_chat(
 
     try:
         engine = await run_in_threadpool(_get_assistant_engine)
-        reply = await run_in_threadpool(engine.chat, message, history)
+        chat_outcome = await run_in_threadpool(engine.chat, message, history)
     except Exception as exc:  # noqa: BLE001 - surface the real model error
         logger.error("Control API: chat failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Model error: {exc}")
 
+    reply = ""
+    started_run_id = None
     suggestion: Optional[WorkflowSuggestion] = None
-    if request.auto_route:
+
+    if hasattr(chat_outcome, "text"):
+        reply = chat_outcome.text
+        started_run_id = getattr(chat_outcome, "started_run_id", None)
+        suggestion = getattr(chat_outcome, "workflow_suggestion", None)
+    elif isinstance(chat_outcome, str):
+        reply = chat_outcome
+
+    # Only run passive auto_route if NO workflow was started directly by the assistant
+    if not started_run_id and not suggestion and request.auto_route:
         try:
             cards = await run_in_threadpool(engine.catalogue)
             if cards and should_route(message, cards):
@@ -475,7 +486,7 @@ async def control_assistant_chat(
         except Exception:  # noqa: BLE001 - routing is best effort, chat still answers
             logger.warning("Control API: routing failed (chat continues)", exc_info=True)
 
-    return ChatResponse(reply=reply or "", workflow=suggestion)
+    return ChatResponse(reply=reply or "", workflow=suggestion, started_run_id=started_run_id)
 
 
 @app.post("/api/assistant/decide", response_model=DecideResponse, tags=["Control"])
@@ -599,6 +610,23 @@ async def control_run_events(
     return {"run_id": int(run_id), "events": events, "latest_seq": int(latest)}
 
 
+@app.delete("/api/runs/{run_id}", tags=["Control"])
+async def control_delete_run(run_id: int, _: None = Depends(verify_control)):
+    """Delete a workflow run record from the database."""
+    from core.run_service import delete_run_record
+
+    try:
+        deleted = await run_in_threadpool(delete_run_record, int(run_id))
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Run #{run_id} non trovata")
+        return {"status": "deleted", "run_id": int(run_id)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Control API: could not delete run %s: %s", run_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Files and artifacts (read-only workspace access)
 # ---------------------------------------------------------------------------
@@ -683,6 +711,20 @@ async def control_file_download(
     """Stream a file from disk (never buffered fully in memory)."""
     try:
         return await run_in_threadpool(_file_response, path)
+    except Exception as exc:  # noqa: BLE001
+        raise _file_http_error(exc)
+
+
+@app.delete("/api/files", tags=["Control"])
+async def control_file_delete(
+    path: str = Query(..., description="Workspace-relative file or folder path"),
+    _: None = Depends(verify_control),
+):
+    """Delete a file or folder inside the workspace."""
+    from core.files import delete_path
+
+    try:
+        return await run_in_threadpool(delete_path, path)
     except Exception as exc:  # noqa: BLE001
         raise _file_http_error(exc)
 

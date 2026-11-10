@@ -24,6 +24,7 @@ export interface WorkflowSuggestion {
 export interface ChatReply {
   reply: string;
   workflow?: WorkflowSuggestion | null;
+  started_run_id?: number | null;
 }
 
 export type DecisionAction = "answer" | "run_workflow" | "clarify";
@@ -229,6 +230,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   workflow?: WorkflowSuggestion | null;
+  started_run_id?: number | null;
 }
 
 export type Tab = "chat" | "workflows" | "runs" | "approvals" | "files";
