@@ -25,6 +25,7 @@ export interface ChatReply {
   reply: string;
   workflow?: WorkflowSuggestion | null;
   started_run_id?: number | null;
+  model?: string | null;
 }
 
 export type DecisionAction = "answer" | "run_workflow" | "clarify";
@@ -162,6 +163,7 @@ export interface SystemStatus {
   queue: GpuQueueState;
   metrics?: GpuMetrics;
   loaded_model?: string | null;
+  master_model?: string | null;
   preload_error?: string | null;
 }
 
@@ -231,6 +233,34 @@ export interface ChatMessage {
   content: string;
   workflow?: WorkflowSuggestion | null;
   started_run_id?: number | null;
+  isVoice?: boolean;
+  voiceDuration?: number;
+}
+
+export interface VoiceStatus {
+  stt_provider: string;
+  stt_model: string;
+  stt_device: string;
+  stt_language: string;
+  stt_available: boolean;
+  stt_model_cached: boolean;
+  tts_provider: string;
+  tts_voice_it: string;
+  tts_voice_en: string;
+  tts_piper_model: string;
+  tts_available: boolean;
+  piper_available: boolean;
+  available_stt_models: string[];
+  available_tts_voices_it: string[];
+  available_tts_voices_en: string[];
+}
+
+export interface TranscriptionResult {
+  text: string;
+  language: string;
+  duration_s: number;
+  provider: string;
+  model: string;
 }
 
 export type Tab = "chat" | "workflows" | "runs" | "approvals" | "files";

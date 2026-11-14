@@ -14,8 +14,10 @@ import type {
   RunSummary,
   ShareLink,
   SystemStatus,
+  TranscriptionResult,
   UploadChunkStatus,
   UploadSession,
+  VoiceStatus,
   WorkflowCard,
 } from "./types";
 
@@ -344,4 +346,94 @@ export const api = {
 
   pushTest: (config: ConnectionConfig) =>
     request<{ status: string; delivered: number }>(config, "POST", "/api/push/test"),
+
+  voiceStatus: (config: ConnectionConfig) =>
+    request<VoiceStatus>(config, "GET", "/api/voice/status"),
+
+  transcribeAudio: async (
+    config: ConnectionConfig,
+    audioBlob: Blob,
+    lang?: string,
+    filename = "voice.webm",
+  ): Promise<TranscriptionResult> => {
+    const base = normalizeBaseUrl(config.baseUrl);
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": audioBlob.type || "application/octet-stream",
+      "X-Audio-Filename": filename,
+      "ngrok-skip-browser-warning": "true",
+    };
+    if (config.token) headers["X-Control-Token"] = config.token;
+    const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+
+    let response: Response;
+    try {
+      response = await fetch(`${base}/api/voice/transcribe${query}`, {
+        method: "POST",
+        headers,
+        body: audioBlob,
+      });
+    } catch (error) {
+      throw new ApiError("Impossibile inviare il vocale: rete non raggiungibile.", undefined, error);
+    }
+
+    const raw = await response.text();
+    let payload: unknown = null;
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = { detail: raw.slice(0, 500) };
+      }
+    }
+    if (!response.ok) {
+      throw new ApiError(
+        errorMessage(payload, `Trascrizione fallita (HTTP ${response.status})`),
+        response.status,
+        payload,
+      );
+    }
+    return payload as TranscriptionResult;
+  },
+
+  synthesizeSpeech: async (
+    config: ConnectionConfig,
+    text: string,
+    lang = "it",
+    speed = 1.0,
+  ): Promise<Blob> => {
+    const base = normalizeBaseUrl(config.baseUrl);
+    const headers: Record<string, string> = {
+      Accept: "audio/*",
+      "Content-Type": "application/json",
+      "ngrok-skip-browser-warning": "true",
+    };
+    if (config.token) headers["X-Control-Token"] = config.token;
+
+    let response: Response;
+    try {
+      response = await fetch(`${base}/api/voice/synthesize`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text, lang, speed }),
+      });
+    } catch (error) {
+      throw new ApiError("Impossibile generare l'audio: rete non raggiungibile.", undefined, error);
+    }
+
+    if (!response.ok) {
+      let detail: unknown = null;
+      try {
+        detail = await response.json();
+      } catch {
+        detail = null;
+      }
+      throw new ApiError(
+        errorMessage(detail, `Sintesi vocale fallita (HTTP ${response.status})`),
+        response.status,
+        detail,
+      );
+    }
+    return response.blob();
+  },
 };

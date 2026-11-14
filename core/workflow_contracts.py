@@ -191,6 +191,224 @@ def ensure_fallback_write_file(
     return rel.replace("\\", "/")
 
 
+def _extract_json_block(text: str) -> Optional[Dict[str, Any]]:
+    """Extract first valid JSON dict from raw text or fenced ```json block."""
+    if not text:
+        return None
+    stripped = text.strip()
+    candidates = [stripped]
+    fence_matches = re.findall(r"```(?:json)?\s*([\s\S]*?)```", stripped, flags=re.IGNORECASE)
+    candidates.extend(m.strip() for m in fence_matches if m.strip())
+    brace_start = stripped.find("{")
+    brace_end = stripped.rfind("}")
+    if brace_start != -1 and brace_end > brace_start:
+        candidates.append(stripped[brace_start : brace_end + 1])
+
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return None
+
+
+_BINARY_YES = {"yes", "y", "si", "sì", "true", "1", "ok", "approvato", "approved", "pass", "vero"}
+_BINARY_NO = {"no", "n", "false", "0", "ko", "rifiutato", "rejected", "fail", "falso"}
+
+
+def normalize_binary_decision(value: Any) -> Optional[str]:
+    """Normalize English/Italian yes-no values to 'yes' or 'no' (or None)."""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return "yes" if int(value) == 1 else "no"
+    if value is None:
+        return None
+    low = str(value).strip().lower()
+    if low in _BINARY_YES:
+        return "yes"
+    if low in _BINARY_NO:
+        return "no"
+    return None
+
+
+def build_structured_handoff_envelope(
+    raw_output: str,
+    *,
+    task_id: Optional[int] = None,
+    task_name: str = "",
+    agent_role: str = "",
+    node_id: str = "",
+    handoff_contract: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Deterministically build a compact, schema-consistent handoff envelope from any upstream
+    agent/node output so downstream models receive extracted summary, key facts, structured data,
+    and binary decision without needing manual memory key lookups.
+    """
+    text = (raw_output or "").strip()
+    structured_data: Dict[str, Any] = _extract_json_block(text) or {}
+
+    decision: Optional[str] = None
+    reason: str = ""
+    if structured_data:
+        for d_key in ("decision", "route", "approved", "pass", "go"):
+            if d_key in structured_data:
+                norm = normalize_binary_decision(structured_data[d_key])
+                if norm:
+                    decision = norm
+                    break
+        reason = str(
+            structured_data.get("reason")
+            or structured_data.get("rationale")
+            or structured_data.get("explanation")
+            or ""
+        ).strip()
+
+    # Extract key facts from JSON list or markdown bullets / numbered list
+    key_facts: List[str] = []
+    if isinstance(structured_data.get("key_facts"), list):
+        key_facts = [str(item).strip() for item in structured_data["key_facts"] if str(item).strip()][:8]
+    elif isinstance(structured_data.get("key_findings"), list):
+        key_facts = [str(item).strip() for item in structured_data["key_findings"] if str(item).strip()][:8]
+
+    if not key_facts and text:
+        for line in text.splitlines():
+            s = line.strip()
+            m = re.match(r"^(?:[-*•]|\d+[.)])\s+(.+)$", s)
+            if m:
+                fact = re.sub(r"\*\*(.+?)\*\*", r"\1", m.group(1)).strip()
+                if fact and fact not in key_facts:
+                    key_facts.append(fact[:240])
+                if len(key_facts) >= 8:
+                    break
+
+    # Extract concise summary
+    summary = ""
+    if structured_data:
+        for s_key in ("summary", "conclusion", "executive_summary", "result", "answer"):
+            val = structured_data.get(s_key)
+            if isinstance(val, str) and val.strip():
+                summary = val.strip()
+                break
+
+    if not summary and text:
+        # Prefer explicit # Summary / # Conclusion sections if present
+        sec_match = re.search(
+            r"(?im)^#{1,3}\s*(?:conclusion|summary|riepilogo|sintesi|executive summary)[^\n]*\n+([\s\S]{15,700}?)(?=\n#{1,3}\s|\Z)",
+            text,
+        )
+        if sec_match:
+            summary = sec_match.group(1).strip()
+        else:
+            # Strip markdown headings / fences and pick opening informative paragraph
+            cleaned_lines = [
+                ln.strip()
+                for ln in text.splitlines()
+                if ln.strip() and not ln.strip().startswith(("```", "[KEYWORDS:", "# Topic:"))
+            ]
+            summary = " ".join(cleaned_lines)
+
+    if len(summary) > 500:
+        summary = summary[:497].rstrip() + "..."
+
+    # Apply optional handoff contract metadata hints (e.g. expected schema / fields)
+    if isinstance(handoff_contract, dict) and handoff_contract.get("required_fields"):
+        for req_f in handoff_contract.get("required_fields") or []:
+            if req_f not in structured_data and req_f in ("summary", "key_facts", "decision", "reason"):
+                if req_f == "summary":
+                    structured_data["summary"] = summary
+                elif req_f == "key_facts":
+                    structured_data["key_facts"] = key_facts
+                elif req_f == "decision" and decision:
+                    structured_data["decision"] = decision
+                elif req_f == "reason" and reason:
+                    structured_data["reason"] = reason
+
+    return {
+        "node_id": str(node_id or ""),
+        "task_id": task_id,
+        "task_name": str(task_name or ""),
+        "agent_role": str(agent_role or ""),
+        "summary": summary,
+        "key_facts": key_facts,
+        "structured_data": structured_data,
+        "decision": decision,
+        "reason": reason,
+        "raw_output": text,
+    }
+
+
+def format_upstream_handoff_block(
+    parent_envelopes: List[Dict[str, Any]],
+    wired_values: Optional[Dict[str, str]] = None,
+    handoff_contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Format structured upstream envelopes + wired inputs_map ports into a concise, deterministic
+    prompt block injected into downstream tasks so smaller models never lose handoff context.
+    """
+    blocks: List[str] = []
+    for env in parent_envelopes or []:
+        if not isinstance(env, dict):
+            continue
+        label_parts = []
+        if env.get("task_name"):
+            label_parts.append(str(env["task_name"]))
+        elif env.get("node_id"):
+            label_parts.append(f"Node {env['node_id']}")
+        if env.get("agent_role"):
+            label_parts.append(f"({env['agent_role']})")
+        header = " ".join(label_parts) or "Upstream Step"
+
+        section = [f"### Upstream Handoff: {header}"]
+        if env.get("decision"):
+            dec_line = f"- **Decision**: {str(env['decision']).upper()}"
+            if env.get("reason"):
+                dec_line += f" — {env['reason']}"
+            section.append(dec_line)
+        if env.get("summary"):
+            section.append(f"- **Summary**: {env['summary']}")
+        if env.get("key_facts"):
+            facts_str = "\n".join(f"  - {f}" for f in env["key_facts"][:6])
+            section.append(f"- **Key Facts**:\n{facts_str}")
+        sdata = env.get("structured_data")
+        if isinstance(sdata, dict) and sdata:
+            compact = {
+                k: v
+                for k, v in sdata.items()
+                if k not in ("raw_output", "summary", "key_facts", "key_findings")
+            }
+            if compact:
+                compact_json = json.dumps(compact, ensure_ascii=False)
+                if len(compact_json) > 600:
+                    compact_json = compact_json[:597] + "..."
+                section.append(f"- **Structured Data**: `{compact_json}`")
+        blocks.append("\n".join(section))
+
+    if wired_values:
+        wired_lines = ["### Wired Port Inputs (`inputs_map`)"]
+        for port, val in wired_values.items():
+            val_s = str(val or "").strip()
+            if len(val_s) > 600:
+                val_s = val_s[:597] + "..."
+            wired_lines.append(f"- **{port}**: {val_s}")
+        blocks.append("\n".join(wired_lines))
+
+    if isinstance(handoff_contract, dict) and handoff_contract.get("output_instruction"):
+        blocks.append(f"### Required Output Format\n{handoff_contract['output_instruction']}")
+
+    if not blocks:
+        return ""
+    return (
+        "\n\n--- [STRUCTURED HANDOFF FROM UPSTREAM] ---\n"
+        + "\n\n".join(blocks)
+        + "\n--- [END STRUCTURED HANDOFF] ---\n"
+    )
+
+
 def enforce_node_handoff(
     memory_manager,
     *,
@@ -200,13 +418,23 @@ def enforce_node_handoff(
     agent_role: str,
     task_tools: Sequence[str],
     node_id: str = "",
+    task_name: str = "",
+    handoff_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Hard handoff contract after a node completes:
-    - memory key task_<id> must exist (auto-save if missing)
+    - memory key task_<id> must exist (auto-save structured envelope if missing)
     - if any WRITE_TOOL assigned → ensure at least one workspace file exists
     """
     memory_key = f"task_{task_id}"
+    envelope = build_structured_handoff_envelope(
+        task_out,
+        task_id=task_id,
+        task_name=task_name,
+        agent_role=agent_role,
+        node_id=node_id,
+        handoff_contract=handoff_contract,
+    )
 
     # Ensure ephemeral memory record (caller usually already auto-saved; this is a hard guarantee)
     try:
@@ -217,17 +445,21 @@ def enforce_node_handoff(
             existing = memory_manager.get_record(memory_key)
     except Exception:
         existing = None
-    if not existing:
+    if not existing and memory_manager is not None:
         try:
-            try:
-                structured = json.loads(task_out) if task_out and task_out.strip().startswith(("{", "[")) else {"raw_output": task_out}
-            except Exception:
-                structured = {"raw_output": task_out}
-            summary = (task_out or "")[:500]
+            structured_payload = dict(envelope.get("structured_data") or {})
+            structured_payload.setdefault("summary", envelope.get("summary", ""))
+            if envelope.get("key_facts"):
+                structured_payload.setdefault("key_facts", envelope["key_facts"])
+            if envelope.get("decision"):
+                structured_payload.setdefault("decision", envelope["decision"])
+                structured_payload.setdefault("reason", envelope.get("reason", ""))
+            structured_payload.setdefault("raw_output", (task_out or "")[:2000])
+            summary = envelope.get("summary") or (task_out or "")[:500]
             memory_manager.write_record(
                 key=memory_key,
                 content_summary=f"Output of task '{task_id}' by agent '{agent_role}': {summary}",
-                structured_data=structured if isinstance(structured, dict) else {"raw_output": task_out},
+                structured_data=structured_payload,
                 agent_role=agent_role,
             )
         except Exception as e:
@@ -256,6 +488,7 @@ def enforce_node_handoff(
         "file_paths": verified,
         "write_tools": assigned_writes,
         "agent_role": agent_role,
+        "envelope": envelope,
     }
 
 

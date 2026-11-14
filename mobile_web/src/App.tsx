@@ -40,6 +40,7 @@ export default function App() {
   const [view, setView] = useState<View>(() => (loadConfig().token ? "tabs" : "settings"));
   const [runId, setRunId] = useState<number | null>(null);
   const [pending, setPending] = useState(0);
+  const [masterModel, setMasterModel] = useState<string | null>(null);
   const [lang, setLang] = useState<Language>(() => loadLanguage());
 
   const handleLanguageChange = (nextLang: Language) => {
@@ -123,7 +124,15 @@ export default function App() {
                 title="Alfredo Assistant"
               />
             </div>
-            <p className="hint">{currentHint}</p>
+            <div className="header-hint-row">
+              <p className="hint">{currentHint}</p>
+              {view === "tabs" && tab === "chat" && masterModel ? (
+                <span className="header-model-tag" title={`Master AI: ${masterModel}`}>
+                  <span className="header-model-dot" aria-hidden="true" />
+                  {masterModel}
+                </span>
+              ) : null}
+            </div>
           </div>
 
           <div className="header-actions">
@@ -174,7 +183,11 @@ export default function App() {
         ) : (
           <>
             {tab === "chat" ? (
-              <ChatScreen config={config} onStarted={(id) => openRun(id)} />
+              <ChatScreen
+                config={config}
+                onStarted={(id) => openRun(id)}
+                onMasterModel={setMasterModel}
+              />
             ) : null}
             {tab === "workflows" ? (
               <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />

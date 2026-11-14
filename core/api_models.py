@@ -93,6 +93,7 @@ class ChatResponse(BaseModel):
     reply: str = ""
     workflow: Optional[WorkflowSuggestion] = None
     started_run_id: Optional[int] = None
+    model: Optional[str] = None
 
 
 class DecideRequest(BaseModel):
@@ -333,4 +334,42 @@ class SystemStatus(BaseModel):
     queue: GpuQueueState = Field(default_factory=GpuQueueState)
     metrics: GpuMetrics = Field(default_factory=GpuMetrics)
     loaded_model: Optional[str] = None
+    master_model: Optional[str] = None
     preload_error: Optional[str] = None
+
+
+# =============================================================================
+# Voice (STT & TTS)
+# =============================================================================
+
+class VoiceStatusResponse(BaseModel):
+    stt_provider: str = "faster_whisper"
+    stt_model: str = "small"
+    stt_device: str = "cpu"
+    stt_language: str = "auto"
+    stt_available: bool = False
+    stt_model_cached: bool = False
+    tts_provider: str = "edge_tts"
+    tts_voice_it: str = "it-IT-DiegoNeural"
+    tts_voice_en: str = "en-US-GuyNeural"
+    tts_piper_model: str = "it_IT-paola-medium"
+    tts_available: bool = False
+    piper_available: bool = False
+    available_stt_models: List[str] = Field(default_factory=list)
+    available_tts_voices_it: List[str] = Field(default_factory=list)
+    available_tts_voices_en: List[str] = Field(default_factory=list)
+
+
+class VoiceTranscriptionResponse(BaseModel):
+    text: str = ""
+    language: str = ""
+    duration_s: float = 0.0
+    provider: str = ""
+    model: str = ""
+
+
+class VoiceSynthesizeRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Text to synthesize into audio")
+    lang: str = Field(default="it", description="Preferred language code (e.g. 'it' or 'en')")
+    voice: Optional[str] = Field(default=None, description="Optional explicit voice override")
+    speed: float = Field(default=1.0, ge=0.5, le=2.0, description="Speech speed multiplier")

@@ -12,6 +12,7 @@ import type {
 import { isTerminal, needsApproval } from "../types";
 import { ErrorBanner, Spinner, StatusChip, formatBytes, formatWhen, usePolling } from "../components/ui";
 import { FilePreviewCard } from "../components/FilePreviewCard";
+import { VoiceRecorderButton } from "../components/VoiceControls";
 import { useLanguage, type Language, type TranslationKey } from "../i18n";
 
 interface Props {
@@ -123,12 +124,13 @@ export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props
   const pollEnabled = !run || !isTerminal(run.status);
   usePolling(() => void load(), 3000, pollEnabled);
 
-  const sendAnswer = async () => {
-    if (!interrupt || !answer.trim()) return;
+  const sendAnswer = async (overrideValue?: string) => {
+    const value = (overrideValue ?? answer).trim();
+    if (!interrupt || !value) return;
     setBusy(true);
     setError(null);
     try {
-      await api.answerInterrupt(config, interrupt.id, answer.trim(), true);
+      await api.answerInterrupt(config, interrupt.id, value, true);
       setInterrupt(null);
       setAnswer("");
       await load();
@@ -310,7 +312,21 @@ export function RunDetailScreen({ config, runId, onBack, lang: propLang }: Props
                   ))}
                 </div>
                 <div className="field">
-                  <label htmlFor="approval-answer">{t("answerOrFeedback")}</label>
+                  <div className="row between wrap">
+                    <label htmlFor="approval-answer">{t("answerOrFeedback")}</label>
+                    <VoiceRecorderButton
+                      config={config}
+                      disabled={busy}
+                      onTranscribeToDraft={(spoken) =>
+                        setAnswer((prev) => {
+                          const cur = prev.trim();
+                          return cur ? `${cur} ${spoken}` : spoken;
+                        })
+                      }
+                      onSendDirect={(spoken) => void sendAnswer(spoken)}
+                      onError={setError}
+                    />
+                  </div>
                   <textarea
                     id="approval-answer"
                     value={answer}

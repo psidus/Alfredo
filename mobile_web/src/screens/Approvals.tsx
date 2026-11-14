@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { api, ApiError } from "../api";
 import type { ConnectionConfig, Interrupt } from "../types";
 import { ErrorBanner, Spinner, formatWhen, usePolling } from "../components/ui";
+import { VoiceRecorderButton } from "../components/VoiceControls";
 import { useLanguage } from "../i18n";
 
 interface Props {
@@ -33,8 +34,8 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
 
   usePolling(() => void load(), 8000);
 
-  const answer = async (interrupt: Interrupt) => {
-    const value = (answers[interrupt.id] ?? "").trim();
+  const answer = async (interrupt: Interrupt, overrideValue?: string) => {
+    const value = (overrideValue ?? answers[interrupt.id] ?? "").trim();
     if (!value) return;
     setBusyId(interrupt.id);
     setError(null);
@@ -105,7 +106,21 @@ export function ApprovalsScreen({ config, onOpenRun, onPendingCount }: Props) {
             ) : null}
 
             <div className="field">
-              <label htmlFor={`answer-${interrupt.id}`}>{t("answerOrFeedback")}</label>
+              <div className="row between wrap">
+                <label htmlFor={`answer-${interrupt.id}`}>{t("answerOrFeedback")}</label>
+                <VoiceRecorderButton
+                  config={config}
+                  disabled={busyId === interrupt.id}
+                  onTranscribeToDraft={(spoken) =>
+                    setAnswers((prev) => {
+                      const cur = (prev[interrupt.id] ?? "").trim();
+                      return { ...prev, [interrupt.id]: cur ? `${cur} ${spoken}` : spoken };
+                    })
+                  }
+                  onSendDirect={(spoken) => void answer(interrupt, spoken)}
+                  onError={setError}
+                />
+              </div>
               <textarea
                 id={`answer-${interrupt.id}`}
                 value={answers[interrupt.id] ?? ""}

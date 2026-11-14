@@ -234,9 +234,13 @@ def estimate_block_height(
     elif ntype == NODE_TYPE_TOOL:
         n_lines = 4
     elif ntype == NODE_TYPE_ROUTER:
-        n_lines = 4
+        q = str(node.get("question") or node.get("prompt") or "")
+        n_lines = 4 + (lines_for(q, 1) if (node.get("decision_mode") or q) else 0)
     else:
         n_lines = 4
+
+    if isinstance(node.get("when_route"), dict) and node["when_route"].get("from"):
+        n_lines += 1
 
     content_h = 12 + n_lines * LINE_HEIGHT_PX + 12  # padding
     # With few tasks give a bit more air; with many keep compact but never below content
@@ -484,6 +488,15 @@ def node_card_content(
             f"border-bottom:1px solid rgba(255,255,255,0.35);padding-bottom:3px'>"
             f"👤 <b>{html.escape(agent_band)}</b></div>"
         )
+    branch_pill = ""
+    gate = node.get("when_route")
+    if isinstance(gate, dict) and gate.get("from"):
+        src = html.escape(str(gate.get("from")))
+        cond_val = gate.get("equals") if gate.get("equals") is not None else ", ".join(str(x) for x in (gate.get("in") or []))
+        branch_pill = (
+            f"<div style='font-size:10px;background:rgba(0,0,0,0.22);padding:2px 5px;"
+            f"border-radius:4px;margin:2px 0'>↳ Se <b>{src}</b> == <b>{html.escape(str(cond_val).upper())}</b></div>"
+        )
 
     if ntype == NODE_TYPE_LEVEL:
         agents = member_count
@@ -501,25 +514,26 @@ def node_card_content(
         return (
             f"<div style='overflow:hidden;word-break:break-word'>{band}"
             f"<b>TASK</b> L{lvl}{hitl}<br/>"
+            f"{branch_pill}"
             f"<b>{tname}</b><br/><small>👤 {aname}</small><br/>{ports}<br/>"
             f"<code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_BATCH:
         return (
-            f"<div style='overflow:hidden'>{band}<b>BATCH</b> L{lvl}<br/>"
+            f"<div style='overflow:hidden'>{band}<b>BATCH</b> L{lvl}<br/>{branch_pill}"
             f"size={node.get('batch_size')} · `{html.escape(str(node.get('source_variable') or ''))}`"
             f"<br/><code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_HITL:
         return (
-            f"<div style='overflow:hidden'>{band}<b>HITL</b> L{lvl}<br/>"
+            f"<div style='overflow:hidden'>{band}<b>HITL</b> L{lvl}<br/>{branch_pill}"
             f"{html.escape((node.get('message') or '')[:80])}"
             f"<br/><code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_EXPORT:
         ex = ", ".join(node.get("exports") or []) or "formats?"
         return (
-            f"<div style='overflow:hidden'>{band}<b>EXPORT</b> L{lvl}<br/>{html.escape(ex)}"
+            f"<div style='overflow:hidden'>{band}<b>EXPORT</b> L{lvl}<br/>{branch_pill}{html.escape(ex)}"
             f"<br/><code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_INPUT:
@@ -533,21 +547,46 @@ def node_card_content(
         preview = html.escape((node.get("prompt") or "")[:90])
         return (
             f"<div style='overflow:hidden;word-break:break-word'>{band}<b>LLM</b> L{lvl} · {fmt}<br/>"
-            f"<small>{preview}</small><br/>"
+            f"{branch_pill}<small>{preview}</small><br/>"
             f"<code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_TOOL:
         return (
             f"<div style='overflow:hidden;word-break:break-word'>{band}<b>TOOL</b> L{lvl}<br/>"
-            f"{html.escape(str(node.get('tool_name') or '?'))}<br/>"
+            f"{branch_pill}{html.escape(str(node.get('tool_name') or '?'))}<br/>"
             f"<code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_ROUTER:
-        routes = ", ".join(str(r) for r in (node.get("routes") or [])) or "?"
+        routes = [str(r) for r in (node.get("routes") or [])]
+        is_binary = bool(node.get("decision_mode")) or {r.strip().lower() for r in routes} == {"yes", "no"}
+        if is_binary:
+            q_preview = html.escape(str(node.get("question") or node.get("prompt") or "Valutazione Sì/No")[:85])
+            title_lbl = html.escape(str(node.get("name") or "Decision (Sì/No)"))
+            engine = str(node.get("decision_engine") or "jev").strip().lower()
+            prim = str(node.get("decision_primitive") or "noul").strip().upper()
+            try:
+                thr = float(0.5 if node.get("threshold") in (None, "") else node.get("threshold"))
+            except (TypeError, ValueError):
+                thr = 0.5
+            jev_name = str(node.get("jev_model") or "").strip()
+            if engine != "llm":
+                hdr = f"⚖️ JEV ({prim} ≥ {thr:.2f})"
+                model_tag = f" · {jev_name}" if jev_name else (f" · M#{node['model_id']}" if node.get("model_id") else "")
+            else:
+                hdr = "⚖️ DECISION Sì/No"
+                model_tag = f" · M#{node['model_id']}" if node.get("model_id") else ""
+            return (
+                f"<div style='overflow:hidden;word-break:break-word'>{band}"
+                f"<b>{html.escape(hdr)}</b> L{lvl}{html.escape(model_tag)}<br/>"
+                f"{branch_pill}<b>{title_lbl}</b><br/>"
+                f"<small>{q_preview}</small><br/>"
+                f"<code style='font-size:10px'>{nid}</code></div>"
+            )
+        routes_txt = ", ".join(routes) or "?"
         mode = html.escape(str(node.get("router_mode") or "auto"))
         return (
             f"<div style='overflow:hidden;word-break:break-word'>{band}<b>ROUTER</b> L{lvl} · {mode}<br/>"
-            f"<small>{html.escape(routes)}</small><br/>"
+            f"{branch_pill}<small>{html.escape(routes_txt)}</small><br/>"
             f"<code style='font-size:10px'>{nid}</code></div>"
         )
     if ntype == NODE_TYPE_LOOP:
@@ -737,18 +776,25 @@ def graph_to_flow_state(
     for n in g:
         if n.get("type") == NODE_TYPE_LEVEL:
             continue
+        gate = n.get("when_route") if isinstance(n.get("when_route"), dict) else None
         for d in n.get("depends_on") or []:
             eid = f"ctrl_{d}_{n['id']}"
             if eid in seen_e:
                 continue
             seen_e.add(eid)
+            edge_label = "depends"
+            edge_anim = False
+            if gate and gate.get("from") == d:
+                cond_v = gate.get("equals") if gate.get("equals") is not None else ",".join(str(x) for x in (gate.get("in") or []))
+                edge_label = f"se {str(cond_v).upper()}"
+                edge_anim = True
             edges.append(
                 StreamlitFlowEdge(
                     id=eid,
                     source=str(d),
                     target=str(n["id"]),
-                    label="depends",
-                    animated=False,
+                    label=edge_label,
+                    animated=edge_anim,
                     marker_end={"type": "arrowclosed"},
                 )
             )

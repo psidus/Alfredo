@@ -53,3 +53,9 @@ mem0ai>=0.1.0
 
 # Web Push (mobile approval notifications) - optional, degrades gracefully if missing
 pywebpush>=1.14.0
+
+# === Voice (Local STT & Free/Local TTS) ===
+faster-whisper>=1.1.0
+edge-tts>=6.1.12
+piper-tts>=1.2.0
+python-multipart>=0.0.9

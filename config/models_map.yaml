@@ -48,10 +48,14 @@ provider_map:
     - glm-ocr:latest
     - gpt-oss:20b
     - granite3.2-vision:latest
+    - jev:latest
     - llama3.1:latest
+    - nimble:latest
     - qwen2.5:14b
     - qwen3-vl:8b
     - qwen3:14b
+    - tev1:0.8b
+    - tev1:latest
     provider: Ollama
   LMSTUDIO_API_KEY:
     models: []
@@ -71,6 +75,42 @@ capability_catalog:
   #   standard: analysis, summarization, structured research (8-14B params)
   #   advanced: complex planning, structured JSON, DAG design (14B+ / fast cloud)
   #   expert:   multi-step reasoning, code gen, workflow decomposition (top cloud)
+
+  # --- Decision / System One Models (Jev-compatible, non-autoregressive) ---
+  "jev:latest":
+    tier: basic
+    decision_only: true
+    max_context: 16384
+    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
+    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
+
+  "typesafe/jev-1.14":
+    tier: basic
+    decision_only: true
+    max_context: 32768
+    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
+    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
+
+  "tev1:latest":
+    tier: basic
+    decision_only: true
+    max_context: 16384
+    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
+    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
+
+  "tev1:0.8b":
+    tier: basic
+    decision_only: true
+    max_context: 8192
+    strengths: [system_one_decision, binary_noul, routing_choice, speed]
+    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
+
+  "nimble:latest":
+    tier: basic
+    decision_only: true
+    max_context: 16384
+    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
+    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
 
   # --- Local Models (Ollama) ---
   "ministral-3b-latest":

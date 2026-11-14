@@ -3,11 +3,13 @@ import { api, ApiError } from "../api";
 import { clearChat, loadChat, saveChat } from "../storage";
 import type { ChatMessage, ConnectionConfig, WorkflowSuggestion } from "../types";
 import { ErrorBanner, TypingDots, usePolling } from "../components/ui";
+import { VoicePlayerButton, VoiceRecorderButton } from "../components/VoiceControls";
 import { useLanguage } from "../i18n";
 
 interface Props {
   config: ConnectionConfig;
   onStarted: (runId: number, label: string) => void;
+  onMasterModel?: (model: string | null) => void;
 }
 
 function suggestionKeys(suggestion: WorkflowSuggestion): string[] {
@@ -95,12 +97,21 @@ function SuggestionCard({
   );
 }
 
-export function ChatScreen({ config, onStarted }: Props) {
+export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
   const { lang, t } = useLanguage();
   const [messages, setMessages] = useState<ChatMessage[]>(() => loadChat());
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [autoPlayIndex, setAutoPlayIndex] = useState<number | null>(null);
+  const [autoVoice, setAutoVoice] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("alfredo_auto_voice") === "true";
+    } catch {
+      return false;
+    }
+  });
   const [activeRunIds, setActiveRunIds] = useState<number[]>(() => {
     try {
       const stored = localStorage.getItem("alfredo_active_runs");
@@ -182,6 +193,10 @@ export function ChatScreen({ config, onStarted }: Props) {
   const refreshQueue = useCallback(async () => {
     try {
       const status = await api.systemStatus(config);
+      const modelName = status.master_model || status.loaded_model || null;
+      if (modelName) {
+        onMasterModel?.(modelName);
+      }
       const first = status.queue?.waiting?.[0];
       setQueue({
         waiting: status.queue?.length ?? 0,
@@ -191,9 +206,17 @@ export function ChatScreen({ config, onStarted }: Props) {
     } catch {
       // Informational only: never block the chat on the status endpoint.
     }
-  }, [config]);
+  }, [config, onMasterModel]);
 
   usePolling(() => void refreshQueue(), 10000, true);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("alfredo_auto_voice", String(autoVoice));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [autoVoice]);
 
   useEffect(() => {
     saveChat(messages);
@@ -201,22 +224,40 @@ export function ChatScreen({ config, onStarted }: Props) {
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages, busy]);
 
-  const send = async () => {
-    const text = draft.trim();
+  const sendText = async (
+    rawText: string,
+    opts?: { isVoice?: boolean; voiceDuration?: number },
+  ) => {
+    const text = rawText.trim();
     if (!text || busy) return;
     const history = messages;
-    const next: ChatMessage[] = [...messages, { role: "user", content: text }];
+    const next: ChatMessage[] = [
+      ...messages,
+      {
+        role: "user",
+        content: text,
+        isVoice: opts?.isVoice,
+        voiceDuration: opts?.voiceDuration,
+      },
+    ];
+    const shouldAutoSpeak = Boolean(opts?.isVoice || autoVoice);
     setMessages(next);
-    setDraft("");
+    if (!opts?.isVoice) {
+      setDraft("");
+    }
     setBusy(true);
     setError(null);
     try {
       const reply = await api.chat(config, text, history);
+      if (reply.model) {
+        onMasterModel?.(reply.model);
+      }
       if (reply.started_run_id) {
         setActiveRunIds((prev) =>
           prev.includes(reply.started_run_id!) ? prev : [...prev, reply.started_run_id!],
         );
       }
+      const replyIndex = next.length;
       setMessages((prev) => [
         ...prev,
         {
@@ -226,6 +267,9 @@ export function ChatScreen({ config, onStarted }: Props) {
           started_run_id: reply.started_run_id ?? null,
         },
       ]);
+      if (shouldAutoSpeak && (reply.reply || "").trim()) {
+        setAutoPlayIndex(replyIndex);
+      }
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : String(exc));
     } finally {
@@ -233,21 +277,33 @@ export function ChatScreen({ config, onStarted }: Props) {
     }
   };
 
+  const send = () => sendText(draft);
+
   return (
     <div className="screen">
-      <div className="row between">
+      <div className="row between wrap">
         <span className="muted">{t("chatHeaderHint")}</span>
-        <button
-          className="btn small ghost"
-          onClick={() => {
-            clearChat();
-            setMessages([]);
-            setError(null);
-          }}
-          disabled={messages.length === 0 || busy}
-        >
-          {t("newChat")}
-        </button>
+        <div className="row" style={{ gap: "6px" }}>
+          <button
+            type="button"
+            className={`btn small ${autoVoice ? "primary" : "ghost"}`}
+            onClick={() => setAutoVoice((prev) => !prev)}
+          >
+            {autoVoice ? t("voiceAutoOn") : t("voiceAutoOff")}
+          </button>
+          <button
+            className="btn small ghost"
+            onClick={() => {
+              clearChat();
+              setMessages([]);
+              setAutoPlayIndex(null);
+              setError(null);
+            }}
+            disabled={messages.length === 0 || busy}
+          >
+            {t("newChat")}
+          </button>
+        </div>
       </div>
 
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
@@ -286,6 +342,13 @@ export function ChatScreen({ config, onStarted }: Props) {
                     </button>
                   </div>
                 ) : null}
+                <VoicePlayerButton
+                  config={config}
+                  text={message.content}
+                  autoPlay={autoPlayIndex === index}
+                  onAutoPlayed={() => setAutoPlayIndex(null)}
+                  onError={setError}
+                />
               </div>
               <SuggestionCard
                 config={config}
@@ -298,6 +361,12 @@ export function ChatScreen({ config, onStarted }: Props) {
             </div>
           ) : (
             <div key={`${message.role}-${index}`} className={`bubble ${message.role}`}>
+              {message.isVoice ? (
+                <div className="voice-badge">
+                  {t("voiceBadge")}
+                  {message.voiceDuration ? ` · ${Math.round(message.voiceDuration)}s` : ""}
+                </div>
+              ) : null}
               {message.content}
               {message.started_run_id ? (
                 <div style={{ marginTop: "0.5rem" }}>
@@ -311,6 +380,15 @@ export function ChatScreen({ config, onStarted }: Props) {
                   </button>
                 </div>
               ) : null}
+              {message.role === "assistant" ? (
+                <VoicePlayerButton
+                  config={config}
+                  text={message.content}
+                  autoPlay={autoPlayIndex === index}
+                  onAutoPlayed={() => setAutoPlayIndex(null)}
+                  onError={setError}
+                />
+              ) : null}
             </div>
           ),
         )}
@@ -323,21 +401,37 @@ export function ChatScreen({ config, onStarted }: Props) {
       </div>
 
       <div className="chat-input">
-        <textarea
-          rows={1}
-          value={draft}
-          placeholder={t("chatInputPlaceholder")}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void send();
-            }
-          }}
+        {!voiceActive ? (
+          <textarea
+            rows={1}
+            value={draft}
+            placeholder={t("chatInputPlaceholder")}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void send();
+              }
+            }}
+          />
+        ) : null}
+        <VoiceRecorderButton
+          config={config}
+          disabled={busy}
+          onActiveChange={setVoiceActive}
+          onTranscribeToDraft={(text) =>
+            setDraft((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
+          }
+          onSendDirect={(text, durationS) =>
+            void sendText(text, { isVoice: true, voiceDuration: durationS })
+          }
+          onError={setError}
         />
-        <button className="send" onClick={() => void send()} disabled={busy || !draft.trim()}>
-          {t("send")}
-        </button>
+        {!voiceActive ? (
+          <button className="send" onClick={() => void send()} disabled={busy || !draft.trim()}>
+            {t("send")}
+          </button>
+        ) : null}
       </div>
     </div>
   );

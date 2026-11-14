@@ -69,7 +69,9 @@ from core.scientific_scout import (
 from core.node_executor import (
     NodeExecutionError,
     RunState,
+    call_jev_decision_model,
     execute_typed_node,
+    is_jev_decision_model,
     node_is_enabled,
     node_kind,
 )
@@ -79,8 +81,10 @@ from core.workflow_contracts import (
     MODEL_TIER_SIMPLE,
     assemble_workflow_result,
     build_procedure_summary,
+    build_structured_handoff_envelope,
     enforce_node_handoff,
     filter_tool_names_by_profile,
+    format_upstream_handoff_block,
     resolve_model_tier,
     resolve_pydantic_kwargs,
     resolve_tool_profile,
@@ -1207,12 +1211,18 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 completed_nodes.add(n_id)
                 node_outputs[n_id] = task_outputs[str(data["task_id"])]
 
-    # Router decisions persist across restarts (and are needed to skip branches).
+    # Router decisions & skipped branch markers persist across restarts.
     route_choices = {
         key[len("__route__"):]: value
         for key, value in task_outputs.items()
         if isinstance(key, str) and key.startswith("__route__") and isinstance(value, str)
     }
+    skipped_nodes = {
+        key[len("__skipped__"):]
+        for key, value in task_outputs.items()
+        if isinstance(key, str) and key.startswith("__skipped__") and bool(value)
+    }
+    handoff_envelopes = {}
 
     for n_id in completed_nodes:
         data = dag_nodes[n_id]
@@ -1235,23 +1245,86 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     handoffs = []
     completed_order = []
 
-    # --- Typed-node runtime helpers (llm / tool) ------------------------------
+    # --- Typed-node runtime helpers (llm / tool / binary decision router) ---
     _master_local = threading.local()
 
-    def _complete(messages, temperature=0.2, force_json=False):
-        """Single structured completion through the shared MasterAI plumbing."""
-        master = getattr(_master_local, "master", None)
-        if master is None:
-            from core.master_ai import MasterAI
+    def _build_typed_node_completer(model_id=None, tier: str = "default"):
+        """Return a complete(messages, temperature, force_json) bound to model_id or MasterAI default."""
+        cache_key = f"{model_id or ''}:{tier or 'default'}"
 
-            master = MasterAI()
-            _master_local.master = master
-        return master._call_llm_with_retry(
-            model=master._get_model_string(),
-            messages=messages,
-            temperature=temperature,
-            force_json_mode=force_json,
-        )
+        def _completer(messages, temperature=0.2, force_json=False):
+            cache = getattr(_master_local, "masters", None)
+            if cache is None:
+                cache = {}
+                _master_local.masters = cache
+            master = cache.get(cache_key)
+            if master is None:
+                from core.master_ai import MasterAI
+
+                if model_id not in (None, ""):
+                    master = MasterAI(model_id=int(model_id))
+                elif str(tier or "").lower() in ("basic", "simple"):
+                    master = MasterAI(complexity="simple")
+                else:
+                    master = MasterAI()
+                cache[cache_key] = master
+            return master._call_llm_with_retry(
+                model=master._get_model_string(),
+                messages=messages,
+                temperature=temperature,
+                force_json_mode=force_json,
+            )
+
+        return _completer
+
+    def _build_typed_node_decider(step_def):
+        """Return a System One / Jev `decide(payload)` callable when a Jev model/engine is selected."""
+        if not isinstance(step_def, dict) or node_kind(step_def) != "router":
+            return None
+        engine = str(
+            step_def.get("decision_engine") or ("jev" if step_def.get("decision_mode") else "auto")
+        ).strip().lower()
+        if engine == "llm":
+            return None
+
+        mid = step_def.get("model_id")
+        model_rec = None
+        if mid not in (None, "") and db is not None and hasattr(db, "read_model"):
+            try:
+                model_rec = db.read_model(int(mid))
+            except Exception:
+                model_rec = None
+
+        rec_name = str(model_rec.get("model_name") or "").strip() if isinstance(model_rec, dict) else ""
+        rec_is_jev = is_jev_decision_model(rec_name)
+        jev_model = str(step_def.get("jev_model") or "").strip()
+
+        # If user explicitly picked a non-Jev generative DB model and no jev_model preset, use LLM path
+        if isinstance(model_rec, dict) and not rec_is_jev and not jev_model and engine != "jev":
+            return None
+
+        if not (engine == "jev" or jev_model or rec_is_jev):
+            return None
+
+        model_name = rec_name if rec_is_jev else (jev_model or "tev1")
+        provider = str((model_rec or {}).get("provider") or "ollama").strip().lower()
+        if model_name.lower().startswith("typesafe/") and provider in ("", "ollama"):
+            provider = "openrouter"
+        api_base = (model_rec or {}).get("base_url") or None
+
+        def _decider(payload):
+            req_payload = dict(payload or {})
+            if model_name:
+                req_payload["model"] = model_name
+            return call_jev_decision_model(
+                req_payload,
+                provider=provider,
+                api_base=api_base,
+            )
+
+        return _decider
+
+    _complete = _build_typed_node_completer()
 
     def _resolve_tool(name):
         return ALLOWED_TOOLS.get(name)
@@ -1312,20 +1385,20 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             if lower_key in lookup: return lookup[lower_key]
             return match.group(0)
 
+        wired_snapshot = {}
+        if isinstance(step_def, dict):
+            snap = step_def.get("_node_outputs_snapshot")
+            if not isinstance(snap, dict):
+                snap = node_outputs
+            wired_snapshot = resolve_inputs_map_values(
+                step_def.get("inputs_map") or {},
+                node_outputs=snap,
+                run_inputs=current_inputs,
+            )
+
         def apply_interpolation(text: str) -> str:
             if not text: return text
-            # Explicit function-block data wires (inputs_map) take precedence as named ports
-            wired = {}
-            if isinstance(step_def, dict):
-                snap = step_def.get("_node_outputs_snapshot")
-                if not isinstance(snap, dict):
-                    snap = node_outputs
-                wired = resolve_inputs_map_values(
-                    step_def.get("inputs_map") or {},
-                    node_outputs=snap,
-                    run_inputs=current_inputs,
-                )
-            for port, val in wired.items():
+            for port, val in wired_snapshot.items():
                 text = text.replace(f"{{{port}}}", str(val))
             for k, v in current_inputs.items():
                 text = text.replace(f"{{{k}}}", str(v))
@@ -1339,6 +1412,37 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
 
         original_desc = apply_interpolation(task_obj.description)
         original_expected = apply_interpolation(task_obj.expected_output)
+
+        # Build deterministic structured upstream handoff block so models receive extracted
+        # key facts, summaries, and yes/no decisions without guessing memory keys.
+        parent_envelopes = []
+        if isinstance(step_def, dict):
+            snap = step_def.get("_node_outputs_snapshot")
+            if not isinstance(snap, dict):
+                snap = node_outputs
+            for pid in (step_def.get("depends_on") or []):
+                with task_outputs_lock:
+                    env = handoff_envelopes.get(pid)
+                if env is None and snap.get(pid):
+                    p_data = dag_nodes.get(pid) or {}
+                    p_step = p_data.get("step_def") if isinstance(p_data.get("step_def"), dict) else {}
+                    env = build_structured_handoff_envelope(
+                        str(snap.get(pid) or ""),
+                        task_id=p_data.get("task_id"),
+                        task_name=str(p_step.get("name") or (p_step.get("_task_snapshot") or {}).get("name") or pid),
+                        agent_role=str((p_step.get("_task_snapshot") or {}).get("agent_role") or ""),
+                        node_id=str(pid),
+                    )
+                if env is not None:
+                    parent_envelopes.append(env)
+        handoff_contract = step_def.get("handoff_contract") if isinstance(step_def, dict) else None
+        structured_handoff_ctx = format_upstream_handoff_block(
+            parent_envelopes,
+            wired_values=wired_snapshot,
+            handoff_contract=handoff_contract,
+        )
+        if structured_handoff_ctx:
+            original_desc += structured_handoff_ctx
 
         index_table = memory_manager.get_memory_index_table()
         if "EPHEMERAL WORKSPACE MEMORY INDEX" not in index_table:
@@ -1455,6 +1559,7 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
         if filtered_tools is None:
             t_rec_tools = t_rec
             filtered_tools = (t_rec_tools.get("tools") if t_rec_tools else []) or []
+        handoff_contract = step_def.get("handoff_contract") if isinstance(step_def, dict) else None
         handoff = enforce_node_handoff(
             memory_manager,
             run_id=run_id,
@@ -1463,9 +1568,13 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
             agent_role=agent_role,
             task_tools=filtered_tools,
             node_id=node_id,
+            task_name=task_title,
+            handoff_contract=handoff_contract,
         )
         with task_outputs_lock:
             handoffs.append(handoff)
+            if handoff.get("envelope"):
+                handoff_envelopes[node_id or f"task_{task_id}"] = handoff["envelope"]
 
         needs_hitl = bool(t_rec and t_rec.get('human_validation')) or (
             task_id is not None and int(task_id) in human_validation_task_ids
@@ -1656,34 +1765,63 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                 step_def = dict(step_def)
                 step_def["_node_outputs_snapshot"] = outputs_snapshot
 
-            # --- Typed nodes (llm / tool / router): one call, no agent ----------
+            # --- Universal branch gating (when_route & skipped branch propagation) ---
             kind = node_kind(step_def or {})
-            if kind:
-                state = RunState(
+            with task_outputs_lock:
+                gate_state = RunState(
                     run_id=run_id,
                     workflow_id=workflow_id,
                     inputs=dict(inputs or {}),
                     node_outputs=dict(outputs_snapshot),
                     routes=dict(route_choices),
+                    skipped=set(skipped_nodes),
                 )
-                if not node_is_enabled(step_def, state):
-                    logging.info("Node %s skipped: route gate not matched.", n_id)
-                    with task_outputs_lock:
-                        node_outputs[n_id] = ""
+            gate_node = step_def if isinstance(step_def, dict) else {"id": n_id, "depends_on": data.get("depends_on") or []}
+            if not node_is_enabled(gate_node, gate_state):
+                logging.info("⏭️ Node %s skipped: when_route gate or upstream branch inactive.", n_id)
+                with task_outputs_lock:
+                    skipped_nodes.add(n_id)
+                    node_outputs[n_id] = ""
+                    task_outputs[f"__skipped__{n_id}"] = True
+                    if kind:
                         task_outputs[f"__typed__{n_id}"] = ""
-                        completed_order.append(n_id)
-                    return ""
+                    elif data.get("task_id") is not None:
+                        task_outputs.setdefault(str(data["task_id"]), "")
+                    completed_order.append(n_id)
+                    db.update_run(run_id, task_outputs=task_outputs)
+                return ""
 
+            # --- Typed nodes (llm / tool / router): one call, no agent ----------
+            if kind:
+                state = gate_state
                 previous = parent_output
                 parents = [p for p in (step_def.get("depends_on") or []) if p]
                 if parents:
                     previous = state.output_of(parents[-1]) or parent_output
+
+                raw_mid = step_def.get("model_id") if isinstance(step_def, dict) else None
+                fallback_mid = raw_mid
+                if fallback_mid not in (None, "") and db is not None and hasattr(db, "read_model"):
+                    try:
+                        mrec = db.read_model(int(fallback_mid))
+                        if isinstance(mrec, dict) and is_jev_decision_model(mrec.get("model_name")):
+                            # Non-autoregressive Jev models cannot execute fallback chat completions
+                            fallback_mid = None
+                    except Exception:
+                        pass
+
+                node_completer = _build_typed_node_completer(
+                    model_id=fallback_mid,
+                    tier=str(step_def.get("model_tier") or "default") if isinstance(step_def, dict) else "default",
+                )
+                node_decider = _build_typed_node_decider(step_def)
                 try:
                     out = execute_typed_node(
                         kind,
                         step_def,
                         state,
-                        complete=_complete,
+                        complete=node_completer,
+                        decide=node_decider,
                         resolve_tool=_resolve_tool,
                         previous=previous,
                     )
@@ -1694,8 +1832,9 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
                     node_outputs[n_id] = out
                     task_outputs[f"__typed__{n_id}"] = out
                     if kind == "router":
-                        route_choices[n_id] = out
-                        task_outputs[f"__route__{n_id}"] = out
+                        chosen_route = state.route_of(n_id) or out
+                        route_choices[n_id] = chosen_route
+                        task_outputs[f"__route__{n_id}"] = chosen_route
                     completed_order.append(n_id)
                     db.update_run(run_id, task_outputs=task_outputs)
                 logging.info("Typed node %s (%s) completed.", n_id, kind)

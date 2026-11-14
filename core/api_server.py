@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Header, BackgroundTasks, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from core.db_manager import DBManager
@@ -31,6 +31,7 @@ from core.api_models import (
     PushUnsubscribeRequest, ShareFileRequest, ShareFileResponse,
     UploadSessionRequest, UploadSession, UploadChunkStatus, CompleteUploadRequest,
     FileEntry, SystemStatus,
+    VoiceStatusResponse, VoiceTranscriptionResponse, VoiceSynthesizeRequest,
 )
 
 # Setup logging
@@ -123,20 +124,70 @@ async def verify_control(x_control_token: str = Header(default="", alias="X-Cont
 
 _engine_lock = threading.Lock()
 _engine_singleton = None
+_engine_env_key: Optional[tuple] = None
+
+
+def _read_master_env_key() -> tuple:
+    """Read configured Master AI model identifiers from `.env` (or process env)."""
+    try:
+        from dotenv import dotenv_values, find_dotenv
+
+        env_path = find_dotenv() or os.path.join(ROOT_DIR, ".env")
+        vals = dotenv_values(env_path) if env_path and os.path.isfile(env_path) else {}
+        name = (
+            vals.get("MASTER_AI_MODEL_NAME")
+            or os.getenv("MASTER_AI_MODEL_NAME")
+            or ""
+        ).strip().strip('"').strip("'")
+        mid = (
+            vals.get("MASTER_AI_MODEL_ID")
+            or os.getenv("MASTER_AI_MODEL_ID")
+            or ""
+        ).strip().strip('"').strip("'")
+        return (name, mid)
+    except Exception:
+        return (
+            (os.getenv("MASTER_AI_MODEL_NAME") or "").strip(),
+            (os.getenv("MASTER_AI_MODEL_ID") or "").strip(),
+        )
 
 
 def _get_assistant_engine():
-    """Lazily build one shared ``AssistantEngine`` (model discovery is costly)."""
-    global _engine_singleton
-    if _engine_singleton is None:
-        with _engine_lock:
-            if _engine_singleton is None:
-                from core.assistant_engine import AssistantEngine
-                from core.data_manager import DataManager
+    """Lazily build one shared ``AssistantEngine`` (model discovery is costly) and refresh on `.env` change."""
+    global _engine_singleton, _engine_env_key
+    env_key = _read_master_env_key()
+    with _engine_lock:
+        if _engine_singleton is None or env_key != _engine_env_key:
+            from core.assistant_engine import AssistantEngine
+            from core.data_manager import DataManager
 
-                DataManager.load_env()
-                _engine_singleton = AssistantEngine()
+            if _engine_singleton is not None:
+                try:
+                    _engine_singleton.close()
+                except Exception:
+                    pass
+            DataManager.load_env()
+            _engine_singleton = AssistantEngine()
+            _engine_env_key = env_key
     return _engine_singleton
+
+
+def _get_active_master_model() -> Optional[str]:
+    """Return the active Master AI model string without failing when credentials are missing."""
+    try:
+        engine = _get_assistant_engine()
+        return engine.master._get_model_string()
+    except Exception:
+        name, _ = _read_master_env_key()
+        return name or None
+
+
+def _collect_system_status() -> Dict[str, Any]:
+    from core.gpu_gate import system_status
+
+    status = dict(system_status())
+    status["master_model"] = _get_active_master_model()
+    return status
 
 
 def _card_to_dict(card) -> Dict[str, Any]:
@@ -246,9 +297,7 @@ async def health_check():
 )
 async def control_system_status(_: None = Depends(verify_control)):
     """GPU queue, VRAM, profiles and latency metrics (single-flight gate)."""
-    from core.gpu_gate import system_status
-
-    return await run_in_threadpool(system_status)
+    return await run_in_threadpool(_collect_system_status)
 
 
 @app.get("/api/apps/{app_name}/workflows", response_model=List[WorkflowInfo], tags=["Workflows"])
@@ -486,7 +535,17 @@ async def control_assistant_chat(
         except Exception:  # noqa: BLE001 - routing is best effort, chat still answers
             logger.warning("Control API: routing failed (chat continues)", exc_info=True)
 
-    return ChatResponse(reply=reply or "", workflow=suggestion, started_run_id=started_run_id)
+    try:
+        active_model = engine.master._get_model_string()
+    except Exception:
+        active_model = _get_active_master_model()
+
+    return ChatResponse(
+        reply=reply or "",
+        workflow=suggestion,
+        started_run_id=started_run_id,
+        model=active_model,
+    )
 
 
 @app.post("/api/assistant/decide", response_model=DecideResponse, tags=["Control"])
@@ -516,6 +575,89 @@ async def control_assistant_decide(
         inputs=turn.inputs or {},
         missing_inputs=turn.missing_inputs or [],
     )
+
+
+@app.get("/api/voice/status", response_model=VoiceStatusResponse, tags=["Control"])
+async def control_voice_status(_: None = Depends(verify_control)):
+    """Availability and active configuration of STT (audio->text) and TTS (text->audio)."""
+    from core.voice_service import get_voice_status
+
+    return await run_in_threadpool(get_voice_status)
+
+
+@app.post("/api/voice/transcribe", response_model=VoiceTranscriptionResponse, tags=["Control"])
+async def control_voice_transcribe(
+    request: Request,
+    lang: Optional[str] = Query(default=None, description="Language hint ('it', 'en', or 'auto')"),
+    x_audio_filename: str = Header(default="voice.webm", alias="X-Audio-Filename"),
+    _: None = Depends(verify_control),
+):
+    """Transcribe a recorded voice message (raw audio body or multipart/form-data) to text."""
+    from core.voice_service import transcribe_audio_bytes
+
+    content_type = (request.headers.get("content-type") or "").strip()
+    filename = x_audio_filename or "voice.webm"
+    mime_type = content_type
+
+    if "multipart/form-data" in content_type.lower():
+        form = await request.form()
+        upload = form.get("file") or form.get("audio")
+        if upload is None or not hasattr(upload, "read"):
+            raise HTTPException(status_code=400, detail="Missing 'file' field in multipart form")
+        audio_bytes = await upload.read()
+        filename = getattr(upload, "filename", None) or filename
+        mime_type = getattr(upload, "content_type", None) or "audio/webm"
+    else:
+        audio_bytes = await request.body()
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio payload")
+
+    try:
+        result = await run_in_threadpool(
+            partial(
+                transcribe_audio_bytes,
+                audio_bytes,
+                mime_type=mime_type,
+                filename=filename,
+                language=lang,
+            )
+        )
+        return VoiceTranscriptionResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Control API: voice transcription failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"STT error: {exc}")
+
+
+@app.post("/api/voice/synthesize", tags=["Control"])
+async def control_voice_synthesize(
+    request: VoiceSynthesizeRequest, _: None = Depends(verify_control)
+):
+    """Synthesize spoken audio (MP3 or WAV) from a reply text."""
+    from core.voice_service import synthesize_speech
+
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+
+    try:
+        audio_bytes, mime_type = await run_in_threadpool(
+            partial(
+                synthesize_speech,
+                text,
+                lang=request.lang,
+                voice=request.voice,
+                speed=request.speed,
+            )
+        )
+        return Response(content=audio_bytes, media_type=mime_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Control API: voice synthesis failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"TTS error: {exc}")
 
 
 @app.post("/api/runs", response_model=StartRunResponse, tags=["Control"])

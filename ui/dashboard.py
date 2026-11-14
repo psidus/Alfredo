@@ -1110,6 +1110,11 @@ def render_api_vault():
         "LMSTUDIO_API_BASE": "The URL of the LM Studio / Bionic local server (e.g. http://127.0.0.1:1234).",
         "LMSTUDIO_API_KEY": "Credential checked against the LM Studio server (dummy lm-studio is fine locally).",
         "LMSTUDIO_MODELS_DIR": "This computer's GGUF folder (e.g. C:\\Users\\<you>\\.lmstudio\\models).",
+        "ALFREDO_STT_PROVIDER": "Speech-to-Text provider (faster_whisper, openai_compatible, groq).",
+        "ALFREDO_STT_MODEL": "Whisper STT model size (tiny, base, small, medium, large-v3-turbo).",
+        "ALFREDO_TTS_PROVIDER": "Text-to-Speech provider (edge_tts, piper_local, openai_compatible).",
+        "ALFREDO_TTS_VOICE_IT": "Italian TTS neural voice identifier.",
+        "ALFREDO_TTS_VOICE_EN": "English TTS neural voice identifier.",
     }
     
     tab_sys, tab_models = st.tabs(["System Setting", "Load Models"])
@@ -1388,9 +1393,14 @@ def render_api_vault():
         st.subheader("Local Model registry")
         
         # --- Configure Local Provider ---
-        with st.expander("🔌 Configure Local Providers (Ollama / LM Studio)", expanded=False):
+        with st.expander("🔌 Configure Local Providers (Ollama / LM Studio / Voice)", expanded=False):
             env_path = os.path.join(os.getcwd(), '.env')
-            tab_ol, tab_lms, tab_import = st.tabs(["Ollama", "LM Studio / Bionic", "Import GGUF"])
+            tab_ol, tab_lms, tab_import, tab_voice = st.tabs([
+                "Ollama",
+                "LM Studio / Bionic",
+                "Import GGUF",
+                "🎙️ Voice (STT & TTS)",
+            ])
 
             with tab_ol:
                 st.caption(
@@ -1547,6 +1557,174 @@ def render_api_vault():
                             st.rerun()
                         else:
                             st.error(res.get("error"))
+
+            with tab_voice:
+                from core.voice_service import (
+                    EDGE_VOICES_EN,
+                    EDGE_VOICES_IT,
+                    PIPER_VOICE_CATALOG,
+                    WHISPER_MODELS,
+                    get_voice_status,
+                    preload_stt_model,
+                    synthesize_speech,
+                )
+
+                st.info(
+                    "Non serve scaricare manualmente nulla da Ollama o Bionic: "
+                    "**Faster-Whisper** (Audio → Testo, default `small` su CPU `int8`) si scarica "
+                    "automaticamente in `storage/voice_models/whisper/` e lascia il 100% della VRAM "
+                    "libera per Ollama/Bionic. **Edge-TTS** offre voci neurali italiane gratuite "
+                    "senza download, con fallback automatico offline su **Piper ONNX**."
+                )
+
+                vstatus = get_voice_status()
+
+                st.markdown("#### 🎤 Audio → Testo (STT)")
+                stt_col1, stt_col2 = st.columns(2)
+                stt_providers = ["faster_whisper", "openai_compatible", "groq"]
+                cur_stt_prov = vstatus["stt_provider"] if vstatus["stt_provider"] in stt_providers else "faster_whisper"
+                with stt_col1:
+                    sel_stt_provider = st.selectbox(
+                        "Provider STT",
+                        options=stt_providers,
+                        index=stt_providers.index(cur_stt_prov),
+                        key="voice_stt_provider",
+                    )
+                    stt_model_opts = WHISPER_MODELS if sel_stt_provider == "faster_whisper" else [
+                        "whisper-large-v3-turbo", "whisper-1", *WHISPER_MODELS
+                    ]
+                    cur_stt_model = vstatus["stt_model"] if vstatus["stt_model"] in stt_model_opts else stt_model_opts[0]
+                    sel_stt_model = st.selectbox(
+                        "Modello STT",
+                        options=stt_model_opts,
+                        index=stt_model_opts.index(cur_stt_model),
+                        key="voice_stt_model",
+                        help="`small` offre il miglior compromesso velocità/qualità in italiano su CPU.",
+                    )
+                with stt_col2:
+                    devices = ["cpu", "cuda"]
+                    cur_dev = vstatus["stt_device"] if vstatus["stt_device"] in devices else "cpu"
+                    sel_stt_device = st.selectbox(
+                        "Device STT",
+                        options=devices,
+                        index=devices.index(cur_dev),
+                        key="voice_stt_device",
+                        help="Usa `cpu` per non togliere VRAM a Ollama/Bionic.",
+                    )
+                    langs = ["auto", "it", "en"]
+                    cur_lang = vstatus["stt_language"] if vstatus["stt_language"] in langs else "auto"
+                    sel_stt_lang = st.selectbox(
+                        "Lingua predefinita STT",
+                        options=langs,
+                        index=langs.index(cur_lang),
+                        key="voice_stt_lang",
+                    )
+
+                if sel_stt_provider == "openai_compatible":
+                    stt_base_val = os.getenv("ALFREDO_STT_API_BASE") or os.getenv("LMSTUDIO_API_BASE") or "http://127.0.0.1:1234/v1"
+                    stt_key_val = os.getenv("ALFREDO_STT_API_KEY") or os.getenv("LMSTUDIO_API_KEY") or "lm-studio"
+                    new_stt_base = st.text_input("STT Base URL (/v1)", value=stt_base_val, key="voice_stt_base")
+                    new_stt_key = st.text_input("STT API Key", value=stt_key_val, type="password", key="voice_stt_key")
+                else:
+                    new_stt_base = ""
+                    new_stt_key = ""
+
+                st.caption(
+                    f"Stato Faster-Whisper: {'🟢 Installato' if vstatus['stt_available'] else '🔴 Non installato'} · "
+                    f"Cache locale modello `{sel_stt_model}`: {'🟢 Presente' if vstatus['stt_model_cached'] else '🟡 Verrà scaricato al primo uso'}"
+                )
+
+                if st.button("💾 Salva & Verifica Modello STT", key="voice_save_stt_btn"):
+                    safe_set_key(env_path, "ALFREDO_STT_PROVIDER", sel_stt_provider)
+                    safe_set_key(env_path, "ALFREDO_STT_MODEL", sel_stt_model)
+                    safe_set_key(env_path, "ALFREDO_STT_DEVICE", sel_stt_device)
+                    safe_set_key(env_path, "ALFREDO_STT_COMPUTE_TYPE", "int8" if sel_stt_device == "cpu" else "float16")
+                    safe_set_key(env_path, "ALFREDO_STT_LANGUAGE", sel_stt_lang)
+                    if new_stt_base:
+                        safe_set_key(env_path, "ALFREDO_STT_API_BASE", new_stt_base.strip())
+                    if new_stt_key:
+                        safe_set_key(env_path, "ALFREDO_STT_API_KEY", new_stt_key.strip())
+                    with st.spinner("Verifica / download modello STT in corso..."):
+                        res = preload_stt_model()
+                    if res.get("success"):
+                        st.success(res.get("message") or "STT pronto.")
+                    else:
+                        st.error(res.get("error") or "Errore configurazione STT.")
+
+                st.divider()
+                st.markdown("#### 🔊 Testo → Audio (TTS)")
+                tts_col1, tts_col2 = st.columns(2)
+                tts_providers = ["edge_tts", "piper_local", "openai_compatible"]
+                cur_tts_prov = vstatus["tts_provider"] if vstatus["tts_provider"] in tts_providers else "edge_tts"
+                with tts_col1:
+                    sel_tts_provider = st.selectbox(
+                        "Provider TTS",
+                        options=tts_providers,
+                        index=tts_providers.index(cur_tts_prov),
+                        key="voice_tts_provider",
+                    )
+                    piper_opts = list(PIPER_VOICE_CATALOG.keys())
+                    cur_piper = vstatus["tts_piper_model"] if vstatus["tts_piper_model"] in piper_opts else piper_opts[0]
+                    sel_piper_model = st.selectbox(
+                        "Voce Piper Offline (ONNX)",
+                        options=piper_opts,
+                        index=piper_opts.index(cur_piper),
+                        key="voice_tts_piper_model",
+                    )
+                with tts_col2:
+                    cur_vit = vstatus["tts_voice_it"] if vstatus["tts_voice_it"] in EDGE_VOICES_IT else EDGE_VOICES_IT[0]
+                    sel_voice_it = st.selectbox(
+                        "Voce Italiana (Edge-TTS)",
+                        options=EDGE_VOICES_IT,
+                        index=EDGE_VOICES_IT.index(cur_vit),
+                        key="voice_tts_it",
+                    )
+                    cur_ven = vstatus["tts_voice_en"] if vstatus["tts_voice_en"] in EDGE_VOICES_EN else EDGE_VOICES_EN[0]
+                    sel_voice_en = st.selectbox(
+                        "Voce Inglese (Edge-TTS)",
+                        options=EDGE_VOICES_EN,
+                        index=EDGE_VOICES_EN.index(cur_ven),
+                        key="voice_tts_en",
+                    )
+
+                if sel_tts_provider == "openai_compatible":
+                    tts_base_val = os.getenv("ALFREDO_TTS_API_BASE") or os.getenv("LMSTUDIO_API_BASE") or "http://127.0.0.1:1234/v1"
+                    tts_key_val = os.getenv("ALFREDO_TTS_API_KEY") or os.getenv("LMSTUDIO_API_KEY") or "lm-studio"
+                    new_tts_base = st.text_input("TTS Base URL (/v1)", value=tts_base_val, key="voice_tts_base")
+                    new_tts_key = st.text_input("TTS API Key", value=tts_key_val, type="password", key="voice_tts_key")
+                else:
+                    new_tts_base = ""
+                    new_tts_key = ""
+
+                if st.button("💾 Salva Impostazioni TTS", key="voice_save_tts_btn"):
+                    safe_set_key(env_path, "ALFREDO_TTS_PROVIDER", sel_tts_provider)
+                    safe_set_key(env_path, "ALFREDO_TTS_VOICE_IT", sel_voice_it)
+                    safe_set_key(env_path, "ALFREDO_TTS_VOICE_EN", sel_voice_en)
+                    safe_set_key(env_path, "ALFREDO_TTS_PIPER_MODEL", sel_piper_model)
+                    if new_tts_base:
+                        safe_set_key(env_path, "ALFREDO_TTS_API_BASE", new_tts_base.strip())
+                    if new_tts_key:
+                        safe_set_key(env_path, "ALFREDO_TTS_API_KEY", new_tts_key.strip())
+                    st.success("Impostazioni TTS salvate in .env!")
+
+                test_phrase = st.text_input(
+                    "Testo di prova vocale",
+                    value="Ciao! Sono Alfredo, il tuo assistente vocale.",
+                    key="voice_tts_test_phrase",
+                )
+                test_lang = st.radio("Lingua anteprima", ["it", "en"], horizontal=True, key="voice_tts_test_lang")
+                if st.button("🔊 Ascolta Anteprima Voce", key="voice_test_tts_btn"):
+                    # Apply currently selected UI values temporarily in env for instant preview
+                    os.environ["ALFREDO_TTS_PROVIDER"] = sel_tts_provider
+                    os.environ["ALFREDO_TTS_VOICE_IT"] = sel_voice_it
+                    os.environ["ALFREDO_TTS_VOICE_EN"] = sel_voice_en
+                    os.environ["ALFREDO_TTS_PIPER_MODEL"] = sel_piper_model
+                    try:
+                        with st.spinner("Sintesi vocale in corso..."):
+                            audio_bytes, mime_type = synthesize_speech(test_phrase, lang=test_lang)
+                        st.audio(audio_bytes, format=mime_type)
+                    except Exception as exc:
+                        st.error(f"Errore sintesi vocale: {exc}")
         
         # Load model config
         model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
@@ -1753,6 +1931,32 @@ def render_agent_caserma():
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
+
+        # --- 1-Click Archetype Quick-Fill (non-intrusive template loader) ---
+        if not editing_agent:
+            try:
+                from core.team_architect import AGENT_ARCHETYPES
+                arch_keys = list(AGENT_ARCHETYPES.keys())
+                ac1, ac2 = st.columns([2.2, 1.0])
+                with ac1:
+                    picked_arch = st.selectbox(
+                        "⚡ Template Rapido di Ruolo (Archetipo)",
+                        arch_keys,
+                        format_func=lambda k: AGENT_ARCHETYPES[k]["label"],
+                        key="agent_archetype_pick",
+                    )
+                with ac2:
+                    st.write("")
+                    if st.button("📋 Carica Archetipo", use_container_width=True, key="agent_archetype_load"):
+                        tpl = AGENT_ARCHETYPES[picked_arch]
+                        st.session_state.agent_name_input = tpl["name"]
+                        st.session_state.agent_role_input = tpl["role"]
+                        st.session_state.agent_goal_input = tpl["goal"]
+                        st.session_state.agent_backstory_input = tpl["backstory"]
+                        st.toast(f"Archetipo '{tpl['name']}' caricato! Verifica e salva.", icon="⚡")
+                        st.rerun()
+            except Exception:
+                pass
 
         # Sanitize session state keys before rendering widgets to avoid TypeError: bad argument type for built-in operation
         for k in ["agent_name_input", "agent_role_input", "agent_goal_input", "agent_backstory_input"]:
@@ -4424,11 +4628,29 @@ def render_workflow_assembler():
     </script>
     """, unsafe_allow_html=True)
 
+        try:
+            from core.export_tools import EXPORT_TOOL_MAP
+            _arch_exports = list(EXPORT_TOOL_MAP.keys())
+        except ImportError:
+            _arch_exports = ["python", "json", "markdown", "text", "word", "excel"]
+        try:
+            from ui.team_architect_panel import render_ai_team_architect_wizard
+            render_ai_team_architect_wizard(
+                db,
+                available_exports=_arch_exports,
+                sanitize_input=sanitize_input,
+            )
+        except Exception as _arch_err:
+            st.warning(f"AI Team & Workflow Architect non disponibile: {_arch_err}")
+
         tasks = db.read_all_tasks()
         workflows = db.read_all_workflows()
 
-        if not tasks:
-            st.warning("No tasks found. Please create tasks in 'Tab 3: Task Builder' first.")
+        if not tasks and not st.session_state.get("wf_selected_task_ids"):
+            st.info(
+                "Nessun task ancora presente. Usa l'**AI Team & Workflow Architect** qui sopra per "
+                "creare Team, Task e Workflow in 1 click, oppure crea i singoli task nel 'Tab 3: Task Builder'."
+            )
             return
 
         task_id_map = {task['id']: task for task in tasks}

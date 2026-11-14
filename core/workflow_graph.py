@@ -93,13 +93,15 @@ def infer_node_type(step: Any) -> str:
     explicit = (step.get("type") or "").strip().lower()
     if explicit == NODE_TYPE_AGENT:
         return NODE_TYPE_TASK
+    if explicit == "decision":
+        return NODE_TYPE_ROUTER
     if explicit in NODE_TYPES:
         return explicit
     if "tool_name" in step and "task_id" not in step:
         return NODE_TYPE_TOOL
-    if "routes" in step and "task_id" not in step:
+    if ("routes" in step or step.get("decision_mode")) and "task_id" not in step:
         return NODE_TYPE_ROUTER
-    if ("prompt" in step or "system_prompt" in step) and "task_id" not in step:
+    if ("prompt" in step or "system_prompt" in step or "question" in step) and "task_id" not in step:
         return NODE_TYPE_LLM
     if "task_ids" in step and "task_id" not in step:
         return NODE_TYPE_BATCH
@@ -143,8 +145,15 @@ def normalize_node(step: Any, index: int = 0, prev_id: Optional[str] = None) -> 
     if not isinstance(node["inputs_map"], dict):
         node["inputs_map"] = {}
 
+    raw_type = str(step.get("type") or "").strip().lower()
     ntype = infer_node_type(node)
     node["type"] = ntype
+
+    if node.get("model_id") not in (None, ""):
+        try:
+            node["model_id"] = int(node["model_id"])
+        except (TypeError, ValueError):
+            node.pop("model_id", None)
 
     if ntype == NODE_TYPE_BATCH:
         node.setdefault("task_ids", [])
@@ -217,13 +226,43 @@ def normalize_node(step: Any, index: int = 0, prev_id: Optional[str] = None) -> 
             node["tool_args"] = {}
         node.setdefault("append_previous", False)
     elif ntype == NODE_TYPE_ROUTER:
+        is_decision = bool(node.get("decision_mode")) or raw_type == "decision"
         if not isinstance(node.get("routes"), list):
             node["routes"] = list(node.get("routes") or [])
         node["routes"] = [str(r) for r in node["routes"] if str(r).strip()]
+        if is_decision:
+            node["decision_mode"] = True
+            if not node["routes"]:
+                node["routes"] = ["yes", "no"]
+            q = str(node.get("question") or node.get("prompt") or "").strip()
+            node["question"] = q
+            node["prompt"] = q
+            if not node.get("default_route"):
+                node["default_route"] = "no" if "no" in node["routes"] else node["routes"][0]
+            if node.get("model_tier") in (None, "", "default"):
+                node["model_tier"] = "basic"
+
+        engine = str(node.get("decision_engine") or ("jev" if is_decision else "auto")).strip().lower()
+        node["decision_engine"] = engine if engine in ("auto", "jev", "llm") else ("jev" if is_decision else "auto")
+
+        prim = str(node.get("decision_primitive") or ("noul" if is_decision else "choice")).strip().lower()
+        node["decision_primitive"] = prim if prim in ("noul", "choice", "score") else ("noul" if is_decision else "choice")
+
+        try:
+            thr = float(0.5 if node.get("threshold") in (None, "") else node.get("threshold"))
+        except (TypeError, ValueError):
+            thr = 0.5
+        node["threshold"] = max(0.0, min(1.0, thr))
+
+        if node.get("jev_model") not in (None, ""):
+            node["jev_model"] = str(node["jev_model"]).strip()
+        elif "jev_model" in node:
+            node.pop("jev_model", None)
+
         if not isinstance(node.get("rules"), list):
             node["rules"] = []
         mode = str(node.get("router_mode") or "auto").strip().lower()
-        node["router_mode"] = mode if mode in ("auto", "rules", "llm") else "auto"
+        node["router_mode"] = mode if mode in ("auto", "rules", "llm", "jev") else "auto"
         node.setdefault("default_route", node["routes"][0] if node["routes"] else "")
     # task: task_id may be missing if orphaned
 
@@ -936,32 +975,58 @@ def desugar_graph_for_runtime(
 
 
 def extract_output_key(output: str, key: str) -> str:
-    """Pull a field from JSON output or return full text if key empty / not found."""
+    """Pull a field from JSON output (or structured handoff envelope), returning full text if absent."""
     if not key:
         return output or ""
     text = output or ""
+    data: Any = None
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
-        # try embedded JSON object
         try:
             start = text.find("{")
             end = text.rfind("}")
             if start >= 0 and end > start:
                 data = json.loads(text[start : end + 1])
-            else:
-                return text
         except Exception:
-            return text
+            data = None
+
     if isinstance(data, dict):
         if key in data:
             val = data[key]
             return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
-        # case-insensitive
         lower = {str(k).lower(): v for k, v in data.items()}
         if key.lower() in lower:
             val = lower[key.lower()]
             return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        # Support Jev / System One nested answers payload
+        answers = data.get("answers")
+        if isinstance(answers, dict) and answers:
+            dec_ans = answers.get("decision")
+            if not isinstance(dec_ans, dict):
+                dec_ans = next((v for v in answers.values() if isinstance(v, dict)), None)
+            if isinstance(dec_ans, dict):
+                lower_ans = {str(k).lower(): v for k, v in dec_ans.items()}
+                if key.lower() in lower_ans:
+                    val = lower_ans[key.lower()]
+                    return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+
+    norm_key = key.strip().lower()
+    if norm_key in ("summary", "key_facts", "decision", "reason") or norm_key.startswith("structured_data."):
+        from core.workflow_contracts import build_structured_handoff_envelope
+
+        env = build_structured_handoff_envelope(text)
+        if norm_key.startswith("structured_data."):
+            subk = key.split(".", 1)[1]
+            sdata = env.get("structured_data") or {}
+            if isinstance(sdata, dict) and subk in sdata:
+                val = sdata[subk]
+                return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        else:
+            val = env.get(norm_key)
+            if val not in (None, "", []):
+                return val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+
     return text
 
 
