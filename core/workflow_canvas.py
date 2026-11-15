@@ -495,7 +495,7 @@ def node_card_content(
         cond_val = gate.get("equals") if gate.get("equals") is not None else ", ".join(str(x) for x in (gate.get("in") or []))
         branch_pill = (
             f"<div style='font-size:10px;background:rgba(0,0,0,0.22);padding:2px 5px;"
-            f"border-radius:4px;margin:2px 0'>↳ Se <b>{src}</b> == <b>{html.escape(str(cond_val).upper())}</b></div>"
+            f"border-radius:4px;margin:2px 0'>↳ If <b>{src}</b> == <b>{html.escape(str(cond_val).upper())}</b></div>"
         )
 
     if ntype == NODE_TYPE_LEVEL:
@@ -560,8 +560,8 @@ def node_card_content(
         routes = [str(r) for r in (node.get("routes") or [])]
         is_binary = bool(node.get("decision_mode")) or {r.strip().lower() for r in routes} == {"yes", "no"}
         if is_binary:
-            q_preview = html.escape(str(node.get("question") or node.get("prompt") or "Valutazione Sì/No")[:85])
-            title_lbl = html.escape(str(node.get("name") or "Decision (Sì/No)"))
+            q_preview = html.escape(str(node.get("question") or node.get("prompt") or "Yes/No Evaluation")[:85])
+            title_lbl = html.escape(str(node.get("name") or "Decision (Yes/No)"))
             engine = str(node.get("decision_engine") or "jev").strip().lower()
             prim = str(node.get("decision_primitive") or "noul").strip().upper()
             try:
@@ -573,7 +573,7 @@ def node_card_content(
                 hdr = f"⚖️ JEV ({prim} ≥ {thr:.2f})"
                 model_tag = f" · {jev_name}" if jev_name else (f" · M#{node['model_id']}" if node.get("model_id") else "")
             else:
-                hdr = "⚖️ DECISION Sì/No"
+                hdr = "⚖️ DECISION Yes/No"
                 model_tag = f" · M#{node['model_id']}" if node.get("model_id") else ""
             return (
                 f"<div style='overflow:hidden;word-break:break-word'>{band}"
@@ -786,7 +786,7 @@ def graph_to_flow_state(
             edge_anim = False
             if gate and gate.get("from") == d:
                 cond_v = gate.get("equals") if gate.get("equals") is not None else ",".join(str(x) for x in (gate.get("in") or []))
-                edge_label = f"se {str(cond_v).upper()}"
+                edge_label = f"if {str(cond_v).upper()}"
                 edge_anim = True
             edges.append(
                 StreamlitFlowEdge(

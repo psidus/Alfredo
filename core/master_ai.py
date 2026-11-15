@@ -570,24 +570,33 @@ class MasterAI:
     or execute tools itself. It is strictly a read-only router and intent parser.
     """
 
-    def __init__(self, model_id: Optional[int] = None, complexity: str = "simple"):
-        self.db_manager = DBManager()
+    def __init__(self, model_id: Optional[int] = None, complexity: str = "simple", db_manager: Optional[Any] = None):
+        self.db_manager = db_manager if db_manager is not None else DBManager()
         self.data_manager = DataManager()
         self.llm_client = None
         
-        # Load from .env if model_id is not explicitly provided
+        # Load from env / .env if model_id is not explicitly provided
         if model_id is None:
             try:
                 from dotenv import dotenv_values, find_dotenv
                 env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
                 current_env = dotenv_values(env_path)
-                env_model_name = (current_env.get("MASTER_AI_MODEL_NAME") or "").strip().strip('"').strip("'")
+                env_model_name = ""
+                if "MASTER_AI_MODEL_NAME" in os.environ:
+                    env_model_name = (os.environ.get("MASTER_AI_MODEL_NAME") or "").strip().strip('"').strip("'")
+                elif "MASTER_AI_MODEL_ID" not in os.environ:
+                    env_model_name = (current_env.get("MASTER_AI_MODEL_NAME") or "").strip().strip('"').strip("'")
                 if env_model_name:
                     model_data = self.db_manager.read_model_by_name(env_model_name)
                     if model_data:
                         model_id = model_data['id']
                 if model_id is None:
-                    env_model_id = (current_env.get("MASTER_AI_MODEL_ID") or "").strip().strip('"').strip("'")
+                    env_model_id = (
+                        os.environ.get("MASTER_AI_MODEL_ID")
+                        if "MASTER_AI_MODEL_ID" in os.environ
+                        else current_env.get("MASTER_AI_MODEL_ID")
+                    ) or ""
+                    env_model_id = env_model_id.strip().strip('"').strip("'")
                     if env_model_id:
                         model_id = int(env_model_id)
             except Exception as e:
@@ -602,12 +611,30 @@ class MasterAI:
                 "ollama", "lmstudio", "lm_studio", "bionic", "vllm", "llama.cpp"
             )
 
+        def _is_decision_only_rec(m: dict) -> bool:
+            if not m:
+                return False
+            tier_l = str(m.get("capability_tier") or "").strip().lower()
+            if tier_l in ("decision", "jev", "system_one", "systemone"):
+                return True
+            name_l = str(m.get("model_name") or "").strip().lower()
+            if any(tok in name_l for tok in ("tev1", "jev", "systemone", "system_one", "system-one")):
+                return True
+            try:
+                from core.node_executor import is_jev_decision_model
+                if is_jev_decision_model(name_l):
+                    return True
+            except Exception:
+                pass
+            return False
+
         all_models = []
         try:
             all_models = self.db_manager.read_all_models() or []
         except Exception as e:
             logger.warning(f"Could not list models for MasterAI defaults: {e}")
-        local_models = [m for m in all_models if _is_local_record(m)]
+        gen_all_models = [m for m in all_models if not _is_decision_only_rec(m)]
+        local_models = [m for m in gen_all_models if _is_local_record(m)]
 
         # Cloud defaults are used ONLY when no local/configured model is available.
         if complexity == "complex":
@@ -625,39 +652,88 @@ class MasterAI:
                 "gemini/gemini-3.5-flash",
             ]
         self.is_local = False
+        self.model_id = None
 
+        def _normalize_provider(prov: str) -> str:
+            p = (prov or "gemini").strip().lower()
+            provider_mapping = {
+                'google': 'gemini',
+                'mistralai': 'mistral',
+                'bionic': 'lmstudio',
+                'lm_studio': 'lmstudio',
+                'lm studio': 'lmstudio',
+            }
+            return provider_mapping.get(p, p)
+
+        def _apply_db_model(m_rec: dict) -> None:
+            self.model_id = m_rec.get('id')
+            self.model_name = m_rec['model_name']
+            self.model_provider = _normalize_provider(m_rec.get('provider', 'gemini'))
+            if self.model_provider == 'gemini' and self.model_name.startswith('models/'):
+                self.model_name = self.model_name.replace('models/', '', 1)
+            self.is_local = _is_local_record(m_rec)
+
+        def _pick_best_db_generative_model() -> Optional[dict]:
+            if local_models:
+                return local_models[0]
+            if gen_all_models:
+                tier_prio = {"advanced": 0, "expert": 0, "standard": 1, "default": 1, "basic": 2, "simple": 2}
+                ordered = sorted(
+                    gen_all_models,
+                    key=lambda m: (
+                        tier_prio.get(str(m.get("capability_tier") or "standard").strip().lower(), 1),
+                        int(m.get("id") or 0),
+                    ),
+                )
+                return ordered[0]
+            return None
+
+        resolved_from_db = False
         if model_id:
             model_data = self.db_manager.read_model(model_id)
             if model_data:
-                self.model_name = model_data['model_name']
-                self.model_provider = model_data['provider'].lower()
-                
-                provider_mapping = {
-                    'google': 'gemini',
-                    'mistralai': 'mistral',
-                    'bionic': 'lmstudio',
-                    'lm_studio': 'lmstudio',
-                    'lm studio': 'lmstudio',
-                }
-                self.model_provider = provider_mapping.get(self.model_provider, self.model_provider)
-
-                if self.model_provider == 'gemini' and self.model_name.startswith('models/'):
-                    self.model_name = self.model_name.replace('models/', '')
-                
-                self.is_local = _is_local_record(model_data)
+                _apply_db_model(model_data)
+                resolved_from_db = True
             else:
-                logger.warning(f"Model ID {model_id} not found in DB. Using default model {self.model_name}.")
-        elif local_models:
-            chosen = local_models[0]
-            self.model_name = chosen["model_name"]
-            self.model_provider = str(chosen.get("provider") or "ollama").lower()
-            self.is_local = True
-            logger.info(
-                f"No Master AI model configured; preferring local model "
-                f"{self.model_provider}/{self.model_name} over Gemini."
-            )
+                fallback_rec = _pick_best_db_generative_model()
+                if fallback_rec:
+                    _apply_db_model(fallback_rec)
+                    resolved_from_db = True
+                    logger.warning(
+                        f"Model ID {model_id} not found in DB. Falling back to registered DB model "
+                        f"{self.model_provider}/{self.model_name} (id={fallback_rec.get('id')})."
+                    )
+                else:
+                    logger.warning(f"Model ID {model_id} not found in DB. Using default model {self.model_name}.")
         else:
-            logger.info(f"No model_id provided for MasterAI. Using default model {self.model_name}.")
+            fallback_rec = _pick_best_db_generative_model()
+            if fallback_rec:
+                _apply_db_model(fallback_rec)
+                resolved_from_db = True
+                logger.info(
+                    f"No Master AI model configured; selecting registered DB model "
+                    f"{self.model_provider}/{self.model_name} (id={fallback_rec.get('id')})."
+                )
+            else:
+                logger.info(f"No model_id provided for MasterAI. Using default model {self.model_name}.")
+
+        if resolved_from_db and not self.is_local and gen_all_models:
+            primary_str = f"{self.model_provider}/{self.model_name}"
+            cloud_fallbacks = []
+            for m in gen_all_models:
+                if _is_local_record(m):
+                    continue
+                prov = _normalize_provider(m.get("provider", "gemini"))
+                mname = m["model_name"]
+                if prov == "gemini" and mname.startswith("models/"):
+                    mname = mname.replace("models/", "", 1)
+                cand = f"{prov}/{mname}"
+                if cand != primary_str and cand not in cloud_fallbacks:
+                    cloud_fallbacks.append(cand)
+            for cand in self.fallback_chain:
+                if cand != primary_str and cand not in cloud_fallbacks:
+                    cloud_fallbacks.append(cand)
+            self.fallback_chain = cloud_fallbacks[:3]
 
         # Local runtimes must NEVER fall back to Gemini (high-demand 503s).
         if self.is_local or self.model_provider in (

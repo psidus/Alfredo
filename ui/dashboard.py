@@ -262,7 +262,7 @@ def render_knowledge_base():
         st.success(st.session_state.vdb_success_msg)
         del st.session_state.vdb_success_msg
     
-    col_list, col_main = st.columns([1, 2.5])
+    col_list, col_main = st.columns([1.35, 2.15])
     
     with col_list:
         st.subheader("Existing Databases")
@@ -273,59 +273,161 @@ def render_knowledge_base():
         if not vector_dbs:
             st.info("No databases created yet.")
         else:
-            # Display cards in a 2-column grid
-            grid_cols = st.columns(2)
-            for i, vdb in enumerate(vector_dbs):
+            st.markdown(
+                """
+                <style>
+                [class*="st-key-vdb_card_"] {
+                    padding: 0.65rem 0.85rem !important;
+                    border-radius: 8px !important;
+                    margin-bottom: 0.45rem !important;
+                }
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] {
+                    gap: 0.45rem !important;
+                    align-items: center !important;
+                    flex-wrap: nowrap !important;
+                }
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > div:first-child,
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
+                    flex: 1 1 auto !important;
+                    min-width: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > div:not(:first-child),
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:not(:first-child) {
+                    flex: 0 0 1.55rem !important;
+                    width: 1.55rem !important;
+                    min-width: 1.55rem !important;
+                    max-width: 1.55rem !important;
+                    display: flex !important;
+                    justify-content: center !important;
+                    align-items: center !important;
+                }
+                [class*="st-key-vdb_card_"] .vdb-card-title {
+                    font-weight: 600;
+                    font-size: 0.92rem;
+                    line-height: 1.35;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    margin: 0;
+                }
+                [class*="st-key-vdb_card_"] .stButton {
+                    display: flex !important;
+                    justify-content: center !important;
+                    align-items: center !important;
+                    width: 1.55rem !important;
+                    height: 1.55rem !important;
+                    min-height: 1.55rem !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] .stButton > button {
+                    width: 1.55rem !important;
+                    min-width: 1.55rem !important;
+                    max-width: 1.55rem !important;
+                    height: 1.55rem !important;
+                    min-height: 1.55rem !important;
+                    max-height: 1.55rem !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    gap: 0 !important;
+                    line-height: 1 !important;
+                    border-radius: 0.3rem !important;
+                    box-sizing: border-box !important;
+                    overflow: hidden !important;
+                }
+                [class*="st-key-vdb_card_"] .stButton > button [data-testid="stIconMaterial"],
+                [class*="st-key-vdb_card_"] .stButton > button span {
+                    font-size: 0.82rem !important;
+                    line-height: 1 !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] [class*="st-key-toggle_vdb_"] button [data-testid="stIconMaterial"],
+                [class*="st-key-vdb_card_"] [class*="st-key-toggle_vdb_"] button span {
+                    font-size: 0.95rem !important;
+                }
+                [class*="st-key-vdb_card_"] .stButton > button [data-testid="stMarkdownContainer"] {
+                    display: none !important;
+                }
+                [class*="st-key-vdb_card_"] hr {
+                    margin: 0.5rem 0 0.35rem 0 !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+            for vdb in vector_dbs:
                 folder_exists = os.path.isdir(vdb['path'])
-                with grid_cols[i % 2]:
-                    with st.container(height=350, border=True):
-                        short_name = vdb['name'][:25] + "..." if len(vdb['name']) > 25 else vdb['name']
-                        if not folder_exists:
-                            st.markdown(f"**{short_name}** ⚠️")
-                            st.caption("Missing on disk — folder was deleted externally.")
-                        else:
-                            # Count structured CSVs if present
-                            structured_dir = os.path.join(vdb['path'], "structured")
-                            csv_count = len([f for f in os.listdir(structured_dir) if f.endswith('.csv')]) if os.path.isdir(structured_dir) else 0
-                            label = f"**{short_name}**"
-                            if csv_count:
-                                label += f" 📊 ({csv_count})"
-                            st.markdown(label)
-                        
-                        if folder_exists:
-                            db_config = vm.get_database_config(vdb['path'])
-                            if db_config.get('use_intelligent_chunking', False):
-                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\n🧠 **Intelligent Markdown Chunking** Enabled")
-                            else:
-                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
-                        else:
-                            st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
-                            
-                        if st.button("Delete", key=f"del_vdb_{vdb['id']}", type="primary", use_container_width=True):
+                exp_key = f"vdb_expanded_{vdb['id']}"
+                is_expanded = bool(st.session_state.get(exp_key, False))
+
+                csv_count = 0
+                if folder_exists:
+                    structured_dir = os.path.join(vdb['path'], "structured")
+                    if os.path.isdir(structured_dir):
+                        csv_count = len([f for f in os.listdir(structured_dir) if f.endswith('.csv')])
+
+                suffix = " ⚠️" if not folder_exists else (f" 📊 ({csv_count})" if csv_count else "")
+                title_html = f'<div class="vdb-card-title" title="{html.escape(str(vdb["name"]))}">{html.escape(str(vdb["name"]))}{suffix}</div>'
+
+                with st.container(key=f"vdb_card_{vdb['id']}", border=True):
+                    c_title, c_manage, c_query, c_del, c_toggle = st.columns(
+                        [5.0, 0.7, 0.7, 0.7, 0.7],
+                        vertical_alignment="center",
+                        gap="small",
+                    )
+                    with c_title:
+                        st.markdown(title_html, unsafe_allow_html=True)
+                    with c_manage:
+                        if st.button("", icon=":material/folder_open:", key=f"manage_vdb_{vdb['id']}", help="Manage Files", disabled=not folder_exists):
+                            st.session_state.manage_vdb = vdb
+                            if "query_vdb" in st.session_state:
+                                del st.session_state.query_vdb
+                            st.rerun()
+                    with c_query:
+                        if st.button("", icon=":material/search:", key=f"query_vdb_{vdb['id']}", help="Query Database", disabled=not folder_exists):
+                            st.session_state.query_vdb = vdb
+                            if "manage_vdb" in st.session_state:
+                                del st.session_state.manage_vdb
+                            st.rerun()
+                    with c_del:
+                        if st.button("", icon=":material/delete:", key=f"del_vdb_{vdb['id']}", type="primary", help="Delete Database"):
                             if folder_exists:
                                 vm.delete_database(vdb['name'])
                             db.delete_vector_db(vdb['id'])
-                            
+
                             # Close the modal/query if the deleted database is currently open
                             if "manage_vdb" in st.session_state and st.session_state.manage_vdb['id'] == vdb['id']:
                                 del st.session_state.manage_vdb
                             if "query_vdb" in st.session_state and st.session_state.query_vdb['id'] == vdb['id']:
                                 del st.session_state.query_vdb
-                                
+
                             st.toast(f"Database {vdb['name']} removed", icon="🗑️")
                             st.rerun()
-
-                        if folder_exists and st.button("Manage Files", key=f"manage_vdb_{vdb['id']}", use_container_width=True):
-                            st.session_state.manage_vdb = vdb
-                            if "query_vdb" in st.session_state:
-                                del st.session_state.query_vdb
+                    with c_toggle:
+                        if st.button(
+                            "",
+                            icon=":material/keyboard_arrow_up:" if is_expanded else ":material/keyboard_arrow_down:",
+                            key=f"toggle_vdb_{vdb['id']}",
+                            help="Collapse details" if is_expanded else "Expand details",
+                        ):
+                            st.session_state[exp_key] = not is_expanded
                             st.rerun()
 
-                        if folder_exists and st.button("Query", key=f"query_vdb_{vdb['id']}", use_container_width=True):
-                            st.session_state.query_vdb = vdb
-                            if "manage_vdb" in st.session_state:
-                                del st.session_state.manage_vdb
-                            st.rerun()
+                    if is_expanded:
+                        st.divider()
+                        if not folder_exists:
+                            st.caption("Missing on disk — folder was deleted externally.")
+                            st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**")
+                        else:
+                            db_config = vm.get_database_config(vdb['path'])
+                            if db_config.get('use_intelligent_chunking', False):
+                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\n🧠 **Intelligent Markdown Chunking** Enabled")
+                            else:
+                                st.caption(f"Provider: **{vdb['provider']}** | Model: **{vdb['model_name']}**\n\nChunk Size: {db_config.get('chunk_size', 'N/A')} | Overlap: {db_config.get('chunk_overlap', 'N/A')}")
 
         # --- Auto-Discovery: Detect manually added DB folders not in metadata ---
         registered_names = {vdb['name'] for vdb in vector_dbs}
@@ -1264,12 +1366,22 @@ def render_api_vault():
         st.subheader("LLM Provider API Keys")
         st.markdown("Monitor and manage API keys for AI models.")
         
+        existing_db_models = db.read_all_models() or []
+        has_ollama_config = bool(
+            (current_env.get("OLLAMA_API_BASE") or os.getenv("OLLAMA_API_BASE", "")).strip()
+        ) or any(str(m.get("provider") or "").lower() == "ollama" for m in existing_db_models)
+
         col1, col2 = st.columns(2)
         for i, key in enumerate(llm_keys):
             is_set = key in current_env and bool(current_env[key].strip())
+            extra_note = ""
+            if key == "OLLAMA_API_KEY" and has_ollama_config:
+                if not is_set:
+                    extra_note = " (Local Base URL)"
+                is_set = True
             status_icon = "🟢" if is_set else "🔴"
             with (col1 if i % 2 == 0 else col2):
-                st.markdown(f"{status_icon} **{key}**")
+                st.markdown(f"{status_icon} **{key}**{extra_note}")
                 
         st.divider()
                 
@@ -1279,13 +1391,55 @@ def render_api_vault():
             "For **Ollama**, do not paste the URL here as a key — use **Configure Local Providers** below, "
             "or paste `http://192.168.178.105:11434` and Alfredo will save it as Base URL with an empty key."
         )
-        form_col1, form_col2 = st.columns(2)
-        with form_col1:
-            selected_key = st.selectbox("Select Key", options=["Custom..."] + suggested_keys)
-            custom_key = st.text_input("Custom Key Name (if selected)", placeholder="e.g. MIO_MODELLO_KEY")
-        with form_col2:
-            key_value = st.text_input("API Key Value", type="password", placeholder="Enter key here...")
-            
+        st.markdown(
+            """
+            <style>
+            .st-key-cloud_models_table [data-testid="stHorizontalBlock"],
+            .st-key-local_models_table [data-testid="stHorizontalBlock"] {
+                border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+                padding: 0.45rem 0;
+                margin: 0 !important;
+                align-items: center !important;
+            }
+            .st-key-cloud_models_table [data-testid="stLayoutWrapper"]:last-of-type [data-testid="stHorizontalBlock"],
+            .st-key-local_models_table [data-testid="stLayoutWrapper"]:last-of-type [data-testid="stHorizontalBlock"] {
+                border-bottom: none;
+                padding-bottom: 0.1rem;
+            }
+            .st-key-cloud_models_table [data-testid="stMarkdownContainer"] p,
+            .st-key-local_models_table [data-testid="stMarkdownContainer"] p {
+                margin-bottom: 0 !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="cloud_models_table", border=True):
+            cm_r1_l, cm_r1_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            cm_r1_l.markdown("**Select Key**")
+            selected_key = cm_r1_i.selectbox(
+                "Select Key",
+                options=["Custom..."] + suggested_keys,
+                label_visibility="collapsed",
+            )
+
+            cm_r2_l, cm_r2_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            cm_r2_l.markdown("**Custom Key Name (if selected)**")
+            custom_key = cm_r2_i.text_input(
+                "Custom Key Name (if selected)",
+                placeholder="e.g. MIO_MODELLO_KEY",
+                label_visibility="collapsed",
+            )
+
+            cm_r3_l, cm_r3_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            cm_r3_l.markdown("**API Key Value**")
+            key_value = cm_r3_i.text_input(
+                "API Key Value",
+                type="password",
+                placeholder="Enter key here...",
+                label_visibility="collapsed",
+            )
+
         submitted_key = st.button("Save to .env", type="primary", key="save_cloud_model_btn")
         if submitted_key:
             final_key_name = custom_key.strip() if selected_key == "Custom..." else selected_key
@@ -1404,35 +1558,56 @@ def render_api_vault():
 
             with tab_ol:
                 st.caption(
-                    "Ollama on this PC is reached at **http://192.168.178.105:11434** — that is the Base URL, not an API key. "
-                    "Leave **Ollama API Key empty**. Put the URL only in **Ollama Base URL**, then Connect."
+                    "Ollama uses a **Base URL** (e.g., `http://localhost:11434` on this machine or "
+                    "`http://host.docker.internal:11434` from Docker) rather than an API key. "
+                    "Leave **Ollama API Key** empty unless your endpoint requires a bearer token."
                 )
                 current_url = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
                 current_key = os.getenv("OLLAMA_API_KEY", "")
 
-                new_url = st.text_input("Ollama Base URL", value=current_url, help="The IP and port of your Ollama server (e.g., http://192.168.178.105:11434/). From Docker use http://host.docker.internal:11434")
+                new_url = st.text_input("Ollama Base URL", value=current_url, help="The IP and port of your Ollama server (e.g., http://localhost:11434). From Docker use http://host.docker.internal:11434")
                 new_key = st.text_input("Ollama API Key (Optional)", value=current_key, type="password")
 
-                if st.button("Connect & Refresh Ollama Models"):
-                    safe_set_key(env_path, "OLLAMA_API_BASE", new_url)
-                    safe_set_key(env_path, "OLLAMA_API_KEY", new_key)
-                    from core.api_verifier import _fetch_ollama
-                    res = _fetch_ollama(api_key=new_key, base_url_override=new_url)
-                    if res.get("success"):
-                        added = sync_fetched_local_models(
-                            db, "Ollama", res.get("chat_models", []),
-                            res.get("chat_models_detailed", []), env_var_name="",
-                        )
-                        st.success(
-                            f"Ollama verified at {new_url}. "
-                            f"Found {len(res.get('chat_models', []))} models"
-                            + (f", {added} added to registry." if added else ".")
-                        )
+                ol_b1, ol_b2 = st.columns(2)
+                with ol_b1:
+                    if st.button("Connect & Refresh Ollama Models", use_container_width=True):
+                        safe_set_key(env_path, "OLLAMA_API_BASE", new_url)
+                        safe_set_key(env_path, "OLLAMA_API_KEY", new_key)
+                        from core.api_verifier import _fetch_ollama
+                        res = _fetch_ollama(api_key=new_key, base_url_override=new_url)
+                        if res.get("success"):
+                            resolved_url = res.get("resolved_base_url") or new_url
+                            if not res.get("offline_manifest_fallback") and resolved_url.rstrip("/") != (new_url or "").strip().rstrip("/"):
+                                safe_set_key(env_path, "OLLAMA_API_BASE", resolved_url)
+                            added = sync_fetched_local_models(
+                                db, "Ollama", res.get("chat_models", []),
+                                res.get("chat_models_detailed", []), env_var_name="",
+                            )
+                            if res.get("warning"):
+                                st.warning(res["warning"])
+                            st.success(
+                                f"Ollama verified at {resolved_url}. "
+                                f"Found {len(res.get('chat_models', []))} models"
+                                + (f", {added} added to registry." if added else ".")
+                            )
+                            import time
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(f"Ollama credential/URL check failed: {res.get('error')}")
+                with ol_b2:
+                    if st.button("📥 Sync Local Models from Config (models_map.yaml)", use_container_width=True):
+                        model_map_path = os.path.join(os.getcwd(), "config", "models_map.yaml")
+                        model_cfg = DataManager.load_yaml(model_map_path) or {}
+                        cfg_ol_models = list((model_cfg.get("provider_map") or {}).get("OLLAMA_API_KEY", {}).get("models", []) or [])
+                        for lm in (model_cfg.get("local_models") or []):
+                            if lm not in cfg_ol_models:
+                                cfg_ol_models.append(lm)
+                        added = sync_fetched_local_models(db, "Ollama", cfg_ol_models, [], env_var_name="")
+                        st.success(f"Synced {len(cfg_ol_models)} configured local Ollama models ({added} newly registered in DB).")
                         import time
                         time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error(f"Ollama credential/URL check failed: {res.get('error')}")
 
             with tab_lms:
                 st.caption(
@@ -1728,17 +1903,28 @@ def render_api_vault():
         
         # Load model config
         model_map_path = os.path.join(os.getcwd(), 'config', 'models_map.yaml')
-        model_config = DataManager.load_yaml(model_map_path)
+        model_config = DataManager.load_yaml(model_map_path) or {}
         PROVIDER_MAP = model_config.get('provider_map', {})
-        LOCAL_MODELS = model_config.get('local_models', [])
+        config_ollama_models = list((PROVIDER_MAP.get('OLLAMA_API_KEY') or {}).get('models', []) or [])
+        for _cm in (model_config.get('local_models', []) or []):
+            if _cm not in config_ollama_models:
+                config_ollama_models.append(_cm)
+        LOCAL_MODELS = list(config_ollama_models)
         
         from core.api_verifier import _fetch_ollama, _fetch_lmstudio, estimate_supports_tools_from_model_id
         ollama_api_key = os.getenv("OLLAMA_API_KEY", "")
         ollama_models = _fetch_ollama(ollama_api_key)
         LOCAL_MODELS_DETAILED = []
         if ollama_models.get("success"):
-            LOCAL_MODELS = ollama_models.get("chat_models", [])
+            live_ollama = list(ollama_models.get("chat_models", []) or [])
+            merged_ollama = list(live_ollama)
+            for _cm in config_ollama_models:
+                if _cm not in merged_ollama:
+                    merged_ollama.append(_cm)
+            LOCAL_MODELS = merged_ollama
             LOCAL_MODELS_DETAILED = ollama_models.get("chat_models_detailed", [])
+            if ollama_models.get("warning"):
+                st.caption(f"ℹ️ {ollama_models['warning']}")
 
         lms_models = {"success": False}
         if os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE"):
@@ -1750,48 +1936,85 @@ def render_api_vault():
         
         env_var_name = ""
         is_local = True
-        local_runtime = st.selectbox("Local runtime", ["Ollama", "LM Studio"])
-        provider = "Ollama" if local_runtime == "Ollama" else "LMStudio"
-        runtime_models = LOCAL_MODELS if provider == "Ollama" else LMS_MODELS
-        runtime_detailed = LOCAL_MODELS_DETAILED if provider == "Ollama" else LMS_MODELS_DETAILED
-        if provider == "LMStudio" and not runtime_models:
-            st.warning("LM Studio server not reachable. Start it in LM Studio → Developer → Local Server, then Connect.")
-        
-        local_col1, local_col2 = st.columns(2)
-        with local_col1:
-            def format_model(name):
-                if name == "Other (Manual)...": return name
-                for m in runtime_detailed:
-                    if m["name"] == name:
-                        size = m.get("size_gb") or 0
-                        return f"{name} ({size} GB)" if size else name
-                return name
 
-            selected_local = st.selectbox("Local Model Name", options=runtime_models + ["Other (Manual)..."], format_func=format_model)
+        def format_model(name, detailed_list):
+            if name == "Other (Manual)...":
+                return name
+            for m in detailed_list:
+                if m["name"] == name:
+                    size = m.get("size_gb") or 0
+                    return f"{name} ({size} GB)" if size else name
+            return name
+
+        with st.container(key="local_models_table", border=True):
+            lm_r1_l, lm_r1_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            lm_r1_l.markdown("**Local runtime**")
+            local_runtime = lm_r1_i.selectbox(
+                "Local runtime",
+                ["Ollama", "LM Studio"],
+                label_visibility="collapsed",
+            )
+            provider = "Ollama" if local_runtime == "Ollama" else "LMStudio"
+            runtime_models = LOCAL_MODELS if provider == "Ollama" else LMS_MODELS
+            runtime_detailed = LOCAL_MODELS_DETAILED if provider == "Ollama" else LMS_MODELS_DETAILED
+
+            lm_r2_l, lm_r2_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            lm_r2_l.markdown("**Local Model Name**")
+            selected_local = lm_r2_i.selectbox(
+                "Local Model Name",
+                options=runtime_models + ["Other (Manual)..."],
+                format_func=lambda n: format_model(n, runtime_detailed),
+                label_visibility="collapsed",
+            )
+
             if selected_local == "Other (Manual)...":
-                model_name = st.text_input("Type Custom Local Model Name", placeholder="e.g., qwen3.8-27b-tools or llama-3.1-8b-instruct")
+                lm_r2b_l, lm_r2b_i = st.columns([1.15, 2.35], vertical_alignment="center")
+                lm_r2b_l.markdown("**Custom Local Model Name**")
+                model_name = lm_r2b_i.text_input(
+                    "Type Custom Local Model Name",
+                    placeholder="e.g., qwen3.8-27b-tools or llama-3.1-8b-instruct",
+                    label_visibility="collapsed",
+                )
             else:
                 model_name = selected_local
-        with local_col2:
+
             default_vram = 4.0
             if selected_local != "Other (Manual)...":
                 for m in runtime_detailed:
                     if m["name"] == selected_local:
                         default_vram = float(m.get("size_gb") or 4.0) or 4.0
                         break
-            vram_gb = st.number_input("VRAM Required (GB)", min_value=0.0, max_value=256.0, value=default_vram, step=0.5, help="Estimated memory used by this model.")
+
+            lm_r3_l, lm_r3_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            lm_r3_l.markdown("**VRAM Required (GB)**")
+            vram_gb = lm_r3_i.number_input(
+                "VRAM Required (GB)",
+                min_value=0.0,
+                max_value=256.0,
+                value=default_vram,
+                step=0.5,
+                help="Estimated memory used by this model.",
+                label_visibility="collapsed",
+            )
+
             auto_supports_tools = estimate_supports_tools_from_model_id(model_name or selected_local, provider)
-            support_mode = st.selectbox(
+            lm_r4_l, lm_r4_i = st.columns([1.15, 2.35], vertical_alignment="center")
+            lm_r4_l.markdown("**Tool-calling support**")
+            support_mode = lm_r4_i.selectbox(
                 "Tool-calling support",
                 options=["Auto", "Yes", "No"],
                 index=0,
                 help="Auto infers support from runtime and model family. Override to force-enable or disable tools for this model.",
+                label_visibility="collapsed",
             )
             supports_tools = auto_supports_tools if support_mode == "Auto" else (support_mode == "Yes")
-            st.caption(
+            lm_r4_i.caption(
                 f"Auto guess for `{model_name or selected_local}`: "
                 f"{'✅ supports tools' if auto_supports_tools else '❌ no tool-calling'}."
             )
+
+        if provider == "LMStudio" and not runtime_models:
+            st.warning("LM Studio server not reachable. Start it in LM Studio → Developer → Local Server, then Connect.")
 
         submitted = st.button("Add Local Model", type="primary")
         if submitted and provider and model_name:
@@ -1937,23 +2160,22 @@ def render_agent_caserma():
             try:
                 from core.team_architect import AGENT_ARCHETYPES
                 arch_keys = list(AGENT_ARCHETYPES.keys())
-                ac1, ac2 = st.columns([2.2, 1.0])
+                ac1, ac2 = st.columns([2.4, 1.0], vertical_alignment="bottom")
                 with ac1:
                     picked_arch = st.selectbox(
-                        "⚡ Template Rapido di Ruolo (Archetipo)",
+                        "⚡ Quick Role Template (Archetype)",
                         arch_keys,
                         format_func=lambda k: AGENT_ARCHETYPES[k]["label"],
                         key="agent_archetype_pick",
                     )
                 with ac2:
-                    st.write("")
-                    if st.button("📋 Carica Archetipo", use_container_width=True, key="agent_archetype_load"):
+                    if st.button("📋 Load Archetype", use_container_width=True, key="agent_archetype_load"):
                         tpl = AGENT_ARCHETYPES[picked_arch]
                         st.session_state.agent_name_input = tpl["name"]
                         st.session_state.agent_role_input = tpl["role"]
                         st.session_state.agent_goal_input = tpl["goal"]
                         st.session_state.agent_backstory_input = tpl["backstory"]
-                        st.toast(f"Archetipo '{tpl['name']}' caricato! Verifica e salva.", icon="⚡")
+                        st.toast(f"Archetype '{tpl['name']}' loaded! Review and save.", icon="⚡")
                         st.rerun()
             except Exception:
                 pass
@@ -2321,6 +2543,123 @@ def render_task_builder():
                         st.session_state[k] = ""
                     elif not isinstance(st.session_state[k], str):
                         st.session_state[k] = str(st.session_state[k])
+
+        def _apply_required_inputs_to_session(req_rows):
+            cleaned = [
+                {
+                    "key": str(item.get("key") or "").strip(),
+                    "prompt": str(item.get("prompt") or item.get("question") or "").strip(),
+                }
+                for item in (req_rows or [])
+                if isinstance(item, dict) and (item.get("key") or item.get("prompt") or item.get("question"))
+            ]
+            if not cleaned:
+                cleaned = [{"key": "", "prompt": ""}]
+            st.session_state.temp_required_inputs = cleaned
+            for k_old in list(st.session_state.keys()):
+                if k_old.startswith("ri_key_") or k_old.startswith("ri_prompt_"):
+                    del st.session_state[k_old]
+            for idx_ri, item_ri in enumerate(cleaned):
+                st.session_state[f"ri_key_{idx_ri}"] = item_ri["key"]
+                st.session_state[f"ri_prompt_{idx_ri}"] = item_ri["prompt"]
+
+        if "pending_assisted_task_spec" in st.session_state:
+            _ps = st.session_state.pop("pending_assisted_task_spec")
+            st.session_state.task_name_input = str(_ps.get("name") or "")
+            st.session_state.task_desc_area = str(_ps.get("description") or "")
+            st.session_state.task_output_area = str(_ps.get("expected_output") or "")
+            st.session_state.task_specialization_input = str(_ps.get("agent_specialization") or "")
+            st.session_state.task_human_validation_cb = bool(_ps.get("human_validation", False))
+            _prof_val = str(_ps.get("tool_profile") or "")
+            st.session_state.task_tool_profile_select = _prof_val if _prof_val in ("", "intermediate", "final_writer") else ""
+
+            _ps_aid = _ps.get("agent_id")
+            if _ps_aid is not None and _ps_aid in agent_ids:
+                st.session_state.task_agent_sel = agent_names[agent_ids.index(_ps_aid)]
+
+            _ps_mid = _ps.get("model_id")
+            if _ps_mid is not None and _ps_mid in model_ids:
+                st.session_state.task_model_sel = model_names[model_ids.index(_ps_mid)]
+            else:
+                st.session_state.task_model_sel = "None / Use Agent Default"
+
+            _ps_tools = [t for t in (_ps.get("tools") or []) if t in AVAILABLE_TOOLS]
+            for _t_avail in AVAILABLE_TOOLS:
+                st.session_state[f"cb_task_{_t_avail}"] = _t_avail in _ps_tools
+            st.session_state.task_tools_sel = _ps_tools
+
+            _apply_required_inputs_to_session(_ps.get("required_inputs"))
+            if _ps.get("_toast"):
+                st.toast(_ps["_toast"], icon="🪄")
+
+        if "pending_assisted_task_req_inputs" in st.session_state:
+            _pri = st.session_state.pop("pending_assisted_task_req_inputs")
+            _apply_required_inputs_to_session(_pri)
+            st.toast(f"Detected {len([r for r in _pri if r.get('key')])} template variable(s)!", icon="🔍")
+
+        # --- Assisted Task Co-Pilot & Archetype Templates ---
+        with st.expander("🪄 Assisted Task Co-Pilot & Archetype Templates", expanded=not bool(editing_task)):
+            try:
+                from core.team_architect import (
+                    TASK_ARCHETYPES,
+                    build_task_spec_from_archetype,
+                    extract_template_variables,
+                    generate_assisted_task_spec,
+                )
+                t_arch_keys = list(TASK_ARCHETYPES.keys())
+                ta1, ta2 = st.columns([2.4, 1.0], vertical_alignment="bottom")
+                with ta1:
+                    picked_t_arch = st.selectbox(
+                        "⚡ Quick Task Template (Archetype)",
+                        t_arch_keys,
+                        format_func=lambda k: TASK_ARCHETYPES[k]["label"],
+                        key="task_archetype_pick",
+                    )
+                with ta2:
+                    if st.button("📋 Load Template", use_container_width=True, key="task_archetype_load_btn"):
+                        _spec_tpl = build_task_spec_from_archetype(
+                            picked_t_arch,
+                            db,
+                            available_tools=AVAILABLE_TOOLS,
+                        )
+                        _spec_tpl["_toast"] = f"Template '{TASK_ARCHETYPES[picked_t_arch]['label']}' loaded! Review and click {submit_label}."
+                        st.session_state.pending_assisted_task_spec = _spec_tpl
+                        st.rerun()
+
+                tg1, tg2 = st.columns([2.4, 1.0], vertical_alignment="bottom")
+                with tg1:
+                    copilot_goal = st.text_input(
+                        "🪄 Describe what this task should do",
+                        placeholder="e.g. Research pricing of competitor SaaS products for {product_name} and save summary to Markdown",
+                        key="task_copilot_goal_input",
+                    )
+                with tg2:
+                    run_task_copilot = st.button(
+                        "🧠 Auto-Fill All Task Fields",
+                        type="primary",
+                        use_container_width=True,
+                        key="task_copilot_fill_btn",
+                    )
+
+                tb_status_slot = st.container()
+                if run_task_copilot:
+                    if not (copilot_goal or "").strip():
+                        tb_status_slot.warning("Describe what this task should accomplish first.")
+                    else:
+                        _cur_aid = agent_options.get(st.session_state.get("task_agent_sel")) if "task_agent_sel" in st.session_state else None
+                        with tb_status_slot:
+                            with st.spinner("AI Co-Pilot is designing task instructions, tools, agent assignment, and required inputs..."):
+                                _spec_ai = generate_assisted_task_spec(
+                                    sanitize_input(copilot_goal),
+                                    db,
+                                    available_tools=AVAILABLE_TOOLS,
+                                    preferred_agent_id=_cur_aid,
+                                )
+                        _spec_ai["_toast"] = f"Task fields auto-filled ({_spec_ai.get('source', 'ai')})! Review and click {submit_label}."
+                        st.session_state.pending_assisted_task_spec = _spec_ai
+                        st.rerun()
+            except Exception as _copilot_err:
+                st.caption(f"Task Co-Pilot unavailable: {_copilot_err}")
 
         task_name = st.text_input(
             "Task Name / Label (Optional)",
@@ -2782,9 +3121,24 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
             if v_key.strip() and v_prompt.strip():
                 input_rows.append({"key": v_key.strip(), "prompt": v_prompt.strip()})
 
-        col_btn1, _ = st.columns([1, 3])
+        col_btn1, col_btn2, _ = st.columns([1.0, 1.4, 1.6])
         with col_btn1:
             st.button("➕ Add Variable", on_click=add_row, use_container_width=True)
+        with col_btn2:
+            if st.button("🔍 Detect {Variables}", use_container_width=True, key="task_detect_vars_btn"):
+                try:
+                    from core.team_architect import extract_template_variables
+                    _cur_nonempty = [r for r in st.session_state.get("temp_required_inputs", []) if (r.get("key") or "").strip()]
+                    _cur_keys = {r["key"].strip() for r in _cur_nonempty}
+                    _det_vars = extract_template_variables(
+                        f"{description or ''}\n{expected_output or ''}",
+                        existing_inputs=_cur_nonempty,
+                    )
+                    _merged_ri = list(_cur_nonempty) + [d for d in _det_vars if d["key"] not in _cur_keys]
+                    st.session_state.pending_assisted_task_req_inputs = _merged_ri
+                    st.rerun()
+                except Exception as _det_err:
+                    st.warning(f"Variable detection failed: {_det_err}")
 
         st.markdown("---")
         if st.button(submit_label, type="primary", use_container_width=True):
@@ -4235,42 +4589,178 @@ def _render_workspace_files() -> None:
             "text": "📝",
             "archive": "🗜️",
         }
-        for entry in entries:
-            is_dir = bool(entry.get("is_dir"))
-            col_name, col_size, col_date, col_action = st.columns([4, 1.1, 1.7, 1.3])
-            icon = icons.get(entry.get("kind"), "📄")
-            if col_name.button(
-                f"{icon} {entry['name']}",
-                key=f"ws_open_{entry['path']}",
-                use_container_width=True,
-            ):
+        st.markdown(
+            """
+            <style>
+            [class*="st-key-ws_file_table"] {
+                padding: 0 !important;
+                border-radius: 8px !important;
+                overflow: hidden !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stVerticalBlock"] {
+                gap: 0 !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"] {
+                border-bottom: 1px solid rgba(128, 128, 128, 0.15) !important;
+                padding: 0.3rem 0.75rem !important;
+                margin: 0 !important;
+                align-items: center !important;
+                flex-wrap: nowrap !important;
+                min-height: 2.3rem !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"]:has(.ws-col-head) {
+                background: rgba(128, 128, 128, 0.12) !important;
+                border-bottom: 2px solid rgba(128, 128, 128, 0.3) !important;
+                padding-top: 0.45rem !important;
+                padding-bottom: 0.45rem !important;
+                min-height: 2.15rem !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"]:not(:has(.ws-col-head)):hover {
+                background: rgba(128, 128, 128, 0.05) !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stLayoutWrapper"]:last-child [data-testid="stHorizontalBlock"],
+            [class*="st-key-ws_file_table"] [data-testid="stElementContainer"]:last-child [data-testid="stHorizontalBlock"] {
+                border-bottom: none !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"] > div:nth-child(1) {
+                flex: 4.2 1 0 !important;
+                min-width: 140px !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"] > div:nth-child(2) {
+                flex: 1.0 0 5.5rem !important;
+                width: 5.5rem !important;
+                min-width: 4.5rem !important;
+                max-width: 6.5rem !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"] > div:nth-child(3) {
+                flex: 1.8 0 11rem !important;
+                width: 11rem !important;
+                min-width: 9.5rem !important;
+                max-width: 12.5rem !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stHorizontalBlock"] > div:nth-child(4) {
+                flex: 0.9 0 4.5rem !important;
+                width: 4.5rem !important;
+                min-width: 4rem !important;
+                max-width: 5.5rem !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                text-align: center !important;
+            }
+            [class*="st-key-ws_file_table"] [data-testid="stMarkdownContainer"] p,
+            [class*="st-key-ws_file_table"] [data-testid="stCaptionContainer"] {
+                margin: 0 !important;
+                padding: 0 !important;
+                line-height: 1.4 !important;
+            }
+            [class*="st-key-ws_file_table"] .ws-cell-text {
+                display: block;
+                font-size: 0.84rem;
+                opacity: 0.82;
+                font-variant-numeric: tabular-nums;
+                line-height: 1.4;
+                margin: 0;
+            }
+            [class*="st-key-ws_file_table"] .ws-col-head {
+                font-size: 0.78rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                opacity: 0.82;
+                margin: 0;
+                line-height: 1.3;
+                display: inline-block;
+            }
+            [class*="st-key-ws_file_table"] [class*="st-key-ws_open_"] button {
+                justify-content: flex-start !important;
+                text-align: left !important;
+                background: transparent !important;
+                border-color: transparent !important;
+                padding-left: 0.45rem !important;
+                padding-right: 0.45rem !important;
+                min-height: 2rem !important;
+                height: 2rem !important;
+                line-height: 1.2 !important;
+                font-size: 0.88rem !important;
+                white-space: nowrap !important;
+                overflow: hidden !important;
+                text-overflow: ellipsis !important;
+            }
+            [class*="st-key-ws_file_table"] [class*="st-key-ws_open_"] button:hover {
+                background: rgba(128, 128, 128, 0.14) !important;
+                border-color: rgba(128, 128, 128, 0.24) !important;
+            }
+            [class*="st-key-ws_file_table"] [class*="st-key-ws_dl_"] {
+                display: flex !important;
+                justify-content: center !important;
+                width: 100% !important;
+            }
+            [class*="st-key-ws_file_table"] [class*="st-key-ws_dl_"] button {
+                min-height: 1.85rem !important;
+                height: 1.85rem !important;
+                padding: 0.1rem 0.5rem !important;
+                font-size: 0.85rem !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.container(key="ws_file_table", border=True):
+            h_name, h_size, h_date, h_action = st.columns(
+                [4.2, 1.0, 1.8, 0.9], vertical_alignment="center", gap="small"
+            )
+            h_name.markdown('<span class="ws-col-head" style="padding-left: 0.45rem;">Name</span>', unsafe_allow_html=True)
+            h_size.markdown('<span class="ws-col-head">Size</span>', unsafe_allow_html=True)
+            h_date.markdown('<span class="ws-col-head">Modified</span>', unsafe_allow_html=True)
+            h_action.markdown('<span class="ws-col-head" style="display:block; text-align:center; width:100%;">Action</span>', unsafe_allow_html=True)
+
+            for entry in entries:
+                is_dir = bool(entry.get("is_dir"))
+                col_name, col_size, col_date, col_action = st.columns(
+                    [4.2, 1.0, 1.8, 0.9], vertical_alignment="center", gap="small"
+                )
+                icon = icons.get(entry.get("kind"), "📄")
+                if col_name.button(
+                    f"{icon} {entry['name']}",
+                    key=f"ws_open_{entry['path']}",
+                    use_container_width=True,
+                ):
+                    if is_dir:
+                        st.session_state[state_key] = entry["path"]
+                        st.session_state.pop("ws_preview_path", None)
+                    else:
+                        st.session_state["ws_preview_path"] = entry["path"]
+                    st.rerun()
+                size_text = "—" if is_dir else _human_size(entry.get("size"))
+                date_text = str(entry.get("modified") or "—")
+                col_size.markdown(
+                    f'<span class="ws-cell-text">{html.escape(size_text)}</span>',
+                    unsafe_allow_html=True,
+                )
+                col_date.markdown(
+                    f'<span class="ws-cell-text">{html.escape(date_text)}</span>',
+                    unsafe_allow_html=True,
+                )
                 if is_dir:
-                    st.session_state[state_key] = entry["path"]
-                    st.session_state.pop("ws_preview_path", None)
+                    col_action.markdown('<span class="ws-cell-text" style="display:block; text-align:center; width:100%;">—</span>', unsafe_allow_html=True)
                 else:
-                    st.session_state["ws_preview_path"] = entry["path"]
-                st.rerun()
-            col_size.caption("" if is_dir else _human_size(entry.get("size")))
-            col_date.caption(entry.get("modified") or "—")
-            if is_dir:
-                col_action.caption("")
-            else:
-                size = int(entry.get("size") or 0)
-                if size <= 10 * 1024 * 1024:
-                    try:
-                        payload = ws_files.resolve(entry["path"]).read_bytes()
-                        col_action.download_button(
-                            "⬇️",
-                            data=payload,
-                            file_name=entry["name"],
-                            mime=entry.get("mime"),
-                            key=f"ws_dl_{entry['path']}",
-                            use_container_width=True,
-                        )
-                    except Exception:  # noqa: BLE001
-                        col_action.caption("n/a")
-                else:
-                    col_action.caption(">10 MB")
+                    size = int(entry.get("size") or 0)
+                    if size <= 10 * 1024 * 1024:
+                        try:
+                            payload = ws_files.resolve(entry["path"]).read_bytes()
+                            col_action.download_button(
+                                "⬇️",
+                                data=payload,
+                                file_name=entry["name"],
+                                mime=entry.get("mime"),
+                                key=f"ws_dl_{entry['path']}",
+                                use_container_width=True,
+                            )
+                        except Exception:  # noqa: BLE001
+                            col_action.markdown('<span class="ws-cell-text">n/a</span>', unsafe_allow_html=True)
+                    else:
+                        col_action.markdown('<span class="ws-cell-text">&gt;10 MB</span>', unsafe_allow_html=True)
 
     if listing.get("truncated"):
         st.caption("Listing truncated: too many entries in this folder.")
@@ -4633,25 +5123,16 @@ def render_workflow_assembler():
             _arch_exports = list(EXPORT_TOOL_MAP.keys())
         except ImportError:
             _arch_exports = ["python", "json", "markdown", "text", "word", "excel"]
-        try:
-            from ui.team_architect_panel import render_ai_team_architect_wizard
-            render_ai_team_architect_wizard(
-                db,
-                available_exports=_arch_exports,
-                sanitize_input=sanitize_input,
-            )
-        except Exception as _arch_err:
-            st.warning(f"AI Team & Workflow Architect non disponibile: {_arch_err}")
 
         tasks = db.read_all_tasks()
         workflows = db.read_all_workflows()
 
         if not tasks and not st.session_state.get("wf_selected_task_ids"):
             st.info(
-                "Nessun task ancora presente. Usa l'**AI Team & Workflow Architect** qui sopra per "
-                "creare Team, Task e Workflow in 1 click, oppure crea i singoli task nel 'Tab 3: Task Builder'."
+                "No tasks in the database yet. Use the **AI Team & Workflow Architect** inside "
+                "**Create a New Workflow** below to generate a Team, Tasks, and Workflow in one click, "
+                "or build blocks directly on the interactive Canvas."
             )
-            return
 
         task_id_map = {task['id']: task for task in tasks}
         agents = db.read_all_agents()
@@ -4749,7 +5230,23 @@ def render_workflow_assembler():
                 st.subheader(f"Edit Workflow: {editing_workflow['name']}")
             else:
                 st.subheader("Create a New Workflow")
-            
+
+            try:
+                from core.export_tools import EXPORT_TOOL_MAP
+                available_exports = list(EXPORT_TOOL_MAP.keys())
+            except ImportError:
+                available_exports = ["python", "json", "markdown", "text", "word", "excel"]
+
+            try:
+                from ui.team_architect_panel import render_ai_team_architect_wizard
+                render_ai_team_architect_wizard(
+                    db,
+                    available_exports=available_exports,
+                    sanitize_input=sanitize_input,
+                )
+            except Exception as _arch_err:
+                st.warning(f"AI Team & Workflow Architect unavailable: {_arch_err}")
+
             workflow_name = st.text_input(
                 "Workflow Name",
                 key="wf_name_input",
@@ -4757,12 +5254,6 @@ def render_workflow_assembler():
                 help="This name is the workflow's identity everywhere: the Telegram picker, Run History and the API.",
             )
             requires_human_check = st.checkbox("Requires Human Check", key="wf_human_check")
-        
-            try:
-                from core.export_tools import EXPORT_TOOL_MAP
-                available_exports = list(EXPORT_TOOL_MAP.keys())
-            except ImportError:
-                available_exports = ["python", "json", "markdown", "text", "word", "excel"]
 
             # Ensure default values are valid options
             current_defaults = st.session_state.get("wf_expected_exports", [])
@@ -4795,7 +5286,26 @@ def render_workflow_assembler():
                 help="Cap on tokens for the Master AI final-report generation (refinement, context summary, and file exports). 0 lets Alfredo pick a safe default.",
             )
 
-        
+            try:
+                from ui.team_architect_panel import render_workflow_team_and_blocks_editor
+                render_workflow_team_and_blocks_editor(
+                    db,
+                    available_exports=available_exports,
+                    sanitize_input=sanitize_input,
+                )
+            except Exception as _blk_err:
+                st.warning(f"Team & Block Editor unavailable: {_blk_err}")
+
+            tasks = db.read_all_tasks()
+            agents = db.read_all_agents()
+            task_id_map = {task['id']: task for task in tasks}
+            agent_id_map = {agent['id']: agent for agent in agents}
+            tasks_by_agent = {agent['id']: [] for agent in agents}
+            for task in tasks:
+                a_id = task.get('agent_id')
+                if a_id in tasks_by_agent:
+                    tasks_by_agent[a_id].append(task)
+
             st.markdown("---")
             st.markdown("### Canvas")
             editor_mode = st.radio(
@@ -5715,9 +6225,26 @@ def render_tool_factory():
         if registry:
             st.divider()
             st.markdown("**Registered Tools:**")
-            for t_id, t_data in registry.items():
-                secrets_str = ", ".join(t_data.get('required_secrets', [])) or "None"
-                st.caption(f"**{t_data.get('display_name')}** (`{t_id}`) | Secrets: {secrets_str}")
+            tool_rows = [
+                {
+                    "Tool": str(t_data.get("display_name") or t_id),
+                    "ID": str(t_id),
+                    "Secrets": ", ".join(t_data.get("required_secrets") or []) or "None",
+                    "Description": str(t_data.get("description") or "—"),
+                }
+                for t_id, t_data in registry.items()
+            ]
+            st.dataframe(
+                tool_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Tool": st.column_config.TextColumn("Tool", width="medium"),
+                    "ID": st.column_config.TextColumn("ID", width="medium"),
+                    "Secrets": st.column_config.TextColumn("Secrets", width="medium"),
+                    "Description": st.column_config.TextColumn("Description", width="large"),
+                },
+            )
     except Exception:
         pass
 

@@ -143,37 +143,200 @@ def _fetch_anthropic(api_key: str):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def _ollama_candidate_urls(base_url_override: str = None) -> list:
+    """Return ordered, deduplicated Ollama base URLs to probe."""
+    import os
+
+    raw_candidates = [
+        base_url_override,
+        os.getenv("OLLAMA_API_BASE"),
+        "http://127.0.0.1:11434",
+        "http://localhost:11434",
+        "http://host.docker.internal:11434",
+    ]
+    seen = set()
+    candidates = []
+    for raw in raw_candidates:
+        val = str(raw or "").strip().rstrip("/")
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        candidates.append(val)
+    return candidates
+
+
+def list_local_ollama_manifest_models(ollama_models_dir: str = None, use_cli_fallback: bool = True) -> dict:
+    """Discover downloaded Ollama models from local manifest files and optionally `ollama list` CLI."""
+    import json
+    import os
+    import subprocess
+
+    base_dir = (
+        str(ollama_models_dir).strip()
+        if ollama_models_dir
+        else (os.getenv("OLLAMA_MODELS") or "").strip()
+    )
+    search_roots = (
+        [base_dir]
+        if base_dir
+        else [
+            os.path.join(os.path.expanduser("~"), ".ollama", "models"),
+            "/usr/share/ollama/.ollama/models",
+            "C:\\ProgramData\\Ollama\\models",
+        ]
+    )
+
+    discovered = {}
+    for root in search_roots:
+        manifests_dir = os.path.join(root, "manifests")
+        if not os.path.isdir(manifests_dir):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(manifests_dir):
+            for fname in filenames:
+                if fname.startswith("."):
+                    continue
+                fpath = os.path.join(dirpath, fname)
+                rel = os.path.relpath(fpath, manifests_dir)
+                parts = rel.replace("\\", "/").split("/")
+                if len(parts) == 4:
+                    registry, namespace, model, tag = parts
+                    if registry == "registry.ollama.ai" and namespace == "library":
+                        model_id = f"{model}:{tag}"
+                    elif registry == "registry.ollama.ai":
+                        model_id = f"{namespace}/{model}:{tag}"
+                    else:
+                        model_id = f"{registry}/{namespace}/{model}:{tag}"
+                elif len(parts) == 3:
+                    namespace, model, tag = parts
+                    model_id = f"{model}:{tag}" if namespace == "library" else f"{namespace}/{model}:{tag}"
+                elif len(parts) == 2:
+                    model_id = f"{parts[0]}:{parts[1]}"
+                else:
+                    continue
+
+                size_gb = 0.0
+                try:
+                    with open(fpath, "r", encoding="utf-8") as mf:
+                        mdata = json.load(mf)
+                    total_bytes = int((mdata.get("config") or {}).get("size") or 0)
+                    for layer in (mdata.get("layers") or []):
+                        total_bytes += int(layer.get("size") or 0)
+                    if total_bytes > 0:
+                        size_gb = round(total_bytes / (1024**3), 1)
+                except Exception:
+                    pass
+                discovered.setdefault(model_id, size_gb)
+
+    if not discovered and use_cli_fallback:
+        try:
+            proc = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                for line in proc.stdout.splitlines()[1:]:
+                    cols = line.split()
+                    if not cols:
+                        continue
+                    model_id = cols[0].strip()
+                    if not model_id or model_id.upper() == "NAME":
+                        continue
+                    size_gb = 0.0
+                    for idx, tok in enumerate(cols[:-1]):
+                        nxt = cols[idx + 1].upper()
+                        try:
+                            val = float(tok)
+                        except ValueError:
+                            continue
+                        if nxt == "GB":
+                            size_gb = round(val, 1)
+                            break
+                        if nxt == "MB":
+                            size_gb = round(val / 1024.0, 1)
+                            break
+                    discovered.setdefault(model_id, size_gb)
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            pass
+
+    chat_models = []
+    embed_models = []
+    chat_models_detailed = []
+    for model_id, size_gb in discovered.items():
+        low = model_id.lower()
+        if "embed" in low or "nomic" in low or "mxbai" in low:
+            embed_models.append(model_id)
+        else:
+            chat_models.append(model_id)
+            chat_models_detailed.append({"name": model_id, "size_gb": size_gb})
+
+    chat_models.sort()
+    embed_models.sort()
+    chat_models_detailed.sort(key=lambda x: x["name"])
+    return {
+        "chat_models": chat_models,
+        "embed_models": embed_models,
+        "chat_models_detailed": chat_models_detailed,
+    }
+
+
 def _fetch_ollama(api_key: str = "", base_url_override: str = None):
     import os
-    base_url = base_url_override if base_url_override else os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
-    url = f"{base_url.rstrip('/')}/api/tags"
+
+    candidates = _ollama_candidate_urls(base_url_override=base_url_override)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code in [401, 403]:
-            return {"success": False, "error": "Invalid API Key"}
-        response.raise_for_status()
-        
-        data = response.json().get("models", [])
-        chat_models = []
-        embed_models = []
-        chat_models_detailed = []
-        
-        for m in data:
-            model_id = m.get("name", "")
-            size_gb = round(m.get("size", 0) / (1024**3), 1)
-            if "embed" in model_id.lower() or "nomic" in model_id.lower() or "mxbai" in model_id.lower():
-                embed_models.append(model_id)
-            else:
-                chat_models.append(model_id)
-                chat_models_detailed.append({"name": model_id, "size_gb": size_gb})
-                
-        chat_models.sort()
-        embed_models.sort()
-        chat_models_detailed.sort(key=lambda x: x["name"])
-        return {"success": True, "chat_models": chat_models, "embed_models": embed_models, "chat_models_detailed": chat_models_detailed}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to fetch Ollama models from {url}: {e}"}
+    errors = []
+
+    for base_url in candidates:
+        url = f"{base_url}/api/tags"
+        try:
+            response = requests.get(url, headers=headers, timeout=4)
+            if response.status_code in [401, 403]:
+                return {"success": False, "error": "Invalid API Key"}
+            response.raise_for_status()
+
+            data = response.json().get("models", [])
+            chat_models = []
+            embed_models = []
+            chat_models_detailed = []
+
+            for m in data:
+                model_id = m.get("name", "")
+                size_gb = round(m.get("size", 0) / (1024**3), 1)
+                if "embed" in model_id.lower() or "nomic" in model_id.lower() or "mxbai" in model_id.lower():
+                    embed_models.append(model_id)
+                else:
+                    chat_models.append(model_id)
+                    chat_models_detailed.append({"name": model_id, "size_gb": size_gb})
+
+            chat_models.sort()
+            embed_models.sort()
+            chat_models_detailed.sort(key=lambda x: x["name"])
+            os.environ["OLLAMA_API_BASE"] = base_url
+            return {
+                "success": True,
+                "chat_models": chat_models,
+                "embed_models": embed_models,
+                "chat_models_detailed": chat_models_detailed,
+                "resolved_base_url": base_url,
+            }
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+
+    local = list_local_ollama_manifest_models()
+    if local["chat_models"] or local["embed_models"]:
+        return {
+            "success": True,
+            "chat_models": local["chat_models"],
+            "embed_models": local["embed_models"],
+            "chat_models_detailed": local["chat_models_detailed"],
+            "resolved_base_url": candidates[0] if candidates else "http://localhost:11434",
+            "offline_manifest_fallback": True,
+            "warning": f"Ollama API unreachable ({errors[0] if errors else 'connection failed'}); loaded local models from disk/CLI.",
+        }
+
+    return {"success": False, "error": f"Failed to fetch Ollama models from {'; '.join(errors)}"}
 
 def get_ollama_model_info(model_name: str, api_key: str = ""):
     import os

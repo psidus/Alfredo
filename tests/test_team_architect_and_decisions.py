@@ -6,6 +6,11 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
+
+import requests
+
+from core.api_verifier import _fetch_ollama, list_local_ollama_manifest_models
 
 from core.node_executor import (
     RunState,
@@ -18,11 +23,17 @@ from core.node_executor import (
     normalize_yes_no,
     parse_jev_decision_response,
 )
+from core.master_ai import MasterAI
 from core.sqlite_manager import SQLiteManager
 from core.team_architect import (
+    TASK_ARCHETYPES,
+    build_task_spec_from_archetype,
+    extract_template_variables,
+    generate_assisted_task_spec,
     generate_team_and_workflow_blueprint,
     materialize_blueprint_to_db,
     recommend_models_for_tiers,
+    resolve_orchestrator_model_info,
 )
 from core.workflow_contracts import (
     build_structured_handoff_envelope,
@@ -30,7 +41,9 @@ from core.workflow_contracts import (
     format_upstream_handoff_block,
 )
 from core.workflow_graph import (
+    NODE_TYPE_LOOP,
     NODE_TYPE_ROUTER,
+    NODE_TYPE_TOOL,
     extract_output_key,
     normalize_node,
     validate_graph,
@@ -327,6 +340,7 @@ class TeamArchitectTests(unittest.TestCase):
             self.db,
             include_decision_gates=True,
             prefer_local_models=True,
+            llm_callable=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline heuristic test")),
         )
         decs = [n for n in bp["nodes"] if n["type"] == "decision"]
         self.assertEqual(decs[0]["decision_engine"], "jev")
@@ -346,6 +360,7 @@ class TeamArchitectTests(unittest.TestCase):
             prefer_local_models=True,
             reuse_existing_agents=True,
             expected_exports=["markdown"],
+            llm_callable=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline heuristic test")),
         )
         self.assertEqual(bp["source"], "heuristic")
         self.assertGreaterEqual(len(bp["agents"]), 2)
@@ -437,6 +452,359 @@ class TeamArchitectTests(unittest.TestCase):
         self.assertEqual(bp["workflow_name"], "Audit Tecnico Sì/No")
         mat = materialize_blueprint_to_db(bp, self.db, save_workflow=False)
         self.assertEqual(mat["errors"], [])
+        auditor_id = mat["agent_map"]["auditor"]
+        auditor_rec = next(a for a in self.db.read_all_agents() if int(a["id"]) == int(auditor_id))
+        self.assertIn("Goal: Trova vulnerabilità.", auditor_rec["backstory"])
+        self.assertIn("\n\nBackstory: Esperto AppSec.", auditor_rec["backstory"])
+
+
+class OllamaDiscoveryTests(unittest.TestCase):
+    def test_fetch_ollama_falls_back_from_unreachable_lan_ip_to_loopback(self):
+        called_urls = []
+
+        def fake_get(url, headers=None, timeout=4):
+            called_urls.append(url)
+            if "192.168.178.105" in url:
+                raise requests.ConnectionError("Connection refused")
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = {
+                "models": [
+                    {"name": "tev1:latest", "size": int(2.5 * (1024**3))},
+                    {"name": "llama3:latest", "size": int(4.7 * (1024**3))},
+                    {"name": "nomic-embed-text:latest", "size": int(0.3 * (1024**3))},
+                ]
+            }
+            return resp
+
+        with patch.dict(os.environ, {"OLLAMA_API_BASE": "http://192.168.178.105:11434"}):
+            with patch("core.api_verifier.requests.get", side_effect=fake_get):
+                res = _fetch_ollama(api_key="", base_url_override="http://192.168.178.105:11434")
+
+        self.assertTrue(res["success"])
+        self.assertEqual(res["resolved_base_url"], "http://127.0.0.1:11434")
+        self.assertIn("tev1:latest", res["chat_models"])
+        self.assertIn("llama3:latest", res["chat_models"])
+        self.assertIn("nomic-embed-text:latest", res["embed_models"])
+        self.assertGreaterEqual(len(called_urls), 2)
+
+    def test_fetch_ollama_falls_back_to_local_manifest_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_file = os.path.join(
+                tmp, "manifests", "registry.ollama.ai", "library", "tev1", "0.8b"
+            )
+            os.makedirs(os.path.dirname(manifest_file), exist_ok=True)
+            with open(manifest_file, "w", encoding="utf-8") as mf:
+                json.dump(
+                    {
+                        "config": {"size": 1024},
+                        "layers": [{"size": int(0.8 * (1024**3))}],
+                    },
+                    mf,
+                )
+
+            local = list_local_ollama_manifest_models(ollama_models_dir=tmp, use_cli_fallback=False)
+            self.assertEqual(local["chat_models"], ["tev1:0.8b"])
+            self.assertEqual(local["chat_models_detailed"][0]["size_gb"], 0.8)
+
+            with patch.dict(os.environ, {"OLLAMA_API_BASE": "http://192.168.178.105:11434", "OLLAMA_MODELS": tmp}):
+                with patch("core.api_verifier.requests.get", side_effect=requests.ConnectionError("Connection refused")):
+                    res = _fetch_ollama()
+
+            self.assertTrue(res["success"])
+            self.assertTrue(res.get("offline_manifest_fallback"))
+            self.assertEqual(res["chat_models"], ["tev1:0.8b"])
+
+
+class AssistedTaskCoPilotTests(unittest.TestCase):
+    def test_extract_template_variables_filters_reserved_and_preserves_prompts(self):
+        text = (
+            "Research {product} for {target_market} using {previous_result} "
+            "and {user_input} plus {context} and {product}."
+        )
+        extracted = extract_template_variables(
+            text,
+            existing_inputs=[{"key": "product", "prompt": "Which product should we inspect?"}],
+            excluded_vars={"target_market"},
+        )
+        self.assertEqual(
+            extracted,
+            [{"key": "product", "prompt": "Which product should we inspect?"}],
+        )
+
+        extracted_with_market = extract_template_variables(text)
+        keys = [item["key"] for item in extracted_with_market]
+        self.assertEqual(keys, ["product", "target_market"])
+        self.assertTrue(all(item.get("prompt") for item in extracted_with_market))
+
+    def test_build_task_spec_from_archetype_intersects_tools_and_sets_profile(self):
+        from core.sqlite_manager import SQLiteManager
+
+        self.assertTrue(len(TASK_ARCHETYPES) >= 1)
+        write_key = next(
+            (k for k, v in TASK_ARCHETYPES.items() if "create_excel_document" in (v.get("tools") or []) or "create_word_document" in (v.get("tools") or []) or "write_file" in (v.get("tools") or [])),
+            next(iter(TASK_ARCHETYPES.keys())),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteManager(db_path=os.path.join(tmp, "test.db")) as db:
+                aid = db.create_agent(
+                    name="Report Writer",
+                    role="Executive Report Writer",
+                    backstory="Writes polished reports.",
+                    model_id=None,
+                    tools=["write_file", "create_word_document"],
+                )
+                spec = build_task_spec_from_archetype(
+                    write_key,
+                    db,
+                    available_tools=["read_file", "write_file", "create_word_document", "create_excel_document"],
+                    preferred_agent_id=aid,
+                )
+
+        self.assertEqual(spec["source"], "archetype")
+        self.assertIn("name", spec)
+        self.assertTrue(spec["description"])
+        self.assertTrue(spec["expected_output"])
+        self.assertEqual(spec["agent_id"], aid)
+        for t in spec["tools"]:
+            self.assertIn(t, {"read_file", "write_file", "create_word_document", "create_excel_document"})
+        if any(t in {"write_file", "create_word_document", "create_excel_document"} for t in spec["tools"]):
+            self.assertEqual(spec["tool_profile"], "final_writer")
+        for req in spec["required_inputs"]:
+            self.assertIn("key", req)
+            self.assertIn("prompt", req)
+            self.assertIn("question", req)
+
+    def test_generate_assisted_task_spec_heuristic_and_llm_modes(self):
+        from core.sqlite_manager import SQLiteManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteManager(db_path=os.path.join(tmp, "test.db")) as db:
+                aid = db.create_agent(
+                    name="Excel Specialist",
+                    role="Data Analyst & Spreadsheet Designer",
+                    backstory="Builds structured Excel workbooks.",
+                    model_id=None,
+                    tools=["create_excel_document"],
+                )
+
+                # Heuristic fallback (no models in DB and llm_callable=None)
+                h_spec = generate_assisted_task_spec(
+                    "Create an Excel report summarizing pricing for {company_name}",
+                    db,
+                    available_tools=["search_web", "create_excel_document", "write_file"],
+                    preferred_agent_id=aid,
+                )
+                self.assertEqual(h_spec["source"], "heuristic")
+                self.assertEqual(h_spec["agent_id"], aid)
+                self.assertIn("create_excel_document", h_spec["tools"])
+                self.assertEqual(h_spec["tool_profile"], "final_writer")
+                req_keys = [r["key"] for r in h_spec["required_inputs"]]
+                self.assertIn("company_name", req_keys)
+                for req in h_spec["required_inputs"]:
+                    self.assertIn("key", req)
+                    self.assertIn("prompt", req)
+                    self.assertIn("question", req)
+
+                # LLM mock callable returning JSON + template variable auto-merge
+                def fake_llm(model, messages, temperature=0.2, force_json_mode=True):
+                    return json.dumps({
+                        "name": "competitor_matrix",
+                        "description": "Compare {region} competitors against {company_name} using {previous_result}.",
+                        "expected_output": "Markdown table and Excel workbook.",
+                        "agent_id": aid,
+                        "model_id": None,
+                        "agent_specialization": "pricing strategy",
+                        "tools": ["search_web", "create_excel_document", "nonexistent_tool"],
+                        "tool_profile": "intermediate",
+                        "human_validation": True,
+                        "required_inputs": [
+                            {"key": "company_name", "prompt": "Enter target company name:"},
+                        ],
+                    })
+
+                l_spec = generate_assisted_task_spec(
+                    "Compare regional competitors",
+                    db,
+                    available_tools=["search_web", "create_excel_document", "write_file"],
+                    preferred_agent_id=aid,
+                    llm_callable=fake_llm,
+                )
+                self.assertEqual(l_spec["source"], "llm")
+                self.assertEqual(l_spec["name"], "competitor_matrix")
+                self.assertEqual(l_spec["agent_id"], aid)
+                self.assertEqual(l_spec["tools"], ["search_web", "create_excel_document"])
+                # Write tool upgrades profile to final_writer automatically
+                self.assertEqual(l_spec["tool_profile"], "final_writer")
+                self.assertTrue(l_spec["human_validation"])
+                l_keys = [r["key"] for r in l_spec["required_inputs"]]
+                self.assertIn("company_name", l_keys)
+                self.assertIn("region", l_keys)
+                self.assertNotIn("previous_result", l_keys)
+
+    def test_master_ai_falls_back_to_db_model_when_env_id_is_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteManager(db_path=os.path.join(tmp, "test_master.db")) as db:
+                gen_id = db.create_model(
+                    provider="google",
+                    model_name="gemini-2.5-flash",
+                    env_var_name="GEMINI_API_KEY",
+                    capability_tier="standard",
+                )
+                db.create_model(
+                    provider="jev",
+                    model_name="tev1",
+                    env_var_name="",
+                    is_local=True,
+                    supports_tools=False,
+                    capability_tier="basic",
+                )
+
+                with patch.dict(
+                    os.environ,
+                    {"MASTER_AI_MODEL_ID": "9999", "GEMINI_API_KEY": "dummy-key"},
+                    clear=False,
+                ):
+                    master = MasterAI(db_manager=db)
+                    self.assertEqual(master.model_id, gen_id)
+                    self.assertEqual(master.model_provider, "gemini")
+                    self.assertEqual(master.model_name, "gemini-2.5-flash")
+
+                    info = resolve_orchestrator_model_info(db)
+                    self.assertEqual(info["model_id"], gen_id)
+                    self.assertEqual(info["model_string"], "gemini/gemini-2.5-flash")
+
+    def test_blueprint_supports_loops_typed_blocks_parallel_levels_and_tool_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteManager(db_path=os.path.join(tmp, "test_full_graph.db")) as db:
+                payload = {
+                    "workflow_name": "Parallel & Iterative Workflow",
+                    "description": "Parallel research, structured refinement loop, tool block, and Jev score gate.",
+                    "expected_exports": [],
+                    "agents": [
+                        {
+                            "agent_key": "analyst",
+                            "name": "Market Analyst",
+                            "role": "Research & Quant Analyst",
+                            "goal": "Research competitors and crunch figures.",
+                            "backstory": "Experienced analyst.",
+                            "tools": ["web_search", "calculator"],
+                            "recommended_tier": "standard",
+                        }
+                    ],
+                    "nodes": [
+                        {
+                            "id": "step_a",
+                            "type": "task",
+                            "name": "Research Competitors",
+                            "agent_key": "analyst",
+                            "agent_specialization": "market sizing",
+                            "tools": ["web_search"],
+                            "execution_level": 1,
+                            "depends_on": [],
+                            "description": "Collect competitor pricing benchmarks.",
+                            "expected_output": "Competitor pricing summary.",
+                        },
+                        {
+                            "id": "step_b",
+                            "type": "task",
+                            "name": "Research Customer Signals",
+                            "agent_key": "analyst",
+                            "agent_specialization": "market sizing",
+                            "tools": ["web_search"],
+                            "execution_level": 1,
+                            "depends_on": [],
+                            "description": "Collect qualitative customer signals.",
+                            "expected_output": "Signal breakdown.",
+                        },
+                        {
+                            "id": "step_draft",
+                            "type": "task",
+                            "name": "Refine Pricing Draft",
+                            "agent_key": "analyst",
+                            "execution_level": 2,
+                            "depends_on": ["step_a", "step_b"],
+                            "description": "Synthesize {previous_result} until APPROVED.",
+                            "expected_output": "Refined draft.",
+                        },
+                        {
+                            "id": "loop_1",
+                            "type": "loop",
+                            "name": "Refinement Loop",
+                            "loop_mode": "while",
+                            "scope": "nodes",
+                            "body_node_ids": ["step_draft"],
+                            "max_iterations": 3,
+                            "exit_on_hitl": True,
+                            "exit_condition": {
+                                "output_match": {"source_node": "step_draft", "pattern": "APPROVED"}
+                            },
+                            "execution_level": 2,
+                            "depends_on": ["step_a", "step_b"],
+                        },
+                        {
+                            "id": "calc_1",
+                            "type": "tool",
+                            "name": "Deterministic Check",
+                            "tool_name": "calculator",
+                            "tool_args": {"expression": "2+2"},
+                            "execution_level": 3,
+                            "depends_on": ["step_draft"],
+                        },
+                        {
+                            "id": "dec_1",
+                            "type": "decision",
+                            "name": "Quality Score Gate",
+                            "decision_engine": "jev",
+                            "decision_primitive": "score",
+                            "threshold": 0.7,
+                            "jev_model": "tev1",
+                            "question": "Does the synthesis score above quality threshold?",
+                            "execution_level": 4,
+                            "depends_on": ["calc_1"],
+                        },
+                    ],
+                }
+
+                bp = generate_team_and_workflow_blueprint(
+                    "Parallel research and iterative loop with Jev gate",
+                    db,
+                    llm_callable=lambda **kw: json.dumps(payload),
+                )
+                mat = materialize_blueprint_to_db(bp, db, save_workflow=False)
+                self.assertEqual(mat["errors"], [])
+
+                by_id = {n.get("id"): n for n in mat["graph"] if isinstance(n, dict) and n.get("id")}
+                self.assertIn("loop_1", by_id)
+                self.assertEqual(by_id["loop_1"].get("type"), NODE_TYPE_LOOP)
+                self.assertIsInstance(by_id["loop_1"].get("canvas_ui"), dict)
+
+                self.assertIn("calc_1", by_id)
+                self.assertEqual(by_id["calc_1"].get("type"), NODE_TYPE_TOOL)
+                self.assertEqual(by_id["calc_1"].get("depends_on"), ["loop_1"])
+
+                self.assertIn("dec_1", by_id)
+                self.assertEqual(by_id["dec_1"].get("type"), NODE_TYPE_ROUTER)
+                self.assertEqual(by_id["dec_1"].get("decision_primitive"), "score")
+                self.assertAlmostEqual(float(by_id["dec_1"].get("threshold")), 0.7)
+
+                created_agent = db.read_agent(mat["agent_map"]["analyst"])
+                self.assertIsNotNone(created_agent)
+                self.assertIn("search_web", created_agent.get("tools") or [])
+                self.assertNotIn("web_search", created_agent.get("tools") or [])
+
+                # Heuristic fallback when objective explicitly asks to loop/iterate
+                bp_heur = generate_team_and_workflow_blueprint(
+                    "Iteratively refine and loop until the draft is approved",
+                    db,
+                    llm_callable=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")),
+                )
+                mat2 = materialize_blueprint_to_db(bp_heur, db, save_workflow=False)
+                self.assertEqual(mat2["errors"], [])
+                loop_nodes2 = [n for n in mat2["graph"] if n.get("type") == NODE_TYPE_LOOP]
+                self.assertGreaterEqual(len(loop_nodes2), 1)
 
 
 if __name__ == "__main__":
