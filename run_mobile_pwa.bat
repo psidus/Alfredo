@@ -25,7 +25,19 @@ if %ERRORLEVEL% EQU 0 (
     timeout /t 3 /nobreak >nul
 )
 
-:: 3. Apri il browser locale per installazione PWA su PC
+:: 3. Rileva eseguibile ngrok
+set "NGROK_EXE=ngrok"
+if exist "%~dp0ngrok.exe" set "NGROK_EXE=%~dp0ngrok.exe"
+
+:: 4. Verifica e chiudi eventuali processi ngrok orfani in background (evita ERR_NGROK_334)
+tasklist /fi "imagename eq ngrok.exe" 2>nul | find /i "ngrok.exe" >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    echo [Pulizia] Trovata istanza ngrok precedente in background. Riavvio pulito...
+    taskkill /f /im ngrok.exe >nul 2>&1
+    timeout /t 1 /nobreak >nul
+)
+
+:: 5. Apri il browser locale per installazione PWA su PC
 echo.
 echo [Browser Locale] Apertura interfaccia PWA locale per il PC...
 start http://localhost:8000/app
@@ -42,4 +54,13 @@ echo e poi premi i tre puntini in alto a destra e seleziona "Installa app".
 echo ===============================================================
 echo.
 
-ngrok http --domain=inexpugnable-marvis-nonvalid.ngrok-free.app 8000
+"%NGROK_EXE%" http 8000 --url inexpugnable-marvis-nonvalid.ngrok-free.app
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo ===============================================================
+    echo [ATTENZIONE NGROK] Il tunnel e' terminato o ha restituito errore (Codice: %ERRORLEVEL%).
+    echo Se il dominio e' occupato altrove, controlla: https://dashboard.ngrok.com/endpoints
+    echo ===============================================================
+    echo.
+)
+pause
