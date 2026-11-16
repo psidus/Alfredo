@@ -276,57 +276,128 @@ def render_knowledge_base():
             st.markdown(
                 """
                 <style>
+                /* Tight gap between database cards */
+                [data-testid="stVerticalBlock"]:has(> [class*="st-key-vdb_card_"]) {
+                    gap: 0.08rem !important;
+                }
+                div:has(> [class*="st-key-vdb_card_"]) {
+                    margin-bottom: 0.08rem !important;
+                }
+                [data-testid="stVerticalBlockBorderWrapper"]:has([class*="st-key-vdb_card_"]) {
+                    padding: 0.40rem 0.50rem !important;
+                    overflow: hidden !important;
+                }
                 [class*="st-key-vdb_card_"] {
-                    padding: 0.65rem 0.85rem !important;
-                    border-radius: 8px !important;
-                    margin-bottom: 0.45rem !important;
+                    padding: 0.40rem 0.50rem !important;
+                    border-radius: 6px !important;
+                    margin-bottom: 0.08rem !important;
+                    overflow: hidden !important;
+                    transition: border-color 0.15s ease-in-out !important;
+                }
+                [class*="st-key-vdb_card_"]:hover {
+                    border-color: rgba(108, 99, 255, 0.45) !important;
                 }
                 [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] {
-                    gap: 0.45rem !important;
+                    gap: 0.20rem !important;
                     align-items: center !important;
+                    justify-content: space-between !important;
                     flex-wrap: nowrap !important;
+                    display: flex !important;
+                    flex-direction: row !important;
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    overflow: hidden !important;
                 }
+                /* Title column: strictly shrinkable with ellipsis so it never pushes buttons out */
                 [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > div:first-child,
                 [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
-                    flex: 1 1 auto !important;
+                    flex: 1 1 0% !important;
                     min-width: 0 !important;
-                }
-                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > div:not(:first-child),
-                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:not(:first-child) {
-                    flex: 0 0 1.55rem !important;
-                    width: 1.55rem !important;
-                    min-width: 1.55rem !important;
-                    max-width: 1.55rem !important;
+                    width: 0 !important;
+                    overflow: hidden !important;
                     display: flex !important;
-                    justify-content: center !important;
                     align-items: center !important;
                 }
-                [class*="st-key-vdb_card_"] .vdb-card-title {
-                    font-weight: 600;
-                    font-size: 0.92rem;
-                    line-height: 1.35;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    margin: 0;
-                }
-                [class*="st-key-vdb_card_"] .stButton {
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child [data-testid="stVerticalBlock"] {
                     display: flex !important;
-                    justify-content: center !important;
                     align-items: center !important;
-                    width: 1.55rem !important;
-                    height: 1.55rem !important;
-                    min-height: 1.55rem !important;
+                    justify-content: center !important;
+                    height: 100% !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    overflow: hidden !important;
+                    gap: 0 !important;
                     margin: 0 !important;
                     padding: 0 !important;
                 }
-                [class*="st-key-vdb_card_"] .stButton > button {
-                    width: 1.55rem !important;
-                    min-width: 1.55rem !important;
-                    max-width: 1.55rem !important;
-                    height: 1.55rem !important;
-                    min-height: 1.55rem !important;
-                    max-height: 1.55rem !important;
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child [data-testid="stMarkdownContainer"] {
+                    display: flex !important;
+                    align-items: center !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    overflow: hidden !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] .vdb-card-title {
+                    font-weight: 500;
+                    font-size: 0.74rem !important;
+                    line-height: 1.2 !important;
+                    white-space: nowrap !important;
+                    overflow: hidden !important;
+                    text-overflow: ellipsis !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    display: block !important;
+                    width: 100% !important;
+                    max-width: 100% !important;
+                }
+                /* Button columns: fixed ultra-compact width, zero padding */
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > div:not(:first-child),
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:not(:first-child) {
+                    flex: 0 0 1.15rem !important;
+                    width: 1.15rem !important;
+                    min-width: 1.15rem !important;
+                    max-width: 1.15rem !important;
+                    display: flex !important;
+                    justify-content: center !important;
+                    align-items: center !important;
+                    margin: 0 1px !important;
+                    padding: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:not(:first-child) [data-testid="stVerticalBlock"] {
+                    gap: 0 !important;
+                    padding: 0 !important;
+                    margin: 0 !important;
+                    align-items: center !important;
+                    justify-content: center !important;
+                    display: flex !important;
+                    height: 100% !important;
+                    width: 100% !important;
+                }
+                /* Ultra-compact button box wrapping the icon with zero wasted padding */
+                [class*="st-key-vdb_card_"] .stButton {
+                    display: inline-flex !important;
+                    justify-content: center !important;
+                    align-items: center !important;
+                    width: 1.05rem !important;
+                    height: 1.05rem !important;
+                    min-height: 1.05rem !important;
+                    max-height: 1.05rem !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                }
+                [class*="st-key-vdb_card_"] .stButton > button,
+                [class*="st-key-manage_vdb_"] button,
+                [class*="st-key-query_vdb_"] button,
+                [class*="st-key-del_vdb_"] button,
+                [class*="st-key-toggle_vdb_"] button {
+                    width: 1.05rem !important;
+                    min-width: 1.05rem !important;
+                    max-width: 1.05rem !important;
+                    height: 1.05rem !important;
+                    min-height: 1.05rem !important;
+                    max-height: 1.05rem !important;
                     padding: 0 !important;
                     margin: 0 !important;
                     display: inline-flex !important;
@@ -334,26 +405,31 @@ def render_knowledge_base():
                     justify-content: center !important;
                     gap: 0 !important;
                     line-height: 1 !important;
-                    border-radius: 0.3rem !important;
+                    border-radius: 3px !important;
                     box-sizing: border-box !important;
+                    border-width: 1px !important;
                     overflow: hidden !important;
+                    vertical-align: middle !important;
                 }
+                /* All 4 icons crisp, centered, zero extra margin */
                 [class*="st-key-vdb_card_"] .stButton > button [data-testid="stIconMaterial"],
                 [class*="st-key-vdb_card_"] .stButton > button span {
-                    font-size: 0.82rem !important;
+                    font-size: 0.68rem !important;
                     line-height: 1 !important;
+                    display: inline-flex !important;
+                    align-items: center !important;
+                    justify-content: center !important;
                     margin: 0 !important;
                     padding: 0 !important;
-                }
-                [class*="st-key-vdb_card_"] [class*="st-key-toggle_vdb_"] button [data-testid="stIconMaterial"],
-                [class*="st-key-vdb_card_"] [class*="st-key-toggle_vdb_"] button span {
-                    font-size: 0.95rem !important;
+                    width: auto !important;
+                    height: auto !important;
+                    vertical-align: middle !important;
                 }
                 [class*="st-key-vdb_card_"] .stButton > button [data-testid="stMarkdownContainer"] {
                     display: none !important;
                 }
                 [class*="st-key-vdb_card_"] hr {
-                    margin: 0.5rem 0 0.35rem 0 !important;
+                    margin: 0.35rem 0 0.25rem 0 !important;
                 }
                 </style>
                 """,
@@ -375,7 +451,7 @@ def render_knowledge_base():
 
                 with st.container(key=f"vdb_card_{vdb['id']}", border=True):
                     c_title, c_manage, c_query, c_del, c_toggle = st.columns(
-                        [5.0, 0.7, 0.7, 0.7, 0.7],
+                        [7.2, 0.5, 0.5, 0.5, 0.5],
                         vertical_alignment="center",
                         gap="small",
                     )
