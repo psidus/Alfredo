@@ -404,8 +404,10 @@ def _instantiate_llm(model_id, task_record=None):
         raw_base = (
             os.getenv("LMSTUDIO_API_BASE")
             or os.getenv("LM_STUDIO_API_BASE")
-            or "http://127.0.0.1:1234"
+            or ("http://host.docker.internal:1234" if os.path.exists("/.dockerenv") else "http://127.0.0.1:1234")
         )
+        if os.path.exists("/.dockerenv") and ("localhost" in raw_base or "127.0.0.1" in raw_base):
+            raw_base = raw_base.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
         base_url = openai_compatible_v1_base(raw_base)
         api_key = os.getenv("LMSTUDIO_API_KEY") or os.getenv("LM_STUDIO_API_KEY") or "lm-studio"
         try:

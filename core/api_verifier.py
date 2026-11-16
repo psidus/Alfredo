@@ -489,12 +489,14 @@ def _fetch_lmstudio(api_key: str = "", base_url_override: str = None):
         base_url_override
         or os.getenv("LMSTUDIO_API_BASE")
         or os.getenv("LM_STUDIO_API_BASE")
-        or "http://127.0.0.1:1234"
+        or ("http://host.docker.internal:1234" if os.path.exists("/.dockerenv") else "http://127.0.0.1:1234")
     )
+    if os.path.exists("/.dockerenv") and ("localhost" in base_url or "127.0.0.1" in base_url):
+        base_url = base_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
     url = f"{openai_compatible_v1_base(base_url)}/models"
     headers = {"Authorization": f"Bearer {api_key or 'lm-studio'}"}
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(url, headers=headers, timeout=2)
         if response.status_code in [401, 403]:
             return {"success": False, "error": "Invalid API Key"}
         response.raise_for_status()

@@ -1691,7 +1691,7 @@ def render_api_vault():
                     "against the local server and syncs models. Default GGUF folder is `~/.lmstudio/models` on this PC; "
                     "another computer pastes its own path. Start **LM Studio → Developer → Local Server** first."
                 )
-                current_lms_url = os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE") or "http://127.0.0.1:1234"
+                current_lms_url = os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE") or ("http://host.docker.internal:1234" if os.path.exists("/.dockerenv") else "http://127.0.0.1:1234")
                 current_lms_key = os.getenv("LMSTUDIO_API_KEY") or "lm-studio"
                 new_lms_url = st.text_input(
                     "LM Studio Base URL",
@@ -2003,7 +2003,7 @@ def render_api_vault():
                 st.caption(f"ℹ️ {ollama_models['warning']}")
 
         lms_models = {"success": False}
-        if os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE"):
+        if os.getenv("LMSTUDIO_API_BASE") or os.getenv("LM_STUDIO_API_BASE") or os.path.exists("/.dockerenv"):
             lms_models = _fetch_lmstudio()
         LMS_MODELS = lms_models.get("chat_models", []) if lms_models.get("success") else []
         LMS_MODELS_DETAILED = lms_models.get("chat_models_detailed", []) if lms_models.get("success") else []

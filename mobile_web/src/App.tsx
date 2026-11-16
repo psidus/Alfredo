@@ -166,43 +166,49 @@ export default function App() {
           </div>
         </header>
 
-        {view === "settings" ? (
+        {view === "settings" && (
           <SettingsScreen
             config={config}
             onSave={handleSaveConfig}
             lang={lang}
             onLanguageChange={handleLanguageChange}
           />
-        ) : view === "run" && runId != null ? (
+        )}
+
+        {view === "run" && runId != null && (
           <RunDetailScreen
             config={config}
             runId={runId}
             onBack={() => setView("tabs")}
             lang={lang}
           />
-        ) : (
-          <>
-            {tab === "chat" ? (
-              <ChatScreen
-                config={config}
-                onStarted={(id) => openRun(id)}
-                onMasterModel={setMasterModel}
-              />
-            ) : null}
-            {tab === "workflows" ? (
-              <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />
-            ) : null}
-            {tab === "runs" ? <RunsScreen config={config} onOpen={openRun} /> : null}
-            {tab === "files" ? <FilesScreen config={config} lang={lang} /> : null}
-            {tab === "approvals" ? (
-              <ApprovalsScreen
-                config={config}
-                onOpenRun={openRun}
-                onPendingCount={(count) => setPending(count)}
-              />
-            ) : null}
-          </>
         )}
+
+        <div style={{ display: view === "tabs" ? "contents" : "none" }}>
+          <div style={{ display: tab === "chat" ? "contents" : "none" }}>
+            <ChatScreen
+              config={config}
+              onStarted={(id) => openRun(id)}
+              onMasterModel={setMasterModel}
+            />
+          </div>
+          <div style={{ display: tab === "workflows" ? "contents" : "none" }}>
+            <WorkflowsScreen config={config} onStarted={(id) => openRun(id)} />
+          </div>
+          <div style={{ display: tab === "runs" ? "contents" : "none" }}>
+            <RunsScreen config={config} onOpen={openRun} />
+          </div>
+          <div style={{ display: tab === "files" ? "contents" : "none" }}>
+            <FilesScreen config={config} lang={lang} />
+          </div>
+          <div style={{ display: tab === "approvals" ? "contents" : "none" }}>
+            <ApprovalsScreen
+              config={config}
+              onOpenRun={openRun}
+              onPendingCount={(count) => setPending(count)}
+            />
+          </div>
+        </div>
 
         <nav className="bottom-nav" aria-label="Navigazione principale">
           {(["chat", "workflows", "runs", "approvals", "files"] as Tab[]).map((key) => (

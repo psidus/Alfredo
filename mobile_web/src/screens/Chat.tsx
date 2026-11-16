@@ -242,6 +242,7 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
     ];
     const shouldAutoSpeak = Boolean(opts?.isVoice || autoVoice);
     setMessages(next);
+    saveChat(next);
     if (!opts?.isVoice) {
       setDraft("");
     }
@@ -258,15 +259,17 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
         );
       }
       const replyIndex = next.length;
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: reply.reply || t("noTextReply"),
-          workflow: reply.workflow ?? null,
-          started_run_id: reply.started_run_id ?? null,
-        },
-      ]);
+      const newAssistantMessage: ChatMessage = {
+        role: "assistant",
+        content: reply.reply || t("noTextReply"),
+        workflow: reply.workflow ?? null,
+        started_run_id: reply.started_run_id ?? null,
+      };
+      setMessages((prev) => {
+        const updated = [...prev, newAssistantMessage];
+        saveChat(updated);
+        return updated;
+      });
       if (shouldAutoSpeak && (reply.reply || "").trim()) {
         setAutoPlayIndex(replyIndex);
       }
