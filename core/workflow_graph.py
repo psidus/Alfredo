@@ -300,6 +300,54 @@ def resolve_loop_body_ids(graph: Sequence[Dict[str, Any]], loop_node: Dict[str, 
     return out
 
 
+def _loop_body_owners(graph: Sequence[Dict[str, Any]]) -> Dict[str, str]:
+    """Map a loop-body node id to the loop that owns it.
+
+    Outer nodes must depend on the loop (structured exit), never on a body member.
+    The first loop wins; overlapping bodies are rejected later by ``validate_graph``.
+    """
+    owners: Dict[str, str] = {}
+    for node in graph:
+        if node.get("type") != NODE_TYPE_LOOP or not node.get("id"):
+            continue
+        for body_id in resolve_loop_body_ids(graph, node):
+            owners.setdefault(body_id, node["id"])
+    return owners
+
+
+def _export_sink_ids(graph: Sequence[Dict[str, Any]]) -> List[str]:
+    """Executable nodes an auto-generated export may depend on.
+
+    Loop body members are not sinks: nothing is supposed to depend on them, so
+    treating "unreferenced" as "terminal" wires the export inside the loop and
+    ``validate_graph`` rejects the cross-edge.
+    """
+    body_owners = _loop_body_owners(graph)
+    executable_ids = [
+        n["id"] for n in graph if n.get("id") and n.get("type") in EXECUTABLE_TYPES
+    ]
+    referenced: Set[str] = set()
+    for node in graph:
+        referenced.update(node.get("depends_on") or [])
+
+    visible = [node_id for node_id in executable_ids if node_id not in body_owners]
+    sinks = [node_id for node_id in visible if node_id not in referenced]
+    if sinks:
+        return sinks
+
+    # No outer terminal node: leave through the loops whose bodies are unreferenced.
+    for node_id in executable_ids:
+        if node_id in body_owners and node_id not in referenced:
+            loop_id = body_owners[node_id]
+            if loop_id not in sinks:
+                sinks.append(loop_id)
+    if sinks:
+        return sinks
+    if visible:
+        return visible
+    return list(dict.fromkeys(body_owners.values()))
+
+
 def materialize_export_from_header(
     graph: List[Dict[str, Any]],
     expected_exports: Optional[Sequence[str]] = None,
@@ -312,12 +360,7 @@ def materialize_export_from_header(
     if any(n.get("type") == NODE_TYPE_EXPORT for n in graph):
         return graph
 
-    # Depend on all sink executable nodes (no other node depends on them… or max level)
-    executable_ids = [n["id"] for n in graph if n.get("type") in EXECUTABLE_TYPES]
-    referenced: Set[str] = set()
-    for n in graph:
-        referenced.update(n.get("depends_on") or [])
-    sinks = [i for i in executable_ids if i not in referenced] or executable_ids
+    sinks = _export_sink_ids(graph)
 
     max_level = max((n.get("execution_level", 1) for n in graph), default=1)
     export_node = {
@@ -360,7 +403,28 @@ def normalize_graph(
 
     if materialize_export:
         graph = materialize_export_from_header(graph, expected_exports, export_instructions)
-    return graph
+    return repair_structured_loop_edges(graph)
+
+
+def repair_structured_loop_edges(graph: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Point outer ``depends_on`` at the loop, never at a node inside its body."""
+    body_owners = _loop_body_owners(graph)
+    if not body_owners:
+        return list(graph)
+    repaired: List[Dict[str, Any]] = []
+    for node in graph:
+        item = dict(node)
+        if item.get("id") in body_owners or item.get("type") == NODE_TYPE_LOOP:
+            repaired.append(item)
+            continue
+        deps: List[str] = []
+        for dep in item.get("depends_on") or []:
+            mapped = body_owners.get(dep, dep)
+            if mapped != item.get("id") and mapped not in deps:
+                deps.append(mapped)
+        item["depends_on"] = deps
+        repaired.append(item)
+    return repaired
 
 
 def node_by_id(graph: Sequence[Dict[str, Any]], node_id: str) -> Optional[Dict[str, Any]]:

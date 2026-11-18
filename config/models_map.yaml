@@ -1,3 +1,406 @@
+capability_catalog:
+  claude-3-5-sonnet-20240620:
+    max_context: 200000
+    strengths:
+    - complex_reasoning
+    - code_generation
+    - analysis
+    - structured_json
+    tier: expert
+    weaknesses: []
+  claude-3-haiku-20240307:
+    max_context: 200000
+    strengths:
+    - speed
+    - simple_analysis
+    - formatting
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  claude-3-opus-20240229:
+    max_context: 200000
+    strengths:
+    - complex_reasoning
+    - code_generation
+    - analysis
+    - structured_json
+    - planning
+    tier: expert
+    weaknesses: []
+  codestral-latest:
+    max_context: 32768
+    strengths:
+    - code_generation
+    - code_analysis
+    - structured_json
+    tier: advanced
+    weaknesses:
+    - general_knowledge
+  deepseek-r1:14b:
+    max_context: 16384
+    strengths:
+    - reasoning
+    - code_generation
+    - math
+    tier: standard
+    weaknesses:
+    - structured_json
+    - dag_planning
+    - long_context
+  gemini-1.5-flash:
+    max_context: 1048576
+    strengths:
+    - speed
+    - analysis
+    - summarization
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  gemini-1.5-flash-8b:
+    max_context: 1048576
+    strengths:
+    - speed
+    - simple_qa
+    - formatting
+    tier: basic
+    weaknesses:
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  gemini-1.5-pro:
+    max_context: 2097152
+    strengths:
+    - reasoning
+    - analysis
+    - code_generation
+    - long_context
+    tier: advanced
+    weaknesses: []
+  gemini-2.0-flash:
+    max_context: 1048576
+    strengths:
+    - speed
+    - analysis
+    - structured_json
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+  gemini-2.5-flash:
+    max_context: 1048576
+    strengths:
+    - speed
+    - analysis
+    - structured_json
+    - reasoning
+    - planning
+    tier: advanced
+    weaknesses:
+    - very_complex_dag
+  gemini-2.5-flash-lite:
+    max_context: 1048576
+    strengths:
+    - speed
+    - simple_analysis
+    - formatting
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  gemini-2.5-pro:
+    max_context: 1048576
+    strengths:
+    - complex_reasoning
+    - dag_planning
+    - code_generation
+    - structured_json
+    - analysis
+    tier: expert
+    weaknesses: []
+  gemini-3.1-pro:
+    max_context: 1048576
+    strengths:
+    - complex_reasoning
+    - dag_planning
+    - code_generation
+    - structured_json
+    - analysis
+    tier: expert
+    weaknesses: []
+  gemini-3.5-flash:
+    max_context: 1048576
+    strengths:
+    - speed
+    - analysis
+    - structured_json
+    - reasoning
+    tier: advanced
+    weaknesses: []
+  gemma3:12b:
+    max_context: 16384
+    strengths:
+    - summarization
+    - analysis
+    - simple_json
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - dag_planning
+  gpt-3.5-turbo:
+    max_context: 16384
+    strengths:
+    - speed
+    - simple_analysis
+    - formatting
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  gpt-4-turbo:
+    max_context: 128000
+    strengths:
+    - reasoning
+    - code_generation
+    - structured_json
+    - analysis
+    tier: advanced
+    weaknesses: []
+  gpt-4o:
+    max_context: 128000
+    strengths:
+    - complex_reasoning
+    - code_generation
+    - structured_json
+    - analysis
+    tier: expert
+    weaknesses: []
+  gpt-4o-mini:
+    max_context: 128000
+    strengths:
+    - speed
+    - simple_analysis
+    - formatting
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  gpt-oss:20b:
+    max_context: 16384
+    strengths:
+    - reasoning
+    - analysis
+    - code_generation
+    tier: advanced
+    weaknesses:
+    - long_context
+  jev:latest:
+    decision_only: true
+    max_context: 16384
+    strengths:
+    - system_one_decision
+    - binary_noul
+    - routing_choice
+    - rubric_score
+    - speed
+    tier: basic
+    weaknesses:
+    - text_generation
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  llama3-70b-8192:
+    max_context: 8192
+    strengths:
+    - reasoning
+    - analysis
+    - code_generation
+    tier: advanced
+    weaknesses:
+    - long_context
+  llama3-8b-8192:
+    max_context: 8192
+    strengths:
+    - speed
+    - simple_qa
+    - formatting
+    tier: basic
+    weaknesses:
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  llama3.1:latest:
+    max_context: 8192
+    strengths:
+    - analysis
+    - reasoning
+    - summarization
+    tier: standard
+    weaknesses:
+    - structured_json
+    - dag_planning
+    - long_context
+  ministral-3b-latest:
+    max_context: 8192
+    strengths:
+    - simple_qa
+    - formatting
+    - keyword_extraction
+    tier: basic
+    weaknesses:
+    - structured_json
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  ministral-8b-latest:
+    max_context: 16384
+    strengths:
+    - summarization
+    - simple_analysis
+    - keyword_extraction
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - dag_planning
+    - code_generation
+  mistral-large-latest:
+    max_context: 128000
+    strengths:
+    - reasoning
+    - analysis
+    - structured_json
+    - code_generation
+    tier: advanced
+    weaknesses: []
+  mistral-small-latest:
+    max_context: 32768
+    strengths:
+    - speed
+    - analysis
+    - summarization
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  mixtral-8x7b-32768:
+    max_context: 32768
+    strengths:
+    - analysis
+    - summarization
+    - multilingual
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - expert_code
+  nimble:latest:
+    decision_only: true
+    max_context: 16384
+    strengths:
+    - system_one_decision
+    - binary_noul
+    - routing_choice
+    - rubric_score
+    - speed
+    tier: basic
+    weaknesses:
+    - text_generation
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  pixtral-12b-2409:
+    max_context: 16384
+    strengths:
+    - vision
+    - analysis
+    - summarization
+    tier: standard
+    weaknesses:
+    - complex_reasoning
+    - code_generation
+  pixtral-large-latest:
+    max_context: 128000
+    strengths:
+    - vision
+    - reasoning
+    - analysis
+    tier: advanced
+    weaknesses: []
+  qwen2.5:14b:
+    max_context: 16384
+    strengths:
+    - analysis
+    - structured_json
+    - multilingual
+    tier: standard
+    weaknesses:
+    - complex_dag
+    - advanced_code
+  qwen3-vl:8b:
+    max_context: 8192
+    strengths:
+    - vision
+    - simple_qa
+    - formatting
+    tier: basic
+    weaknesses:
+    - structured_json
+    - complex_reasoning
+    - multi_step_planning
+  qwen3:14b:
+    max_context: 32768
+    strengths:
+    - reasoning
+    - structured_json
+    - analysis
+    - planning
+    tier: advanced
+    weaknesses:
+    - very_complex_dag
+    - expert_code
+  tev1:0.8b:
+    decision_only: true
+    max_context: 8192
+    strengths:
+    - system_one_decision
+    - binary_noul
+    - routing_choice
+    - speed
+    tier: basic
+    weaknesses:
+    - text_generation
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  tev1:latest:
+    decision_only: true
+    max_context: 16384
+    strengths:
+    - system_one_decision
+    - binary_noul
+    - routing_choice
+    - rubric_score
+    - speed
+    tier: basic
+    weaknesses:
+    - text_generation
+    - complex_reasoning
+    - code_generation
+    - dag_planning
+  typesafe/jev-1.14:
+    decision_only: true
+    max_context: 32768
+    strengths:
+    - system_one_decision
+    - binary_noul
+    - routing_choice
+    - rubric_score
+    - speed
+    tier: basic
+    weaknesses:
+    - text_generation
+    - complex_reasoning
+    - code_generation
+    - dag_planning
 local_models:
 - llama3
 - mistral
@@ -12,16 +415,58 @@ provider_map:
     - claude-3-haiku-20240307
     provider: Anthropic
   GEMINI_API_KEY:
+    embed_models:
+    - gemini-embedding-001
     models:
+    - nano-banana-pro-preview
+    - lyria-3.5
+    - lyria-3-pro-preview
+    - lyria-3-clip-preview
+    - gemma-4-31b-it
+    - gemma-4-26b-a4b-it
+    - gemini-robotics-er-2-preview
+    - gemini-pro-latest
+    - gemini-omni-flash-preview
+    - gemini-omni-1.2-flash
+    - gemini-omni-1.1-flash
+    - gemini-nano-banana-2.1
+    - gemini-flash-lite-latest
+    - gemini-flash-latest
+    - gemini-4-hydrogen
+    - gemini-4-carbon
+    - gemini-4-argon
+    - gemini-3.8-flash-tts
+    - gemini-3.8-flash-lite-tts
+    - gemini-3.8-flash
+    - gemini-3.7-flash
+    - gemini-3.6-flash
+    - gemini-3.5-transcribe
+    - gemini-3.5-flash-lite
     - gemini-3.5-flash
-    - gemini-3.1-pro
+    - gemini-3.1-pro-preview-customtools
+    - gemini-3.1-pro-preview
+    - gemini-3.1-flash-tts-preview
+    - gemini-3.1-flash-lite-preview
+    - gemini-3.1-flash-lite-image
+    - gemini-3.1-flash-lite
+    - gemini-3.1-flash-image-preview
+    - gemini-3.1-flash-image
+    - gemini-3-pro-image-preview
+    - gemini-3-pro-image
+    - gemini-3-flash-preview
+    - gemini-2.5-pro-preview-tts
     - gemini-2.5-pro
-    - gemini-2.5-flash
+    - gemini-2.5-flash-preview-tts
     - gemini-2.5-flash-lite
-    - gemini-2.0-flash
-    - gemini-1.5-pro
-    - gemini-1.5-flash
-    - gemini-1.5-flash-8b
+    - gemini-2.5-flash-image
+    - gemini-2.5-flash
+    - gemini-2.5-computer-use-preview-10-2025
+    - deep-research-pro-preview-12-2025
+    - deep-research-preview-04-2026
+    - deep-research-max-preview-04-2026
+    - antigravity-preview-latest
+    - antigravity-preview-09-2026
+    - antigravity-preview-05-2026
     provider: Google
   GROQ_API_KEY:
     models:
@@ -29,6 +474,10 @@ provider_map:
     - llama3-8b-8192
     - mixtral-8x7b-32768
     provider: Groq
+  LMSTUDIO_API_KEY:
+    embed_models: []
+    models: []
+    provider: LMStudio
   MISTRAL_API_KEY:
     models:
     - mistral-large-latest
@@ -57,10 +506,6 @@ provider_map:
     - tev1:0.8b
     - tev1:latest
     provider: Ollama
-  LMSTUDIO_API_KEY:
-    models: []
-    embed_models: []
-    provider: LMStudio
   OPENAI_API_KEY:
     models:
     - gpt-4o
@@ -68,250 +513,3 @@ provider_map:
     - gpt-3.5-turbo
     - gpt-4o-mini
     provider: OpenAI
-
-capability_catalog:
-  # Tier: basic | standard | advanced | expert
-  #   basic:    simple extraction, formatting, short Q&A (1-7B params)
-  #   standard: analysis, summarization, structured research (8-14B params)
-  #   advanced: complex planning, structured JSON, DAG design (14B+ / fast cloud)
-  #   expert:   multi-step reasoning, code gen, workflow decomposition (top cloud)
-
-  # --- Decision / System One Models (Jev-compatible, non-autoregressive) ---
-  "jev:latest":
-    tier: basic
-    decision_only: true
-    max_context: 16384
-    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
-    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
-
-  "typesafe/jev-1.14":
-    tier: basic
-    decision_only: true
-    max_context: 32768
-    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
-    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
-
-  "tev1:latest":
-    tier: basic
-    decision_only: true
-    max_context: 16384
-    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
-    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
-
-  "tev1:0.8b":
-    tier: basic
-    decision_only: true
-    max_context: 8192
-    strengths: [system_one_decision, binary_noul, routing_choice, speed]
-    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
-
-  "nimble:latest":
-    tier: basic
-    decision_only: true
-    max_context: 16384
-    strengths: [system_one_decision, binary_noul, routing_choice, rubric_score, speed]
-    weaknesses: [text_generation, complex_reasoning, code_generation, dag_planning]
-
-  # --- Local Models (Ollama) ---
-  "ministral-3b-latest":
-    tier: basic
-    max_context: 8192
-    strengths: [simple_qa, formatting, keyword_extraction]
-    weaknesses: [structured_json, complex_reasoning, code_generation, dag_planning]
-
-  "qwen3-vl:8b":
-    tier: basic
-    max_context: 8192
-    strengths: [vision, simple_qa, formatting]
-    weaknesses: [structured_json, complex_reasoning, multi_step_planning]
-
-  "ministral-8b-latest":
-    tier: standard
-    max_context: 16384
-    strengths: [summarization, simple_analysis, keyword_extraction]
-    weaknesses: [complex_reasoning, dag_planning, code_generation]
-
-  "gemma3:12b":
-    tier: standard
-    max_context: 16384
-    strengths: [summarization, analysis, simple_json]
-    weaknesses: [complex_reasoning, dag_planning]
-
-  "deepseek-r1:14b":
-    tier: standard
-    max_context: 16384
-    strengths: [reasoning, code_generation, math]
-    weaknesses: [structured_json, dag_planning, long_context]
-
-  "qwen2.5:14b":
-    tier: standard
-    max_context: 16384
-    strengths: [analysis, structured_json, multilingual]
-    weaknesses: [complex_dag, advanced_code]
-
-  "qwen3:14b":
-    tier: advanced
-    max_context: 32768
-    strengths: [reasoning, structured_json, analysis, planning]
-    weaknesses: [very_complex_dag, expert_code]
-
-  "llama3.1:latest":
-    tier: standard
-    max_context: 8192
-    strengths: [analysis, reasoning, summarization]
-    weaknesses: [structured_json, dag_planning, long_context]
-
-  "gpt-oss:20b":
-    tier: advanced
-    max_context: 16384
-    strengths: [reasoning, analysis, code_generation]
-    weaknesses: [long_context]
-
-  # --- Cloud Models (Gemini) ---
-  "gemini-2.5-flash-lite":
-    tier: standard
-    max_context: 1048576
-    strengths: [speed, simple_analysis, formatting]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "gemini-1.5-flash-8b":
-    tier: basic
-    max_context: 1048576
-    strengths: [speed, simple_qa, formatting]
-    weaknesses: [complex_reasoning, code_generation, dag_planning]
-
-  "gemini-1.5-flash":
-    tier: standard
-    max_context: 1048576
-    strengths: [speed, analysis, summarization]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "gemini-2.0-flash":
-    tier: standard
-    max_context: 1048576
-    strengths: [speed, analysis, structured_json]
-    weaknesses: [complex_reasoning]
-
-  "gemini-2.5-flash":
-    tier: advanced
-    max_context: 1048576
-    strengths: [speed, analysis, structured_json, reasoning, planning]
-    weaknesses: [very_complex_dag]
-
-  "gemini-3.5-flash":
-    tier: advanced
-    max_context: 1048576
-    strengths: [speed, analysis, structured_json, reasoning]
-    weaknesses: []
-
-  "gemini-1.5-pro":
-    tier: advanced
-    max_context: 2097152
-    strengths: [reasoning, analysis, code_generation, long_context]
-    weaknesses: []
-
-  "gemini-3.1-pro":
-    tier: expert
-    max_context: 1048576
-    strengths: [complex_reasoning, dag_planning, code_generation, structured_json, analysis]
-    weaknesses: []
-
-  "gemini-2.5-pro":
-    tier: expert
-    max_context: 1048576
-    strengths: [complex_reasoning, dag_planning, code_generation, structured_json, analysis]
-    weaknesses: []
-
-  # --- Cloud Models (OpenAI) ---
-  "gpt-3.5-turbo":
-    tier: standard
-    max_context: 16384
-    strengths: [speed, simple_analysis, formatting]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "gpt-4o-mini":
-    tier: standard
-    max_context: 128000
-    strengths: [speed, simple_analysis, formatting]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "gpt-4-turbo":
-    tier: advanced
-    max_context: 128000
-    strengths: [reasoning, code_generation, structured_json, analysis]
-    weaknesses: []
-
-  "gpt-4o":
-    tier: expert
-    max_context: 128000
-    strengths: [complex_reasoning, code_generation, structured_json, analysis]
-    weaknesses: []
-
-  # --- Cloud Models (Anthropic) ---
-  "claude-3-haiku-20240307":
-    tier: standard
-    max_context: 200000
-    strengths: [speed, simple_analysis, formatting]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "claude-3-5-sonnet-20240620":
-    tier: expert
-    max_context: 200000
-    strengths: [complex_reasoning, code_generation, analysis, structured_json]
-    weaknesses: []
-
-  "claude-3-opus-20240229":
-    tier: expert
-    max_context: 200000
-    strengths: [complex_reasoning, code_generation, analysis, structured_json, planning]
-    weaknesses: []
-
-  # --- Cloud Models (Groq) ---
-  "llama3-8b-8192":
-    tier: basic
-    max_context: 8192
-    strengths: [speed, simple_qa, formatting]
-    weaknesses: [complex_reasoning, code_generation, dag_planning]
-
-  "llama3-70b-8192":
-    tier: advanced
-    max_context: 8192
-    strengths: [reasoning, analysis, code_generation]
-    weaknesses: [long_context]
-
-  "mixtral-8x7b-32768":
-    tier: standard
-    max_context: 32768
-    strengths: [analysis, summarization, multilingual]
-    weaknesses: [complex_reasoning, expert_code]
-
-  # --- Cloud Models (Mistral) ---
-  "mistral-small-latest":
-    tier: standard
-    max_context: 32768
-    strengths: [speed, analysis, summarization]
-    weaknesses: [complex_reasoning, expert_code]
-
-  "pixtral-12b-2409":
-    tier: standard
-    max_context: 16384
-    strengths: [vision, analysis, summarization]
-    weaknesses: [complex_reasoning, code_generation]
-
-  "pixtral-large-latest":
-    tier: advanced
-    max_context: 128000
-    strengths: [vision, reasoning, analysis]
-    weaknesses: []
-
-  "mistral-large-latest":
-    tier: advanced
-    max_context: 128000
-    strengths: [reasoning, analysis, structured_json, code_generation]
-    weaknesses: []
-
-  "codestral-latest":
-    tier: advanced
-    max_context: 32768
-    strengths: [code_generation, code_analysis, structured_json]
-    weaknesses: [general_knowledge]

@@ -5247,8 +5247,19 @@ def render_workflow_assembler():
             materialize_export=True,
         )
 
-        if "last_editing_workflow_id" not in st.session_state or st.session_state.last_editing_workflow_id != current_editing_wf_id:
+        # A just-generated draft lives on Create New (no saved id). Do not let the
+        # editor-switch reset replace it with the empty saved-workflow template.
+        _holding_new_draft = (
+            int(st.session_state.get("wf_architect_protect") or 0) > 0
+            and current_editing_wf_id is None
+        )
+        if not _holding_new_draft and (
+            "last_editing_workflow_id" not in st.session_state
+            or st.session_state.last_editing_workflow_id != current_editing_wf_id
+        ):
             st.session_state.last_editing_workflow_id = current_editing_wf_id
+            st.session_state.pop("wf_architect_graph", None)
+            st.session_state.wf_architect_protect = 0
             st.session_state.wf_name_input = default_wf_name
             st.session_state.wf_human_check = default_wf_human_check
             st.session_state.wf_expected_exports = default_wf_expected_exports
@@ -5283,6 +5294,27 @@ def render_workflow_assembler():
                 st.session_state.wf_selected_task_ids,
                 materialize_export=False,
             )
+
+        # The canvas board can echo a blank state and wipe a graph that was just
+        # generated. The name field survives (it is a widget); the block list does not.
+        # Put the architect graph back until the board has drawn it.
+        _protect = int(st.session_state.get("wf_architect_protect") or 0)
+        _backup = st.session_state.get("wf_architect_graph") or []
+        _backup_content = [
+            n for n in _backup
+            if isinstance(n, dict) and n.get("type") not in ("level",)
+        ]
+        _live_content = [
+            n for n in (st.session_state.get("wf_selected_task_ids") or [])
+            if isinstance(n, dict) and n.get("type") not in ("level",)
+        ]
+        if _protect and _backup_content and not _live_content:
+            st.session_state.wf_selected_task_ids = normalize_graph(
+                _backup, materialize_export=False
+            )
+            st.session_state.pop("wf_flow_state", None)
+        elif _protect and _live_content:
+            st.session_state.wf_architect_protect = _protect - 1
 
         def remove_wf_task(task_id):
             if task_id in st.session_state.wf_selected_task_ids:

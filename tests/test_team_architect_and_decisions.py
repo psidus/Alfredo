@@ -457,6 +457,65 @@ class TeamArchitectTests(unittest.TestCase):
         self.assertIn("Goal: Trova vulnerabilità.", auditor_rec["backstory"])
         self.assertIn("\n\nBackstory: Esperto AppSec.", auditor_rec["backstory"])
 
+    def test_heuristic_word_export_does_not_depend_on_loop_body(self):
+        """Objectives that mention a Word doc and 'while'/'until' used to fail validation.
+
+        The offline builder inserts loop_refine/step_iterate, then export materialization
+        treated the unreferenced body node as a sink.
+        """
+        objective = (
+            "create a word doc to add a resume made by an agent from chat messages. "
+            "once a message is resumed and added to the doc I can add another message "
+            "to the same doc. until the chat goes on the resumes are added as a bullet list "
+            "in word. input: the title at the beginning and the list of messages "
+            "(agent work in parallel while I am sending others). "
+            "if I call off and restart, a new doc in workspace."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteManager(db_path=os.path.join(tmp, "test_word_loop.db")) as db:
+                bp = generate_team_and_workflow_blueprint(
+                    objective,
+                    db,
+                    include_decision_gates=True,
+                    llm_callable=lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("offline")),
+                )
+                mat = materialize_blueprint_to_db(bp, db, save_workflow=False)
+                self.assertEqual(mat["errors"], [])
+                by_id = {n.get("id"): n for n in mat["graph"] if isinstance(n, dict)}
+                self.assertEqual(by_id["loop_session"]["body_node_ids"], ["step_summarize", "step_append"])
+                self.assertEqual(by_id["loop_session"]["depends_on"], ["step_open_doc"])
+                exports = [n for n in mat["graph"] if n.get("type") == "export"]
+                self.assertEqual(len(exports), 1)
+                self.assertNotIn("step_summarize", exports[0].get("depends_on") or [])
+                self.assertNotIn("step_append", exports[0].get("depends_on") or [])
+                self.assertEqual(by_id["gate_session_end"]["depends_on"], ["loop_session"])
+                self.assertIn("gate_session_end", exports[0].get("depends_on") or [])
+
+                shallow = {
+                    "workflow_name": "Continuous Chat Summarizer to Word Document",
+                    "description": "Only a title was returned.",
+                    "agents": [{"agent_key": "summarizer", "name": "Chat Summarizer", "role": "Summarizer"}],
+                    "nodes": [{
+                        "id": "only_step",
+                        "type": "task",
+                        "name": "Summarize Chat Messages",
+                        "agent_key": "summarizer",
+                        "description": "Analyze incoming chat messages from {user_input}.",
+                        "expected_output": "A bullet.",
+                    }],
+                }
+                expanded = generate_team_and_workflow_blueprint(
+                    objective,
+                    db,
+                    include_decision_gates=True,
+                    llm_callable=lambda **kw: json.dumps(shallow),
+                )
+                ids = [n.get("id") for n in expanded["nodes"]]
+                self.assertIn("loop_session", ids)
+                self.assertIn("step_open_doc", ids)
+                self.assertIn("step_append", ids)
+                self.assertNotIn("only_step", ids)
+
 
 class OllamaDiscoveryTests(unittest.TestCase):
     def test_fetch_ollama_falls_back_from_unreachable_lan_ip_to_loopback(self):

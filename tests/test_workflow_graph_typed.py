@@ -204,6 +204,96 @@ class DesugarTests(unittest.TestCase):
         self.assertEqual(len(export), 1)
         self.assertIn("tool1", export[0]["depends_on"])
 
+    def test_export_depends_on_loop_not_on_body(self):
+        """A loop body is unreferenced by design; the export must use the loop exit."""
+        graph = normalize_graph(
+            [
+                {"id": "step_1", "type": "task", "task_id": 1, "depends_on": [], "execution_level": 1},
+                {
+                    "id": "step_iterate",
+                    "type": "task",
+                    "task_id": 2,
+                    "depends_on": ["step_1"],
+                    "execution_level": 2,
+                },
+                {
+                    "id": "loop_refine",
+                    "type": "loop",
+                    "loop_mode": "while",
+                    "scope": "nodes",
+                    "body_node_ids": ["step_iterate"],
+                    "depends_on": ["step_1"],
+                    "execution_level": 2,
+                    "max_iterations": 3,
+                    "exit_condition": {"output_match": {"source_node": "step_iterate", "pattern": "APPROVED"}},
+                },
+                {
+                    "id": "step_final",
+                    "type": "task",
+                    "task_id": 3,
+                    "depends_on": ["loop_refine"],
+                    "execution_level": 3,
+                },
+            ],
+            expected_exports=["word"],
+        )
+        export = next(n for n in graph if n.get("type") == "export")
+        self.assertEqual(export["depends_on"], ["step_final"])
+        self.assertNotIn("step_iterate", export["depends_on"])
+        errors, _warnings = validate_graph(graph)
+        self.assertEqual(errors, [])
+
+
+class CanvasEchoTests(unittest.TestCase):
+    """A canvas component that does not echo our node ids must not wipe the graph."""
+
+    def test_foreign_or_empty_canvas_keeps_blocks(self):
+        from core.workflow_canvas import flow_state_to_graph_updates
+
+        graph = [
+            {"id": "lvl1", "type": "level", "level": 1},
+            {
+                "id": "step_open_doc",
+                "type": "task",
+                "task_id": 1,
+                "depends_on": [],
+                "execution_level": 1,
+            },
+            {
+                "id": "loop_session",
+                "type": "loop",
+                "loop_mode": "while",
+                "scope": "nodes",
+                "body_node_ids": ["step_open_doc"],
+                "depends_on": [],
+                "execution_level": 1,
+            },
+        ]
+
+        class _State:
+            def __init__(self, nodes):
+                self.nodes = nodes
+                self.edges = []
+
+        for state in (_State([]), _State([{"id": "react-blank-1", "position": {"x": 0, "y": 0}}])):
+            out = flow_state_to_graph_updates(state, graph, restack=False)
+            ids = {n["id"] for n in out}
+            self.assertIn("step_open_doc", ids)
+            self.assertIn("loop_session", ids)
+
+    def test_real_delete_still_drops_the_missing_block(self):
+        from core.workflow_canvas import flow_state_to_graph_updates
+
+        graph = [
+            {"id": "keep", "type": "task", "task_id": 1, "depends_on": [], "execution_level": 1},
+            {"id": "drop", "type": "task", "task_id": 2, "depends_on": ["keep"], "execution_level": 1},
+        ]
+        state = type("S", (), {"nodes": [{"id": "keep", "position": {"x": 0, "y": 0}}], "edges": []})()
+        out = flow_state_to_graph_updates(state, graph, restack=False)
+        ids = {n["id"] for n in out}
+        self.assertIn("keep", ids)
+        self.assertNotIn("drop", ids)
+
 
 if __name__ == "__main__":
     unittest.main()

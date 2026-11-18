@@ -808,6 +808,11 @@ REQUIREMENTS:
 - Keep teams lean (2-4 agents unless the objective clearly needs more).
 - If `include_decision_gates` is true, include at least 1 binary `decision` node (`routes: ["yes", "no"]`, Jev/System One) and branch downstream tasks cleanly using `when_route: {{"from": "<decision_id>", "equals": "yes"|"no"}}`.
 - Use `loop` (`while` or `for_each`) when the objective asks for iterative refinement, multi-pass improvement, or processing batches/lists until criteria pass.
+- SESSION DOCUMENT: if the user wants one Word/document that keeps receiving bullets while they send more chat messages, and a new file only when they start again, you MUST emit all of these nodes (not a single task and not a prose-only description):
+  1. `input` with keys `title` and `message`.
+  2. One `task` BEFORE the loop that creates the document once (`tools`: `["create_word_document"]`), using `{{title}}`.
+  3. A `while` `loop` (`max_iterations` 10..40, `exit_on_hitl` true, `exit_condition.output_match` pattern `STOP`) whose `body_node_ids` are exactly two tasks: summarize the latest `{{message}}` into one bullet, then append that bullet to the SAME file (`tools`: `["edit_word_document"]`). The summarize task replies with exactly `STOP` when the user says stop, done, exit, or call off.
+  4. Any node after the loop, including `export`, `depends_on` the loop id. Never `depends_on` a body task.
 - Wire `inputs_map` deterministically between tasks using `{{"from": "<parent_id>", "key": "summary"}}` or `"key_facts"` so downstream models automatically receive structured upstream context.
 - Every node id referenced in `depends_on`, `when_route.from`, `body_node_ids`, or `inputs_map.*.from` must exist in `nodes` (or be `"input"`).
 """
@@ -1174,6 +1179,178 @@ def _build_heuristic_blueprint(
     }
 
 
+def _is_session_document_objective(objective: str) -> bool:
+    """One living document, more messages append to it, a new file only on a new run."""
+    low = f" {(objective or '').lower()} "
+    has_doc = bool(re.search(r"\b(word|docx|document)\b", low)) or " doc " in low
+    has_chat = any(k in low for k in ("message", "chat", "bullet", "append", "resume", "summar"))
+    has_ongoing = any(
+        k in low
+        for k in (
+            "until", "untill", "while", "another", "same doc", "same dock",
+            "without interrupt", "flow", "call off",
+        )
+    )
+    return has_doc and has_chat and has_ongoing
+
+
+def _session_loop_is_document_shaped(nodes: List[Dict[str, Any]]) -> bool:
+    """True when a loop body already summarizes and writes into the same document."""
+    body_ids: set[str] = set()
+    for node in nodes:
+        if node.get("type") == "loop":
+            body_ids.update(str(b) for b in (node.get("body_node_ids") or []))
+    body_tasks = [n for n in nodes if n.get("id") in body_ids and n.get("type") == "task"]
+    if not body_tasks:
+        return False
+    # Do not scan descriptions: the generic fallback pastes the whole objective into them,
+    # which would look like a document loop without being one.
+    tools = {str(t) for n in body_tasks for t in (n.get("tools") or [])}
+    if "edit_word_document" in tools or "create_word_document" in tools:
+        return True
+    names = " ".join(str(n.get("name") or "") for n in body_tasks).lower()
+    return "append" in names and any(k in names for k in ("word", "document", "bullet"))
+
+
+def _pick_tool(name: str, valid_tool_keys: Optional[set[str]]) -> List[str]:
+    if valid_tool_keys is not None and name not in valid_tool_keys:
+        return []
+    return [name]
+
+
+def _shape_session_document_blueprint(
+    objective: str,
+    nodes: List[Dict[str, Any]],
+    agents: List[Dict[str, Any]],
+    *,
+    model_tiers: Dict[str, Optional[int]],
+    include_decision_gates: bool,
+    valid_tool_keys: Optional[set[str]],
+) -> List[Dict[str, Any]]:
+    """Replace a shallow or generic graph with the session-document loop the engine can run.
+
+    The orchestrator often returns only a title plus one summarize task. This objective
+    needs an open-once document, then a while-loop that appends one bullet per message
+    until the user stops. A new run (restart) opens a new file.
+    """
+    if not _is_session_document_objective(objective) or _session_loop_is_document_shaped(nodes):
+        return nodes
+
+    writer_key = ""
+    for agent in agents:
+        if agent.get("agent_key") == "writer_editor":
+            writer_key = "writer_editor"
+            break
+    if not writer_key and agents:
+        writer_key = str(agents[0].get("agent_key") or "writer")
+
+    shaped: List[Dict[str, Any]] = [
+        {
+            "id": "in_session",
+            "type": "input",
+            "name": "Session inputs",
+            "keys": ["title", "message"],
+            "execution_level": 1,
+            "depends_on": [],
+            "inputs_map": {},
+        },
+        {
+            "id": "step_open_doc",
+            "type": "task",
+            "name": "Open the Word document",
+            "agent_key": writer_key,
+            "execution_level": 1,
+            "depends_on": [],
+            "description": (
+                "Create exactly one Word document in the workspace using the title {title}. "
+                "Keep this file for the whole run. Do not create another document until a new run starts."
+            ),
+            "expected_output": "Workspace path of the created .docx and a one-line confirmation it is ready for bullets.",
+            "tools": _pick_tool("create_word_document", valid_tool_keys),
+            "required_inputs": [],
+            "inputs_map": {"title": {"from": "input", "key": "title"}},
+            "handoff_contract": {"required_fields": ["summary"]},
+        },
+        {
+            "id": "step_summarize",
+            "type": "task",
+            "name": "Summarize one chat message",
+            "agent_key": writer_key,
+            "execution_level": 2,
+            "depends_on": [],
+            "description": (
+                "Read the latest chat message {message} and write one concise bullet. "
+                "If the user says stop, done, exit, or call off, reply with exactly STOP and nothing else."
+            ),
+            "expected_output": "A single bullet line, or exactly STOP.",
+            "tools": [],
+            "required_inputs": [],
+            "inputs_map": {"message": {"from": "input", "key": "message"}},
+            "handoff_contract": {"required_fields": ["summary"]},
+        },
+        {
+            "id": "step_append",
+            "type": "task",
+            "name": "Append the bullet to the same document",
+            "agent_key": writer_key,
+            "execution_level": 2,
+            "depends_on": ["step_summarize"],
+            "description": (
+                "If the summary is STOP, output STOP and do not touch the file. "
+                "Otherwise append the bullet {bullet} to the Word document opened in this run. "
+                "Never create a second file."
+            ),
+            "expected_output": "The document path plus the appended bullet, or exactly STOP.",
+            "tools": _pick_tool("edit_word_document", valid_tool_keys),
+            "required_inputs": [],
+            "inputs_map": {"bullet": {"from": "step_summarize", "key": "summary"}},
+            "handoff_contract": {"required_fields": ["summary"]},
+        },
+        {
+            "id": "loop_session",
+            "type": "loop",
+            "name": "Append while the chat continues",
+            "loop_mode": "while",
+            "scope": "nodes",
+            "body_node_ids": ["step_summarize", "step_append"],
+            "body_levels": [],
+            "source_variable": "{message}",
+            "max_iterations": 30,
+            "exit_on_hitl": True,
+            "exit_condition": {
+                "output_match": {"source_node": "step_append", "pattern": "STOP"},
+            },
+            "depends_on": ["step_open_doc"],
+            "execution_level": 2,
+            "inputs_map": {},
+        },
+    ]
+    if include_decision_gates:
+        shaped.append(
+            {
+                "id": "gate_session_end",
+                "type": "decision",
+                "name": "Session ended?",
+                "execution_level": 3,
+                "depends_on": ["loop_session"],
+                "question": (
+                    "Did the user end this chat session (STOP / call off)? "
+                    "Answer yes to close the document, no if the loop should have continued."
+                ),
+                "routes": ["yes", "no"],
+                "default_route": "yes",
+                "decision_mode": True,
+                "decision_engine": "jev",
+                "decision_primitive": "noul",
+                "threshold": 0.5,
+                "jev_model": str(model_tiers.get("decision_model_name") or "tev1"),
+                "model_tier": "basic",
+                "model_id": model_tiers.get("decision"),
+            }
+        )
+    return shaped
+
+
 def _normalize_blueprint(
     raw_bp: Dict[str, Any],
     *,
@@ -1184,6 +1361,7 @@ def _normalize_blueprint(
     expected_exports: Optional[List[str]] = None,
     valid_tool_keys: Optional[set[str]] = None,
     valid_vdb_ids: Optional[set[int]] = None,
+    include_decision_gates: bool = True,
 ) -> Dict[str, Any]:
     bp = copy.deepcopy(raw_bp or {})
     bp["workflow_name"] = str(bp.get("workflow_name") or "AI Team Workflow").strip()
@@ -1478,6 +1656,22 @@ def _normalize_blueprint(
 
         clean_nodes.append(item)
 
+    if _is_session_document_objective(objective):
+        clean_nodes = _shape_session_document_blueprint(
+            objective,
+            clean_nodes,
+            clean_agents,
+            model_tiers=model_tiers,
+            include_decision_gates=include_decision_gates,
+            valid_tool_keys=valid_tool_keys,
+        )
+        exports = list(bp.get("expected_exports") or [])
+        if "word" not in exports:
+            exports.append("word")
+        bp["expected_exports"] = exports
+        if str(bp.get("workflow_name") or "").startswith("Workflow:") or bp.get("workflow_name") == "AI Team Workflow":
+            bp["workflow_name"] = "Continuous Chat Summarizer to Word Document"
+
     # Prune dangling dependency & port references
     node_ids_set = {n["id"] for n in clean_nodes}
     by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in clean_nodes}
@@ -1731,6 +1925,7 @@ def generate_team_and_workflow_blueprint(
         expected_exports=expected_exports,
         valid_tool_keys=valid_tool_keys,
         valid_vdb_ids=valid_vdb_ids,
+        include_decision_gates=include_decision_gates,
     )
     normalized_bp["orchestrator_model"] = orchestrator_model_label
     return normalized_bp

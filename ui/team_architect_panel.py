@@ -178,6 +178,8 @@ def _apply_graph_to_canvas_session(
         )
     )
     st.session_state.wf_selected_task_ids = res["graph"]
+    st.session_state.wf_architect_graph = copy.deepcopy(res["graph"])
+    st.session_state.wf_architect_protect = 4
     st.session_state.pop("wf_flow_state", None)
     if message:
         st.session_state.wf_architect_last_msg = message
@@ -201,6 +203,8 @@ def render_ai_team_architect_wizard(
 
     if st.session_state.get("wf_architect_last_msg"):
         st.success(st.session_state.pop("wf_architect_last_msg"))
+    if st.session_state.get("wf_architect_last_err"):
+        st.error(st.session_state.pop("wf_architect_last_err"))
 
     with st.expander(
         "🪄 AI Team & Workflow Architect — Generate Workflow, Team & Yes/No Decisions from Objective",
@@ -318,10 +322,12 @@ def render_ai_team_architect_wizard(
                         orchestrator_model_id=picked_orch_model_id,
                     )
                     res = materialize_blueprint_to_db(bp, db, save_workflow=False)
+            g_nodes = [n for n in (res.get("graph") or []) if isinstance(n, dict) and n.get("type") != NODE_TYPE_LEVEL]
             if res.get("errors"):
-                status_slot.error("Graph validation errors: " + " | ".join(res["errors"]))
-            else:
-                g_nodes = [n for n in (res.get("graph") or []) if isinstance(n, dict) and n.get("type") != NODE_TYPE_LEVEL]
+                st.session_state.wf_architect_last_err = (
+                    "Graph validation errors: " + " | ".join(res["errors"])
+                )
+            if g_nodes:
                 n_dec = sum(1 for n in g_nodes if n.get("type") == NODE_TYPE_ROUTER)
                 n_loops = sum(1 for n in g_nodes if n.get("type") == NODE_TYPE_LOOP)
                 orch_used = bp.get("orchestrator_model") or orch_info.get("model_string") or "auto"
@@ -338,6 +344,8 @@ def render_ai_team_architect_wizard(
                     ),
                 )
                 st.rerun()
+            elif res.get("errors"):
+                status_slot.error(st.session_state.pop("wf_architect_last_err"))
 
 
 def render_workflow_team_and_blocks_editor(

@@ -747,6 +747,19 @@ def render_canvas_palette_and_board(
             )
             # Always snap content into level columns so cards stay aligned
             updated = snap_assisted_positions(updated, task_id_map=task_id_map)
+            before_content = {
+                n["id"] for n in st.session_state.wf_selected_task_ids
+                if isinstance(n, dict) and n.get("type") not in (NODE_TYPE_LEVEL,)
+            }
+            after_content = {
+                n["id"] for n in updated
+                if isinstance(n, dict) and n.get("type") not in (NODE_TYPE_LEVEL,)
+            }
+            if before_content and not after_content:
+                # Keep the generated graph. Rebuilding the flow state once lets the
+                # board draw those blocks instead of sticking on the blank return.
+                updated = list(st.session_state.wf_selected_task_ids)
+                st.session_state.pop("wf_flow_state", None)
             after_levels = {
                 n["id"]: int(n.get("execution_level") or 1)
                 for n in updated

@@ -869,21 +869,38 @@ def flow_state_to_graph_updates(
     - Drop into level column → execution_level + auto-stack
     - Edges → depends_on / inputs_map
     """
-    base = {n["id"]: dict(n) for n in normalize_graph(base_graph, materialize_export=False)}
+    base_list = [dict(n) for n in normalize_graph(base_graph, materialize_export=False)]
+    base = {n["id"]: n for n in base_list}
 
-    # Canvas node list is authoritative for deletions (Backspace / node menu / trash)
+    def _unchanged() -> List[Dict[str, Any]]:
+        g = [dict(n) for n in base_list]
+        if restack:
+            g = auto_stack_all_levels(g, task_id_map=task_id_map)
+        return g
+
+    # Canvas node list is authoritative for deletions (Backspace / node menu / trash).
+    # An empty list, or a list that shares no block ids with the graph, is the
+    # component failing to echo the state we sent. Treating that as "delete all"
+    # left the workflow name filled and the canvas at 0 blocks.
     raw_nodes = getattr(state, "nodes", None)
+    present_ids: set = set()
     if isinstance(raw_nodes, list):
-        present_ids = set()
         for sn in raw_nodes:
             raw = _state_node_dict(sn)
             nid = raw.get("id")
             if nid and not is_canvas_decorator_id(str(nid)):
                 present_ids.add(str(nid))
-        for nid in list(base.keys()):
-            if nid not in present_ids:
-                repaired = remove_node(list(base.values()), nid)
-                base = {n["id"]: n for n in repaired}
+    content_ids = {
+        nid for nid, node in base.items()
+        if node.get("type") not in (NODE_TYPE_LEVEL,)
+    }
+    if not present_ids or (content_ids and not (present_ids & content_ids)):
+        return _unchanged()
+
+    for nid in list(base.keys()):
+        if nid not in present_ids:
+            repaired = remove_node(list(base.values()), nid)
+            base = {n["id"]: n for n in repaired}
 
     # First pass: capture positions/sizes from canvas
     for sn in getattr(state, "nodes", []) or []:
