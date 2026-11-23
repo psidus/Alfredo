@@ -241,6 +241,8 @@ ALLOWED_TOOLS = {
     "write_python_file": local_tools.write_python_file,
     "edit_file_diff": local_tools.edit_file_diff,
     "git_workspace_time_travel": local_tools.git_workspace_time_travel,
+    "inspect_codebase_graph": local_tools.inspect_codebase_graph,
+    "pack_codebase_repomix": local_tools.pack_codebase_repomix,
     # Full PC (read-only)
     "read_file_anywhere": local_tools.read_file_anywhere,
     "search_files": local_tools.search_files,
@@ -708,10 +710,26 @@ def _build_agent(agent_id, specialization=None, model_id_override=None, task_rec
     effective_goal = re.sub(r'\{([a-zA-Z0-9_]+)\}', r'[missing input: \1]', effective_goal)
 
     # --- BACKSTORY INJECTION: Enforce conciseness at identity level ---
-    conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
-                         "You never ramble. You output structured bullet points, not essays. "
-                         "Every sentence must carry unique, actionable information.")
-    enhanced_backstory = effective_backstory + conciseness_trait
+    covers_conciseness = False
+    try:
+        from core.skill_registry import merge_skills_and_tools
+
+        _ag_skills = list(agent_record.get('skills') or [])
+        _tk_skills = list((task_record or {}).get('skills') or [])
+        if _ag_skills or _tk_skills:
+            covers_conciseness = bool(
+                merge_skills_and_tools(_ag_skills, _tk_skills, [], tool_profile="").get("covers_conciseness")
+            )
+    except Exception:
+        covers_conciseness = False
+
+    if covers_conciseness:
+        enhanced_backstory = effective_backstory
+    else:
+        conciseness_trait = ("\n\nCRITICAL TRAIT: You are extremely concise and data-driven. "
+                             "You never ramble. You output structured bullet points, not essays. "
+                             "Every sentence must carry unique, actionable information.")
+        enhanced_backstory = effective_backstory + conciseness_trait
 
     agent = Agent(
         role=effective_role,
@@ -774,6 +792,7 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
         or task_record.get('max_output_tokens', 0) > 0
         or effective_tier == MODEL_TIER_SIMPLE
         or tool_profile
+        or bool(task_record.get('skills'))
     )
     if bypass_cache:
         agent_instance = _build_agent(agent_id, specialization=specialization, model_id_override=task_model_id, task_record=task_record)
@@ -816,7 +835,33 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
             logging.warning(f"Capability check failed for task {task_id}: {cap_err}")
 
     raw_tools = list(task_record.get('tools', []) or [])
-    raw_tools = filter_tool_names_by_profile(raw_tools, tool_profile)
+    skill_block = ""
+    try:
+        from core.skill_registry import merge_skills_and_tools
+
+        agent_skills = list((agent_record or {}).get('skills') or [])
+        task_skills = list(task_record.get('skills') or [])
+        if agent_skills or task_skills:
+            merged_sk = merge_skills_and_tools(
+                agent_skills,
+                task_skills,
+                raw_tools,
+                tool_profile=tool_profile,
+            )
+            raw_tools = merged_sk["effective_tools"]
+            skill_block = merged_sk.get("rendered_block") or ""
+            logging.info(
+                "Task %s: active skills=%s (~%d tok), effective tools=%s",
+                task_id,
+                merged_sk.get("effective_skills"),
+                int(merged_sk.get("estimated_tokens") or 0),
+                raw_tools,
+            )
+        else:
+            raw_tools = filter_tool_names_by_profile(raw_tools, tool_profile)
+    except Exception as sk_err:
+        logging.warning(f"Skill merge failed for task {task_id}: {sk_err}")
+        raw_tools = filter_tool_names_by_profile(raw_tools, tool_profile)
 
     if not supports_tools:
         task_tools = None  # No tools for local models that don't support them
@@ -847,6 +892,9 @@ def _build_task(task_id, agents_cache, step_def=None, model_tier=None):
         task_description = task_record['description'] + BIBLIOGRAPHIC_DELIVERABLE_DIRECTIVE
     else:
         task_description = task_record['description'] + AGENT_COMMS_DIRECTIVE
+
+    if skill_block:
+        task_description += skill_block
 
     task_description += WORKER_HANDOFF_DIRECTIVE
 
@@ -1694,9 +1742,15 @@ def execute_run_with_resume(run_id: int, status_callback=None, accumulated_conte
     env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
     env_vars = dotenv_values(env_path)
     try:
-        MAX_VRAM_GB = float(env_vars.get("MAX_VRAM_GB", 24.0))
+        default_vram_gb = float(
+            os.getenv("ALFREDO_REMOTE_GPU_VRAM_MB")
+            or env_vars.get("ALFREDO_REMOTE_GPU_VRAM_MB")
+            or 16384
+        ) / 1024.0
+        raw_max_vram = os.getenv("MAX_VRAM_GB") or env_vars.get("MAX_VRAM_GB")
+        MAX_VRAM_GB = float(raw_max_vram) if raw_max_vram not in (None, "") else default_vram_gb
     except Exception:
-        MAX_VRAM_GB = 24.0
+        MAX_VRAM_GB = 16.0
 
     current_vram_usage = 0.0
     vram_lock = threading.Lock()
@@ -2411,9 +2465,15 @@ def execute_dynamic_crew_with_memory(plan: dict, execution_context: dict = None,
     env_path = find_dotenv() or os.path.join(os.getcwd(), '.env')
     env_vars = dotenv_values(env_path)
     try:
-        MAX_VRAM_GB = float(env_vars.get("MAX_VRAM_GB", 24.0))
+        default_vram_gb = float(
+            os.getenv("ALFREDO_REMOTE_GPU_VRAM_MB")
+            or env_vars.get("ALFREDO_REMOTE_GPU_VRAM_MB")
+            or 16384
+        ) / 1024.0
+        raw_max_vram = os.getenv("MAX_VRAM_GB") or env_vars.get("MAX_VRAM_GB")
+        MAX_VRAM_GB = float(raw_max_vram) if raw_max_vram not in (None, "") else default_vram_gb
     except Exception:
-        MAX_VRAM_GB = 24.0
+        MAX_VRAM_GB = 16.0
 
     current_vram_usage = 0.0
     vram_lock = threading.Lock()

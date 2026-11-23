@@ -2224,12 +2224,14 @@ def render_agent_caserma():
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
+            st.session_state.agent_skills_sel = list(editing_agent.get("skills") or []) if editing_agent else []
         elif st.session_state.last_editing_agent_id != current_editing_id:
             st.session_state.last_editing_agent_id = current_editing_id
             st.session_state.agent_name_input = default_name
             st.session_state.agent_role_input = default_role
             st.session_state.agent_goal_input = default_goal
             st.session_state.agent_backstory_input = default_backstory
+            st.session_state.agent_skills_sel = list(editing_agent.get("skills") or []) if editing_agent else []
 
         # --- 1-Click Archetype Quick-Fill (non-intrusive template loader) ---
         if not editing_agent:
@@ -2268,6 +2270,26 @@ def render_agent_caserma():
         role = st.text_input("Role", key="agent_role_input")
         goal = st.text_area("Goal", key="agent_goal_input")
         backstory = st.text_area("Backstory", key="agent_backstory_input")
+
+        selected_agent_skills: list[str] = []
+        try:
+            from core.skill_registry import list_skills as _list_reg_skills
+
+            _all_sk = _list_reg_skills()
+            _ag_skill_opts = list(
+                dict.fromkeys(
+                    [s["name"] for s in _all_sk] + list(st.session_state.get("agent_skills_sel") or [])
+                )
+            )
+            if _ag_skill_opts:
+                selected_agent_skills = st.multiselect(
+                    "🧠 Default Skills (Agent-level)",
+                    options=_ag_skill_opts,
+                    key="agent_skills_sel",
+                    help="Persistent behavioral skills (e.g. karpathy-coding-rules). Inherited by all tasks assigned to this agent without repeating them.",
+                )
+        except Exception:
+            selected_agent_skills = list(st.session_state.get("agent_skills_sel") or [])
         
         col_opt, col_sub = st.columns([1, 1])
         with col_opt:
@@ -2330,12 +2352,12 @@ def render_agent_caserma():
             
             if editing_agent:
                 model_id = editing_agent.get('model_id')
-                db.update_agent(editing_agent['id'], sane_name, sane_role, combined_backstory, model_id, [])
+                db.update_agent(editing_agent['id'], sane_name, sane_role, combined_backstory, model_id, [], skills=selected_agent_skills)
                 st.success(f"Agent '{sane_name}' updated successfully!")
                 if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 clear_editing_state('editing_agent_id')
             else:
-                db.create_agent(sane_name, sane_role, combined_backstory, None, [])
+                db.create_agent(sane_name, sane_role, combined_backstory, None, [], skills=selected_agent_skills)
                 st.success(f"Agent '{sane_name}' has been recruited!")
                 if 'last_editing_agent_id' in st.session_state: del st.session_state.last_editing_agent_id
                 st.rerun()
@@ -2394,6 +2416,8 @@ def render_agent_caserma():
                                 model = next((m for m in models if m['id'] == agent['model_id']), None)
                                 if model:
                                     st.markdown(f"**Model:** {model['provider']} / {model['model_name']}")
+                                if agent.get('skills'):
+                                    st.markdown(f"**Skills:** `{', '.join(agent['skills'])}`")
                             
                             col_mod, col_del = st.columns([1, 1])
                             with col_mod:
@@ -2425,6 +2449,10 @@ def render_task_builder():
     TOOL_EMOJIS = {
         "read_file": "📄",
         "write_file": "✏️",
+        "edit_file_diff": "✂️",
+        "git_workspace_time_travel": "⏱️",
+        "inspect_codebase_graph": "🕸️",
+        "pack_codebase_repomix": "📦",
         "read_file_anywhere": "🔍",
         "search_files": "📂",
         "search_web": "🌐",
@@ -2505,6 +2533,7 @@ def render_task_builder():
         default_desc = (editing_task['description'] or "") if editing_task else ""
         default_output = (editing_task['expected_output'] or "") if editing_task else ""
         default_tools = editing_task.get('tools', []) if editing_task else []
+        default_skills = editing_task.get('skills', []) if editing_task else []
         default_specialization = editing_task.get('agent_specialization', '') or '' if editing_task else ''
         
         default_agent_id = editing_task['agent_id'] if editing_task else None
@@ -2539,6 +2568,7 @@ def render_task_builder():
             st.session_state.task_specialization_input = default_specialization
             st.session_state.task_agent_sel = default_agent_name
             st.session_state.task_tools_sel = default_tools
+            st.session_state.task_skills_sel = list(default_skills)
             st.session_state.task_vdb_sel = default_vdb_names
             
             # Default model override selection
@@ -2573,6 +2603,7 @@ def render_task_builder():
             st.session_state.task_specialization_input = default_specialization
             st.session_state.task_agent_sel = default_agent_name
             st.session_state.task_tools_sel = default_tools
+            st.session_state.task_skills_sel = list(default_skills)
             st.session_state.task_vdb_sel = default_vdb_names
             
             # Default model override selection
@@ -3062,6 +3093,42 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
             selected_tools = [t for t in AVAILABLE_TOOLS if st.session_state.get(f"cb_task_{t}", False)]
             st.session_state.task_tools_sel = selected_tools
         st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+
+        # --- Task Skills (Operational, Zero-Duplication) ---
+        selected_task_skills: list[str] = list(st.session_state.get("task_skills_sel") or default_skills)
+        try:
+            from core.skill_registry import list_skills as _list_tb_skills, merge_skills_and_tools as _merge_tb_st
+
+            _tb_skills = _list_tb_skills()
+            _ag_inherited_skills = list((current_agent or {}).get("skills") or [])
+            _tb_skill_opts = list(
+                dict.fromkeys(
+                    [s["name"] for s in _tb_skills if s["name"] not in _ag_inherited_skills]
+                    + [s for s in selected_task_skills if s not in _ag_inherited_skills]
+                )
+            )
+            if _ag_inherited_skills:
+                st.caption(f"🧠 Inherited from agent: {', '.join(f'`{s}`' for s in _ag_inherited_skills)}")
+            if _tb_skill_opts:
+                st.session_state["task_skills_sel"] = [
+                    s for s in (st.session_state.get("task_skills_sel") or default_skills)
+                    if s in _tb_skill_opts
+                ]
+                selected_task_skills = st.multiselect(
+                    "🧠 Task Skills (Optional)",
+                    options=_tb_skill_opts,
+                    key="task_skills_sel",
+                    help="Operational skills for this specific task. Recommended tools are merged automatically at runtime (respecting Tool Profile).",
+                )
+            _tb_merge = _merge_tb_st(_ag_inherited_skills, selected_task_skills, selected_tools, tool_profile=tool_profile or "")
+            if _tb_merge["effective_skills"]:
+                st.caption(
+                    f"Skill prompt budget: **~{_tb_merge['estimated_tokens']} tok** (14B local limit: 12K tok)"
+                    + (f" · Auto-merged tools: `{', '.join(_tb_merge['effective_tools'])}`" if _tb_merge["effective_tools"] else "")
+                )
+        except Exception:
+            pass
+        st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
         
         selected_vector_dbs = []
         if 'vector_search' in selected_tools:
@@ -3234,24 +3301,26 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                     task_model_id = model_options.get(selected_model_str)
                 
                 if editing_task:
-                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "")
+                    db.update_task(editing_task['id'], sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "", skills=selected_task_skills)
                     st.success(f"Task updated successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     if 'task_name_input' in st.session_state: del st.session_state.task_name_input
                     if 'task_model_sel' in st.session_state: del st.session_state.task_model_sel
+                    if 'task_skills_sel' in st.session_state: del st.session_state.task_skills_sel
                     if 'task_human_validation_cb' in st.session_state: del st.session_state.task_human_validation_cb
                     for k in list(st.session_state.keys()):
                         if k.startswith("cb_task_"):
                             del st.session_state[k]
                     clear_editing_state('editing_task_id')
                 else:
-                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "")
+                    db.create_task(sane_description, sane_expected_output, agent_id, selected_tools, input_rows, selected_vector_dbs, agent_specialization.strip() or None, task_name.strip() or None, task_model_id, human_validation, st.session_state.get('task_in_ctx', 0), st.session_state.get('task_out_tok', 0), selected_pydantic_str, tool_profile or "", skills=selected_task_skills)
                     st.success(f"Task added successfully!")
                     if 'temp_required_inputs' in st.session_state: del st.session_state.temp_required_inputs
                     if 'last_editing_task_id' in st.session_state: del st.session_state.last_editing_task_id
                     if 'task_name_input' in st.session_state: del st.session_state.task_name_input
                     if 'task_model_sel' in st.session_state: del st.session_state.task_model_sel
+                    if 'task_skills_sel' in st.session_state: del st.session_state.task_skills_sel
                     if 'task_human_validation_cb' in st.session_state: del st.session_state.task_human_validation_cb
                     for k in list(st.session_state.keys()):
                         if k.startswith("cb_task_"):
@@ -3322,6 +3391,8 @@ div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"] {
                                 if task.get('tools'):
                                     pretty_tools = [f"{TOOL_EMOJIS.get(t, '🛠️')} {t.replace('_', ' ').title()}" for t in task['tools']]
                                     st.markdown(f"**Assigned Tools:** {', '.join(pretty_tools)}")
+                                if task.get('skills'):
+                                    st.markdown(f"**🧠 Skills:** `{', '.join(task['skills'])}`")
                                 
                                 if task.get('agent_specialization'):
                                     st.markdown(f"**🎯 Specialization:** *{task['agent_specialization']}*")
@@ -6357,6 +6428,92 @@ def render_tool_factory():
         pass
 
 
+def render_skill_library():
+    """Renders the Skill Library tab inside Asset Builder."""
+    from core.skill_registry import (
+        delete_skill,
+        import_skills_from_github,
+        list_skills,
+        save_skill,
+    )
+
+    st.header("Skill Library 🧠")
+    st.markdown(
+        "Manage modular `SKILL.md` playbooks (Karpathy rules, Superpowers, UI/UX, gstack) "
+        "loaded on demand without bloating local 16 GB VRAM prompts."
+    )
+
+    with st.expander("➕ Import or Create Skill", expanded=False):
+        mode = st.radio(
+            "Source",
+            ["Import from GitHub", "Paste SKILL.md"],
+            horizontal=True,
+            key="skill_import_mode",
+        )
+        if mode == "Import from GitHub":
+            gh_url = st.text_input(
+                "GitHub Repo (`owner/repo`) or raw `SKILL.md` URL",
+                placeholder="e.g. forrestchang/andrej-karpathy-skills or https://github.com/obra/superpowers",
+                key="skill_gh_url",
+            )
+            if st.button("📥 Import from GitHub", type="primary", key="skill_gh_btn"):
+                if not gh_url.strip():
+                    st.warning("Enter a GitHub repository or raw URL first.")
+                else:
+                    try:
+                        with st.spinner("Fetching SKILL.md files from GitHub..."):
+                            imported = import_skills_from_github(gh_url.strip())
+                        st.success(f"Imported {len(imported)} skill(s): " + ", ".join(s["name"] for s in imported))
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"GitHub import failed: {exc}")
+        else:
+            s_slug = st.text_input("Skill Slug", placeholder="e.g. api-security-audit", key="skill_paste_slug")
+            s_body = st.text_area(
+                "SKILL.md Content (YAML frontmatter optional)",
+                height=180,
+                placeholder="---\nname: api-security-audit\ncategory: engineering\ndescription: Check auth and input validation\nscope: task\nrecommended_tools: [read_file, inspect_codebase_graph]\n---\n\n1. Check auth guards...",
+                key="skill_paste_body",
+            )
+            if st.button("💾 Save Skill", type="primary", key="skill_paste_btn"):
+                try:
+                    saved = save_skill(s_slug, s_body)
+                    st.success(f"Saved skill '{saved['name']}' (~{saved['token_cost']} tok).")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save skill: {exc}")
+
+    skills = list_skills()
+    if not skills:
+        st.info("No skills installed yet in `skills/`.")
+        return
+
+    categories = ["All"] + sorted({s["category"] for s in skills})
+    picked_cat = st.selectbox("Category", options=categories, key="skill_cat_filter")
+    visible = skills if picked_cat == "All" else [s for s in skills if s["category"] == picked_cat]
+
+    st.caption(f"Showing {len(visible)} skill(s) · Total installed budget if loaded together: ~{sum(s['token_cost'] for s in visible)} tok")
+    for sk in visible:
+        with st.container(border=True):
+            c_info, c_del = st.columns([6, 1], vertical_alignment="center")
+            with c_info:
+                tools_badge = f" · tools: `{', '.join(sk['recommended_tools'])}`" if sk["recommended_tools"] else ""
+                st.markdown(
+                    f"**🧠 {sk['name']}** · `{sk['category']}` · scope: `{sk['scope']}` · `~{sk['token_cost']} tok`{tools_badge}"
+                )
+                if sk["description"]:
+                    st.caption(sk["description"])
+            with c_del:
+                with st.popover("Del", use_container_width=True):
+                    st.markdown(f"Delete `{sk['slug']}`?")
+                    if st.button("Yes", key=f"del_skill_{sk['slug']}", type="primary", use_container_width=True):
+                        delete_skill(sk["slug"])
+                        st.toast(f"Removed skill {sk['name']}", icon="🗑️")
+                        st.rerun()
+            with st.expander("Preview SKILL.md"):
+                st.code(sk["raw"], language="markdown")
+
+
 
 def render_history_monitoring():
     """Renders Tab 5: Workflow Run History & 360° Automation Control Center (Minimal UI)."""
@@ -7718,7 +7875,7 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
             st.exception(e)
 
     def page_asset_builder():
-        tab_db, tab_agents, tab_tools = st.tabs(["Knowledge Base", "Agent Caserma", "Tool Factory"])
+        tab_db, tab_agents, tab_tools, tab_skills = st.tabs(["Knowledge Base", "Agent Caserma", "Tool Factory", "Skill Library"])
         
         with tab_db:
             try:
@@ -7739,6 +7896,13 @@ Secrets → `.env` · Agents / tasks / workflows → database · This guide → 
                 render_tool_factory()
             except Exception as e:
                 st.error(f"Error loading Tool Factory: {e}")
+                st.exception(e)
+
+        with tab_skills:
+            try:
+                render_skill_library()
+            except Exception as e:
+                st.error(f"Error loading Skill Library: {e}")
                 st.exception(e)
 
     def page_task_builder():

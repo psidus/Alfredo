@@ -604,3 +604,43 @@ def git_workspace_time_travel(action: str = "diff", target_commit: str = "", mes
         return f"Error: {res.get('error')}"
 
     return f"Error: Azione '{action}' non riconosciuta. Usa 'diff', 'log', 'checkpoint' o 'rollback'."
+
+
+@tool
+def inspect_codebase_graph(target: str = "alfredo", query: str = "") -> str:
+    """
+    Build or query the deterministic CPU/AST codebase graph (0 VRAM, ideal for local 14B models).
+    - target: 'alfredo', a registered My Apps name, or a subfolder inside workspace/.
+    - query: optional symbol, filename, or keyword (empty returns architecture overview).
+    """
+    try:
+        from core.codebase_context import query_graphify
+
+        res = query_graphify(target=target, query=query)
+        return str(res.get("content") or "")
+    except Exception as e:
+        return f"Error running Graphify codebase inspection: {e}"
+
+
+@tool
+def pack_codebase_repomix(
+    target: str = "alfredo",
+    include: str = "",
+    compress: bool = True,
+) -> str:
+    """
+    Pack a project or filtered subset in Repomix XML format with token-budget sizing.
+    - target: 'alfredo', a registered My Apps name, or a subfolder inside workspace/.
+    - include: comma-separated glob/path filter (e.g. 'core/*.py,mobile_web/src/*.ts').
+    - compress: extract AST signatures/outlines to cut tokens ~65%.
+    """
+    try:
+        from core.codebase_context import pack_repomix
+
+        res = pack_repomix(target=target, include=include, compress=compress)
+        warn = f"[Context Router: ~{res.get('tokens')} tok | recommended_tier={res.get('recommended_tier')}]"
+        if res.get("warning"):
+            warn += f" {res['warning']}"
+        return f"{warn}\n\n{res.get('content') or ''}"
+    except Exception as e:
+        return f"Error running Repomix codebase packer: {e}"

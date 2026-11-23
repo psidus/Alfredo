@@ -33,6 +33,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -86,9 +87,9 @@ def default_profiles() -> Dict[str, GpuProfile]:
     deep = GpuProfile(
         name="deep",
         model=_env_str("ALFREDO_GPU_DEEP_MODEL", "deepseek-r1:14b"),
-        context_tokens=_env_int("ALFREDO_GPU_DEEP_CTX", 8192),
+        context_tokens=_env_int("ALFREDO_GPU_DEEP_CTX", 16384),
         estimated_vram_mb=_env_int("ALFREDO_GPU_DEEP_VRAM_MB", 9800),
-        description="planner / long reasoning, close to the VRAM limit",
+        description="planner / long reasoning, tuned for 16 GB VRAM",
     )
     return {"fast": fast, "deep": deep}
 
@@ -136,6 +137,57 @@ class GpuTicket:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_ollama_base() -> str:
+    """Resolve the active Ollama base URL, handling Docker Desktop / remote WireGuard hosts."""
+    raw = _env_str("OLLAMA_API_BASE", "").rstrip("/")
+    in_docker = os.path.exists("/.dockerenv")
+    if not raw:
+        raw = "http://host.docker.internal:11434" if in_docker else "http://127.0.0.1:11434"
+    elif in_docker and ("localhost" in raw or "127.0.0.1" in raw):
+        raw = raw.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
+    if raw.endswith("/v1"):
+        raw = raw[:-3]
+    return raw
+
+
+def _is_remote_ollama_base(base: str) -> bool:
+    host = (urlparse(base).hostname or "").strip().lower()
+    return bool(host and host not in ("127.0.0.1", "localhost", "host.docker.internal", "::1"))
+
+
+def probe_ollama_remote(timeout: float = 2.0) -> Optional[List[Dict[str, Any]]]:
+    """Read VRAM usage from a local or remote (e.g. WireGuard) Ollama ``/api/ps`` endpoint."""
+    import requests
+
+    base = _resolve_ollama_base()
+    host = urlparse(base).hostname or base
+    try:
+        resp = requests.get(f"{base}/api/ps", timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Remote Ollama /api/ps probe failed (%s): %s", base, exc)
+        return None
+
+    models = data.get("models") if isinstance(data, dict) else []
+    used_bytes = 0
+    for item in models or []:
+        if isinstance(item, dict):
+            used_bytes += int(item.get("size_vram") or 0)
+    used_mb = int(used_bytes // (1024 * 1024))
+    total_mb = _env_int("ALFREDO_REMOTE_GPU_VRAM_MB", 16384)
+    free_mb = max(0, total_mb - used_mb)
+    return [
+        {
+            "index": 0,
+            "name": f"Remote Ollama ({host})",
+            "total_mb": total_mb,
+            "used_mb": used_mb,
+            "free_mb": free_mb,
+        }
+    ]
+
+
 def probe_nvidia_smi(timeout: float = 2.0) -> Optional[List[Dict[str, Any]]]:
     """Read GPU memory from ``nvidia-smi``; ``None`` when no NVIDIA GPU is visible."""
     command = [
@@ -177,6 +229,21 @@ def probe_nvidia_smi(timeout: float = 2.0) -> Optional[List[Dict[str, Any]]]:
     return gpus or None
 
 
+def probe_vram_auto(timeout: float = 2.0) -> Optional[List[Dict[str, Any]]]:
+    """Use remote Ollama probe first when pointing over LAN/WireGuard, else local nvidia-smi."""
+    base = _resolve_ollama_base()
+    remote_explicit = bool((os.getenv("ALFREDO_REMOTE_GPU_VRAM_MB") or "").strip())
+    if _is_remote_ollama_base(base) or remote_explicit:
+        remote = probe_ollama_remote(timeout=timeout)
+        if remote is not None:
+            return remote
+        return None
+    local = probe_nvidia_smi(timeout=timeout)
+    if local is not None:
+        return local
+    return probe_ollama_remote(timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Gate
 # ---------------------------------------------------------------------------
@@ -201,7 +268,7 @@ class GpuGate:
         )
         default_wait = float(_env_int("ALFREDO_GPU_QUEUE_TIMEOUT", 120))
         self.max_wait_seconds = default_wait if max_wait_seconds is None else float(max_wait_seconds)
-        self._probe = vram_probe or probe_nvidia_smi
+        self._probe = vram_probe or probe_vram_auto
         self._preloader = preloader if preloader is not None else default_preloader()
         self._clock = clock
 
@@ -605,9 +672,7 @@ def default_preloader() -> Optional[Callable[[GpuProfile], None]]:
     def _preload(profile: GpuProfile) -> None:
         import requests
 
-        base = _env_str("OLLAMA_API_BASE", "http://127.0.0.1:11434").rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
+        base = _resolve_ollama_base()
         response = requests.post(
             f"{base}/api/generate",
             json={"model": profile.model, "prompt": "", "keep_alive": keep_alive},
@@ -638,5 +703,7 @@ __all__ = [
     "default_preloader",
     "default_profiles",
     "probe_nvidia_smi",
+    "probe_ollama_remote",
+    "probe_vram_auto",
     "system_status",
 ]

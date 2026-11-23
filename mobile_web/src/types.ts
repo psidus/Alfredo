@@ -21,11 +21,41 @@ export interface WorkflowSuggestion {
   missing_inputs?: string[];
 }
 
+export type ContextMode = "auto" | "graphify" | "repomix";
+
+export interface ModuleInfo {
+  id: string;
+  label: string;
+  description: string;
+  default_enabled: boolean;
+  tools: string[];
+}
+
+export interface SkillInfo {
+  slug: string;
+  name: string;
+  category: string;
+  description: string;
+  scope: string;
+  recommended_tools: string[];
+  min_model_tier: string;
+  token_cost: number;
+}
+
+export interface ChatAction {
+  type: "open_run" | "open_workflow_assembler" | string;
+  label?: string;
+  run_id?: number | null;
+  workflow_id?: number | null;
+  workflow_name?: string | null;
+}
+
 export interface ChatReply {
   reply: string;
   workflow?: WorkflowSuggestion | null;
   started_run_id?: number | null;
   model?: string | null;
+  actions?: ChatAction[];
 }
 
 export type DecisionAction = "answer" | "run_workflow" | "clarify";
@@ -233,6 +263,7 @@ export interface ChatMessage {
   content: string;
   workflow?: WorkflowSuggestion | null;
   started_run_id?: number | null;
+  actions?: ChatAction[];
   isVoice?: boolean;
   voiceDuration?: number;
 }

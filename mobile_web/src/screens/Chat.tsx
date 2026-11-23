@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "../api";
-import { clearChat, loadChat, saveChat } from "../storage";
+import { clearChat, loadChat, loadChatSettings, saveChat } from "../storage";
 import type { ChatMessage, ConnectionConfig, WorkflowSuggestion } from "../types";
 import { ErrorBanner, TypingDots, usePolling } from "../components/ui";
+import { ModulesPopoverControl } from "../components/ModulesControl";
 import { VoicePlayerButton, VoiceRecorderButton } from "../components/VoiceControls";
 import { useLanguage } from "../i18n";
 
@@ -249,7 +250,15 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const reply = await api.chat(config, text, history);
+      const chatSettings = loadChatSettings();
+      const reply = await api.chat(
+        config,
+        text,
+        history,
+        true,
+        chatSettings.enabledModules,
+        chatSettings.contextMode,
+      );
       if (reply.model) {
         onMasterModel?.(reply.model);
       }
@@ -264,6 +273,7 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
         content: reply.reply || t("noTextReply"),
         workflow: reply.workflow ?? null,
         started_run_id: reply.started_run_id ?? null,
+        actions: reply.actions ?? [],
       };
       setMessages((prev) => {
         const updated = [...prev, newAssistantMessage];
@@ -286,7 +296,8 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
     <div className="screen">
       <div className="row between wrap">
         <span className="muted">{t("chatHeaderHint")}</span>
-        <div className="row" style={{ gap: "6px" }}>
+        <div className="row wrap" style={{ gap: "6px" }}>
+          <ModulesPopoverControl config={config} />
           <button
             type="button"
             className={`btn small ${autoVoice ? "primary" : "ghost"}`}
@@ -381,6 +392,39 @@ export function ChatScreen({ config, onStarted, onMasterModel }: Props) {
                     <span>🚀</span>
                     <span>{t("openRun")} #{message.started_run_id}</span>
                   </button>
+                </div>
+              ) : null}
+              {message.actions && message.actions.length > 0 ? (
+                <div className="row wrap" style={{ marginTop: "0.45rem", gap: "6px" }}>
+                  {message.actions.map((act, actIdx) => {
+                    if (act.type === "open_run") {
+                      if (!act.run_id || act.run_id === message.started_run_id) return null;
+                      return (
+                        <button
+                          key={`act-${actIdx}`}
+                          type="button"
+                          className="btn small primary"
+                          onClick={() =>
+                            onStarted(act.run_id!, act.label || `Run #${act.run_id}`)
+                          }
+                        >
+                          🚀 {act.label || `${t("openRun")} #${act.run_id}`}
+                        </button>
+                      );
+                    }
+                    if (act.type === "open_workflow_assembler") {
+                      return (
+                        <span
+                          key={`act-${actIdx}`}
+                          className="chip"
+                          style={{ fontSize: "0.75rem" }}
+                        >
+                          🧩 {act.label || act.workflow_name || "Workflow Assembler"}
+                        </span>
+                      );
+                    }
+                    return null;
+                  })}
                 </div>
               ) : null}
               {message.role === "assistant" ? (

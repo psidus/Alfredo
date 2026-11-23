@@ -127,9 +127,11 @@ def _persist_task_snapshot_edit(
     model_id: Optional[int],
     human_validation: bool,
     tool_profile: str,
+    skills: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Update a DB task record and refresh its attached Canvas node snapshot."""
     tid = int(task_rec["id"])
+    effective_skills = skills if skills is not None else list(task_rec.get("skills") or [])
     db.update_task(
         tid,
         description,
@@ -146,6 +148,7 @@ def _persist_task_snapshot_edit(
         int(task_rec.get("max_output_tokens") or 0),
         task_rec.get("output_pydantic"),
         tool_profile or "",
+        skills=effective_skills,
     )
     fresh_t = db.read_task(tid) or task_rec
     attach_snapshot(node, fresh_t, task_id=tid)
@@ -874,6 +877,35 @@ def render_workflow_team_and_blocks_editor(
                             key=f"wf_blk_tools_{nid}_{rev}",
                         )
 
+                        cur_task_skills = list(task_rec.get("skills") or [])
+                        try:
+                            from core.skill_registry import list_skills as _list_skills, merge_skills_and_tools as _merge_st
+
+                            _installed_skills = _list_skills()
+                            _skill_opts = list(dict.fromkeys([s["name"] for s in _installed_skills] + cur_task_skills))
+                            _sel_agent_rec = agents_by_id.get(new_aid) if new_aid else None
+                            _ag_skills = list((_sel_agent_rec or {}).get("skills") or [])
+                            _selectable_task_skills = [s for s in _skill_opts if s not in _ag_skills] or _skill_opts
+                            _default_task_skills = [s for s in cur_task_skills if s in _selectable_task_skills]
+                            new_skills = st.multiselect(
+                                "🧠 Task Skills (Optional)",
+                                options=_selectable_task_skills,
+                                default=_default_task_skills,
+                                key=f"wf_blk_skills_{nid}_{rev}",
+                            )
+                            _merged_preview = _merge_st(_ag_skills, new_skills, new_tools)
+                            _inh_txt = f"Inherited from agent: {', '.join(_ag_skills)} · " if _ag_skills else ""
+                            st.caption(
+                                f"{_inh_txt}Skill budget: ~{_merged_preview['estimated_tokens']} tok"
+                                + (
+                                    f" · Effective tools: {', '.join(_merged_preview['effective_tools'])}"
+                                    if _merged_preview["effective_tools"]
+                                    else ""
+                                )
+                            )
+                        except Exception:
+                            new_skills = cur_task_skills
+
                         adv1, adv2 = st.columns(2)
                         with adv1:
                             t_model_opts = {"None / Use Agent Default": None}
@@ -940,6 +972,7 @@ def render_workflow_team_and_blocks_editor(
                         or new_tmid != task_rec.get("model_id")
                         or new_spec.strip() != str(task_rec.get("agent_specialization") or "").strip()
                         or new_tools != cur_tools
+                        or new_skills != cur_task_skills
                         or updated_req_rows != norm_cur_req
                         or bool(new_hitl) != bool(task_rec.get("human_validation"))
                         or new_prof != str(task_rec.get("tool_profile") or "")
@@ -958,6 +991,7 @@ def render_workflow_team_and_blocks_editor(
                             model_id=new_tmid,
                             human_validation=bool(new_hitl),
                             tool_profile=new_prof or "",
+                            skills=new_skills,
                         )
                         tasks_by_id[int(task_rec["id"])] = fresh_t
                         graph_mutated = True

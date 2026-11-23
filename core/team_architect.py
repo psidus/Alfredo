@@ -713,6 +713,8 @@ RECOMMENDED MODEL IDS BY TIER:
 AVAILABLE TOOLS CATALOG (use ONLY canonical tool IDs from keys below):
 {available_tools_json}
 
+{skills_index}
+
 AVAILABLE VECTOR DATABASES (optional integer IDs for RAG / vector_search):
 {vector_dbs_json}
 
@@ -745,6 +747,7 @@ REQUIREMENTS:
       "goal": "Clear measurable goal",
       "backstory": "Concise persona & constraints",
       "tools": ["search_web"],
+      "skills": ["karpathy-coding-rules"],
       "recommended_tier": "basic|standard|advanced",
       "model_id": 1,
       "reuse_agent_id": null
@@ -762,6 +765,7 @@ REQUIREMENTS:
       "description": "Exact instructions. Can reference {{user_input}} or upstream ports.",
       "expected_output": "Exact structured deliverable expected from this agent.",
       "tools": ["search_web"],
+      "skills": [],
       "vector_dbs": [],
       "human_validation": false,
       "required_inputs": [],
@@ -804,6 +808,7 @@ REQUIREMENTS:
   ]
 }}
 2. Design principles:
+- Assign skills sparingly to avoid repeating agent defaults in tasks or bloating 14B local context windows (0-2 skills per agent/task).
 - Parallelism via `execution_level`: give independent tasks the same `execution_level` so they execute in parallel; increment `execution_level` for sequential phases.
 - Keep teams lean (2-4 agents unless the objective clearly needs more).
 - If `include_decision_gates` is true, include at least 1 binary `decision` node (`routes: ["yes", "no"]`, Jev/System One) and branch downstream tasks cleanly using `when_route: {{"from": "<decision_id>", "equals": "yes"|"no"}}`.
@@ -1395,6 +1400,7 @@ def _normalize_blueprint(
             "goal": str(ag.get("goal") or "").strip(),
             "backstory": str(ag.get("backstory") or "").strip(),
             "tools": _normalize_tool_list(ag.get("tools") or [], valid_tool_keys),
+            "skills": list(dict.fromkeys(str(s).strip() for s in (ag.get("skills") or []) if str(s).strip())),
             "recommended_tier": tier,
             "model_id": int(mid) if mid not in (None, "") else None,
             "reuse_agent_id": (
@@ -1633,6 +1639,7 @@ def _normalize_blueprint(
             item["description"] = str(node.get("description") or objective or "").strip()
             item["expected_output"] = str(node.get("expected_output") or "Structured and verified result.").strip()
             item["tools"] = _normalize_tool_list(node.get("tools") or [], valid_tool_keys)
+            item["skills"] = list(dict.fromkeys(str(s).strip() for s in (node.get("skills") or []) if str(s).strip()))
             item["agent_specialization"] = str(node.get("agent_specialization") or "").strip()
             raw_vdbs: List[int] = []
             for v in (node.get("vector_dbs") or []):
@@ -1858,11 +1865,18 @@ def generate_team_and_workflow_blueprint(
     ]
     valid_vdb_ids = {int(v["id"]) for v in compact_vdbs} if compact_vdbs else None
 
+    try:
+        from core.skill_registry import skills_index_prompt
+        skills_index_text = skills_index_prompt(max_skills=20)
+    except Exception:
+        skills_index_text = "AVAILABLE SKILLS: none installed."
+
     sys_prompt = TEAM_ARCHITECT_PROMPT.format(
         existing_agents_json=json.dumps(compact_agents, ensure_ascii=False),
         models_json=json.dumps(compact_models, ensure_ascii=False),
         recommended_models_json=json.dumps(model_tiers, ensure_ascii=False),
         available_tools_json=json.dumps(tools_catalog, ensure_ascii=False),
+        skills_index=skills_index_text,
         vector_dbs_json=json.dumps(compact_vdbs, ensure_ascii=False),
         include_decision_gates=json.dumps(bool(include_decision_gates)),
         expected_exports_json=json.dumps(list(expected_exports or []), ensure_ascii=False),
@@ -2313,7 +2327,8 @@ def materialize_blueprint_to_db(
             full_backstory = backstory or role
         mid = int(ag["model_id"]) if ag.get("model_id") not in (None, "") else None
         tools = [str(t) for t in (ag.get("tools") or []) if str(t).strip()]
-        aid = int(db.create_agent(name=name, role=role, backstory=full_backstory, model_id=mid, tools=tools))
+        ag_skills = [str(s).strip() for s in (ag.get("skills") or []) if str(s).strip()]
+        aid = int(db.create_agent(name=name, role=role, backstory=full_backstory, model_id=mid, tools=tools, skills=ag_skills))
         agent_key_to_id[akey] = aid
         agent_key_to_model[akey] = mid
         created_agent_ids.append(aid)
@@ -2399,6 +2414,7 @@ def materialize_blueprint_to_db(
         t_name = str(node.get("name") or nid).strip()
         t_desc = str(node.get("description") or "").strip()
         t_exp = str(node.get("expected_output") or "Complete and structured result.").strip()
+        t_skills = [str(s).strip() for s in (node.get("skills") or []) if str(s).strip()]
 
         tid = int(
             db.create_task(
@@ -2413,6 +2429,7 @@ def materialize_blueprint_to_db(
                 model_id=int(t_model_id) if t_model_id not in (None, "") else None,
                 human_validation=is_hitl,
                 tool_profile=t_profile,
+                skills=t_skills,
             )
         )
         created_task_ids.append(tid)
@@ -2424,6 +2441,7 @@ def materialize_blueprint_to_db(
             "expected_output": t_exp,
             "agent_id": aid,
             "tools": t_tools,
+            "skills": t_skills,
             "required_inputs": norm_req_inputs,
             "vector_dbs": t_vdbs,
             "agent_specialization": t_spec,

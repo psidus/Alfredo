@@ -19,6 +19,16 @@ tools_registry:
     description: "Automatic Git checkpoints, visual diffs (.docx/.xlsx/.md/.csv), and 1-step rollback for workspace files."
     required_secrets: []
 
+  inspect_codebase_graph:
+    display_name: "Code: Graphify AST & Dependency Map (0 VRAM)"
+    description: "Queries a fast CPU/AST codebase dependency & symbol graph in compact 1-3K token slices (ideal for local 14B models)."
+    required_secrets: []
+
+  pack_codebase_repomix:
+    display_name: "Code: Repomix Codebase Packer (Cloud / Filtered)"
+    description: "Packs a project or filtered subfolder into Repomix XML with optional AST compression and token budget routing."
+    required_secrets: []
+
   write_python_file:
     display_name: "Code: Write Python File (Project)"
     description: "Allows agents to write .py scripts to the project. Use with caution."

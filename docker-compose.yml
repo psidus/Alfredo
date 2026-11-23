@@ -46,6 +46,7 @@ services:
       - ./ui:/app/ui
       - ./core:/app/core
       - ./tools:/app/tools
+      - ./skills:/app/skills
       - ./config:/app/config
       - ./.env:/app/.env
       - ./bot.py:/app/bot.py
@@ -73,6 +74,7 @@ services:
       - ./ui:/app/ui
       - ./core:/app/core
       - ./tools:/app/tools
+      - ./skills:/app/skills
       - ./config:/app/config
       - ./sdk:/app/sdk
       - ./mobile_web:/app/mobile_web

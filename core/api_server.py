@@ -485,11 +485,40 @@ async def control_list_workflows(_: None = Depends(verify_control)):
     return [_card_to_dict(c) for c in cards]
 
 
+@app.get("/api/skills", tags=["Control"])
+async def control_list_skills(_: None = Depends(verify_control)):
+    """Installed modular SKILL.md playbooks with token budgets and recommended tools."""
+    from core.skill_registry import list_skills
+
+    skills = await run_in_threadpool(list_skills)
+    return [
+        {
+            "slug": s["slug"],
+            "name": s["name"],
+            "category": s["category"],
+            "description": s["description"],
+            "scope": s["scope"],
+            "recommended_tools": s["recommended_tools"],
+            "min_model_tier": s["min_model_tier"],
+            "token_cost": s["token_cost"],
+        }
+        for s in skills
+    ]
+
+
+@app.get("/api/modules", tags=["Control"])
+async def control_list_modules(_: None = Depends(verify_control)):
+    """Available toggleable tool modules exposed to the Assistant chat."""
+    from core.module_registry import list_modules
+
+    return await run_in_threadpool(list_modules)
+
+
 @app.post("/api/assistant/chat", response_model=ChatResponse, tags=["Control"])
 async def control_assistant_chat(
     request: ChatRequest, _: None = Depends(verify_control)
 ):
-    """Free chat turn; optionally suggests a saved workflow to run."""
+    """Free chat turn with modular tool execution; optionally suggests a saved workflow."""
     from core.assistant_engine import normalize_history, should_route
 
     message = (request.message or "").strip()
@@ -499,7 +528,15 @@ async def control_assistant_chat(
 
     try:
         engine = await run_in_threadpool(_get_assistant_engine)
-        chat_outcome = await run_in_threadpool(engine.chat, message, history)
+        chat_outcome = await run_in_threadpool(
+            partial(
+                engine.chat,
+                message,
+                history,
+                enabled_modules=request.enabled_modules,
+                context_mode=request.context_mode or "auto",
+            )
+        )
     except Exception as exc:  # noqa: BLE001 - surface the real model error
         logger.error("Control API: chat failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Model error: {exc}")
@@ -507,16 +544,19 @@ async def control_assistant_chat(
     reply = ""
     started_run_id = None
     suggestion: Optional[WorkflowSuggestion] = None
+    actions: List[Dict[str, Any]] = []
 
     if hasattr(chat_outcome, "text"):
         reply = chat_outcome.text
         started_run_id = getattr(chat_outcome, "started_run_id", None)
         suggestion = getattr(chat_outcome, "workflow_suggestion", None)
+        actions = list(getattr(chat_outcome, "actions", []) or [])
     elif isinstance(chat_outcome, str):
         reply = chat_outcome
 
-    # Only run passive auto_route if NO workflow was started directly by the assistant
-    if not started_run_id and not suggestion and request.auto_route:
+    # Only run passive auto_route if NO workflow was started directly and workflows module is active
+    wf_module_active = request.enabled_modules is None or "workflows" in request.enabled_modules
+    if not started_run_id and not suggestion and request.auto_route and wf_module_active:
         try:
             cards = await run_in_threadpool(engine.catalogue)
             if cards and should_route(message, cards):
@@ -545,6 +585,7 @@ async def control_assistant_chat(
         workflow=suggestion,
         started_run_id=started_run_id,
         model=active_model,
+        actions=actions,
     )
 
 

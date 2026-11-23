@@ -35,78 +35,26 @@ DECISION_ACTIONS = ("answer", "run_workflow", "clarify")
 
 ASSISTANT_PERSONA = """You are Alfredo, an autonomous AI personal assistant running on the user's machine.
 Your underlying model is {model_name}.
-You can chat, give advice, inspect and manage files, and directly trigger and monitor workflows.
+You can converse naturally and, depending on enabled modules, inspect/manage files & code, trigger/monitor workflows, query memory/knowledge, manage skills/blueprints, and inspect apps or MCP tools.
 
 CAPABILITIES & TOOLS:
-You have direct access to tools. When you need to perform an action (execute a workflow, check runs, read/write files), output a tool call block using this exact format:
+When you need to perform an action or look up real data, output a tool call block using this EXACT format:
 
 ```tool_call
 {{"tool": "<tool_name>", "args": {{<arguments>}}}}
 ```
 
-Available tools:
-1. `list_workflows()`
-   Lists all saved workflows with their IDs, names, descriptions, and required inputs.
-   Example:
-   ```tool_call
-   {{"tool": "list_workflows", "args": {{}}}}
-   ```
-
-2. `start_workflow(workflow, inputs)`
-   Starts a workflow execution immediately in the background.
-   - `workflow`: Workflow ID (integer, e.g. 1) or workflow name (string).
-   - `inputs`: Dictionary mapping required input keys to values (e.g. {{"idea": "portable solar coffee machine"}}).
-   Example:
-   ```tool_call
-   {{"tool": "start_workflow", "args": {{"workflow": 1, "inputs": {{"idea": "portable solar coffee machine"}}}}}}
-   ```
-
-3. `get_run_status(run_id)`
-   Checks the status, progress, outputs, and any error message of a workflow run.
-   - `run_id`: Integer ID of the run.
-   Example:
-   ```tool_call
-   {{"tool": "get_run_status", "args": {{"run_id": 1}}}}
-   ```
-
-4. `list_recent_runs(limit=5)`
-   Lists recent workflow runs with their status and workflow name.
-   Example:
-   ```tool_call
-   {{"tool": "list_recent_runs", "args": {{"limit": 5}}}}
-   ```
-
-5. `list_files(directory="")`
-   Lists files and directories inside the workspace.
-   Example:
-   ```tool_call
-   {{"tool": "list_files", "args": {{"directory": ""}}}}
-   ```
-
-6. `read_file(path)`
-   Reads the content/preview of a file inside the workspace (reports, markdown, code, etc.).
-   Example:
-   ```tool_call
-   {{"tool": "read_file", "args": {{"path": "report.md"}}}}
-   ```
-
-7. `write_file(path, content)`
-   Creates or updates a file inside the workspace.
-   Example:
-   ```tool_call
-   {{"tool": "write_file", "args": {{"path": "notes.md", "content": "# Notes\\n..."}}}}
-   ```
+{tools_section}
 
 Rules & Behavior:
 - Answer naturally, helpfully, and concisely in the same language as the user (Italian by default if addressed in Italian).
-- If the user asks to run or start a workflow (e.g. "avvia startup evaluation per..."):
-  1. Extract the inputs from the user request.
-  2. Call `start_workflow` directly.
-  3. If you need to see available workflows or input keys first, call `list_workflows`.
-  4. Once started, inform the user that the workflow has been started and provide the Run ID.
-- If the user asks about files or past runs:
-  Call `list_files`, `read_file`, `list_recent_runs`, or `get_run_status`.
-- Never invent facts about files, data, or run outputs without checking with tools.
+- When using a tool, match the exact tool name and JSON argument structure listed above. Always double-check argument names.
+- If the user asks to start or run a workflow:
+  1. Call `list_workflows` if you are unsure of the exact workflow ID/name or required input keys.
+  2. Call `start_workflow` directly once you have the inputs.
+  3. Inform the user that the workflow has started and share the Run ID.
+- Never invent facts about files, codebase symbols, past runs, facts, or skills without calling the relevant tool first.
+- If the user asks for an action whose module is not currently available in your active tools, tell them cleanly which module to enable in ⚙️ Modules & Context.
 - If no tool is needed (general conversation, reasoning, explanations), reply directly without using ```tool_call```.
 """
 
@@ -117,17 +65,20 @@ class AssistantChatResult(str):
     text: str
     started_run_id: Optional[int]
     workflow_suggestion: Optional[Any]
+    actions: List[Dict[str, Any]]
 
     def __new__(
         cls,
         text: str = "",
         started_run_id: Optional[int] = None,
         workflow_suggestion: Optional[Any] = None,
+        actions: Optional[List[Dict[str, Any]]] = None,
     ):
         instance = super().__new__(cls, text)
         instance.text = text
         instance.started_run_id = started_run_id
         instance.workflow_suggestion = workflow_suggestion
+        instance.actions = list(actions) if actions else []
         return instance
 
 
@@ -587,165 +538,17 @@ class AssistantEngine:
             force_json_mode=force_json_mode,
         )
 
-    def _execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a local tool safely and return JSON-serializable dictionary."""
-        name = (tool_name or "").strip().lower()
-        args = args or {}
-        try:
-            if name == "list_workflows":
-                cards = self.catalogue()
-                return {
-                    "workflows": [
-                        {
-                            "id": c.id,
-                            "name": c.name,
-                            "description": c.description,
-                            "inputs": [i.key for i in c.inputs],
-                        }
-                        for c in cards
-                    ]
-                }
+    def _execute_tool(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        context_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        """Execute a modular Assistant tool safely via ``core.module_registry``."""
+        from core.module_registry import execute_module_tool
 
-            if name == "start_workflow":
-                from core.run_service import start_run
-
-                wf_target = args.get("workflow") or args.get("workflow_id") or args.get("id") or args.get("name")
-                raw_inputs = args.get("inputs") or {}
-                if not isinstance(raw_inputs, dict):
-                    raw_inputs = {"user_input": str(raw_inputs)}
-
-                cards = self.catalogue()
-                target_card = None
-                try:
-                    wf_id = int(wf_target)
-                    target_card = next((c for c in cards if c.id == wf_id), None)
-                except (ValueError, TypeError):
-                    pass
-
-                if target_card is None and wf_target:
-                    query = str(wf_target).lower().strip()
-                    for c in cards:
-                        c_name = c.name.lower().strip()
-                        if query in c_name or c_name in query:
-                            target_card = c
-                            break
-
-                if target_card is None:
-                    return {
-                        "error": f"Workflow '{wf_target}' non trovato.",
-                        "available_workflows": [f"#{c.id}: {c.name}" for c in cards],
-                    }
-
-                declared = target_card.declared_keys()
-                cleaned_inputs = dict(raw_inputs)
-                if declared and len(declared) == 1 and declared[0] not in cleaned_inputs:
-                    for val in raw_inputs.values():
-                        cleaned_inputs[declared[0]] = val
-                        break
-
-                run_id = start_run(target_card.id, inputs=cleaned_inputs, source="assistant-chat")
-                return {
-                    "status": "started",
-                    "run_id": run_id,
-                    "workflow_id": target_card.id,
-                    "workflow_name": target_card.name,
-                    "inputs": cleaned_inputs,
-                }
-
-            if name == "get_run_status":
-                from core.run_service import get_run
-                from core.files import describe_run_exports
-
-                run_id = int(args.get("run_id") or args.get("id") or 0)
-                if not run_id:
-                    from core.run_service import list_recent_runs
-                    recent = list_recent_runs(limit=1, db=self.db)
-                    if recent and recent[0].get("id"):
-                        run_id = int(recent[0]["id"])
-                    else:
-                        return {"error": "Nessuna esecuzione trovata nel sistema."}
-                run = get_run(run_id, db=self.db)
-                if not run:
-                    return {"error": f"Run #{run_id} non trovata"}
-                exports = describe_run_exports(run)
-                return {
-                    "run_id": run_id,
-                    "status": run.get("status"),
-                    "workflow_id": run.get("workflow_id"),
-                    "result": run.get("result"),
-                    "current_task_idx": run.get("current_task_idx"),
-                    "started_at": str(run.get("started_at")),
-                    "finished_at": str(run.get("finished_at")),
-                    "exported_files": [e.get("name") for e in exports],
-                }
-
-            if name == "list_recent_runs":
-                from core.run_service import list_recent_runs
-
-                limit = int(args.get("limit") or 5)
-                runs = list_recent_runs(limit=limit, db=self.db)
-                return {
-                    "recent_runs": [
-                        {
-                            "run_id": r.get("id"),
-                            "workflow_id": r.get("workflow_id"),
-                            "status": r.get("status"),
-                            "started_at": str(r.get("started_at")),
-                        }
-                        for r in runs
-                    ]
-                }
-
-            if name == "list_files":
-                from core.files import list_files
-
-                directory = str(args.get("directory") or args.get("rel_path") or args.get("path") or "").strip()
-                result_listing = list_files(directory)
-                raw_entries = result_listing.get("entries") if isinstance(result_listing, dict) else result_listing
-                return {
-                    "directory": directory or "workspace",
-                    "files": [
-                        {
-                            "name": e["name"],
-                            "path": e["path"],
-                            "is_dir": e["is_dir"],
-                            "size": e["size"],
-                            "kind": e["kind"],
-                        }
-                        for e in (raw_entries or [])
-                        if isinstance(e, dict)
-                    ],
-                }
-
-            if name == "read_file":
-                from core.files import preview
-
-                path = str(args.get("path") or args.get("filename") or args.get("rel_path") or "").strip()
-                if not path:
-                    return {"error": "path is required"}
-                data = preview(path, max_chars=4000)
-                content = data.get("text") or data.get("rows") or data.get("message") or ""
-                return {
-                    "path": path,
-                    "kind": data.get("kind"),
-                    "content": content,
-                    "truncated": data.get("truncated", False),
-                }
-
-            if name == "write_file":
-                from core.files import write_file
-
-                path = str(args.get("path") or args.get("filename") or args.get("rel_path") or "").strip()
-                content = str(args.get("content") or "")
-                if not path:
-                    return {"error": "path is required"}
-                info = write_file(path, content)
-                return {"status": "success", "file": info}
-
-            return {"error": f"Unknown tool: '{name}'"}
-        except Exception as exc:
-            logger.warning("Tool execution error for %s: %s", name, exc, exc_info=True)
-            return {"error": str(exc)}
+        return execute_module_tool(tool_name, args, engine=self, context_mode=context_mode)
 
     def chat(
         self,
@@ -756,15 +559,25 @@ class AssistantEngine:
         temperature: float = 0.4,
         include_workflows: bool = True,
         max_tool_iterations: int = 4,
+        enabled_modules: Optional[List[str]] = None,
+        context_mode: str = "auto",
     ) -> AssistantChatResult:
-        """Complete conversational assistant with tool execution for workflows and files."""
+        """Complete conversational assistant with modular tool execution and long-term memory."""
+        from core.module_registry import build_tools_prompt_section, normalize_enabled_modules
+
         message = (user_message or "").strip()
         if not message:
             return AssistantChatResult(text="")
 
+        active_modules = normalize_enabled_modules(enabled_modules)
         model_name = self.master._get_model_string()
-        system = system_prompt or ASSISTANT_PERSONA.format(model_name=model_name)
-        if include_workflows:
+        if system_prompt:
+            system = system_prompt
+        else:
+            tools_section = build_tools_prompt_section(active_modules, context_mode=context_mode)
+            system = ASSISTANT_PERSONA.format(model_name=model_name, tools_section=tools_section)
+
+        if include_workflows and "workflows" in active_modules:
             try:
                 cards = self.catalogue()
                 names = ", ".join(f"[{c.id}] {c.name}" for c in cards)
@@ -774,13 +587,33 @@ class AssistantEngine:
             if names:
                 system += f"\n\nCurrently saved workflows: {names}."
 
+        if "memory_kb" in active_modules and not system_prompt:
+            try:
+                from core.long_term_memory import LongTermFactMemory
+
+                facts = LongTermFactMemory().search_facts(query=message, limit=5)
+                if facts:
+                    fact_lines = "\n".join(f"- [{f.get('category', 'fact')}] {f.get('fact')}" for f in facts)
+                    system += f"\n\nUser long-term preferences & facts:\n{fact_lines}"
+            except Exception:
+                pass
+
+        if "assets_skills" in active_modules and not system_prompt:
+            try:
+                from core.skill_registry import skills_index_prompt
+
+                system += "\n\n" + skills_index_prompt(max_skills=15)
+            except Exception:
+                pass
+
         messages = [{"role": "system", "content": system}]
         messages.extend(normalize_history(history))
         messages.append({"role": "user", "content": message[:MAX_MESSAGE_CHARS]})
 
-        logger.info("AssistantEngine.chat → %s", model_name)
+        logger.info("AssistantEngine.chat → %s (modules=%s, ctx=%s)", model_name, active_modules, context_mode)
 
         started_run_id: Optional[int] = None
+        actions: List[Dict[str, Any]] = []
         iteration = 0
         final_text = ""
         raw_reply = ""
@@ -791,7 +624,6 @@ class AssistantEngine:
             tool_call = extract_tool_call(raw_reply)
 
             if not tool_call:
-                # No tool called: model produced its final direct response
                 final_text = strip_tool_call(raw_reply) or raw_reply
                 break
 
@@ -799,8 +631,11 @@ class AssistantEngine:
             tool_args = tool_call.get("args") or tool_call.get("arguments") or tool_call.get("parameters") or {}
             logger.info("AssistantEngine executing tool '%s' with args: %s", tool_name, tool_args)
 
-            tool_result = self._execute_tool(tool_name, tool_args)
-            if str(tool_name).lower() == "start_workflow" and tool_result.get("run_id"):
+            tool_result = self._execute_tool(tool_name, tool_args, context_mode=context_mode)
+            action = tool_result.pop("_action", None) if isinstance(tool_result, dict) else None
+            if isinstance(action, dict):
+                actions.append(action)
+            if str(tool_name).lower() == "start_workflow" and isinstance(tool_result, dict) and tool_result.get("run_id"):
                 started_run_id = int(tool_result["run_id"])
 
             messages.append({"role": "assistant", "content": raw_reply})
@@ -819,6 +654,7 @@ class AssistantEngine:
         return AssistantChatResult(
             text=final_text.strip(),
             started_run_id=started_run_id,
+            actions=actions,
         )
 
     def decide(

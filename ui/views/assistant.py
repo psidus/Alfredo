@@ -26,8 +26,10 @@ from core.assistant_engine import (
     build_workflow_catalog,
     should_route,
 )
+from core.module_registry import default_enabled_modules, list_modules
 from core.run_service import (
     cancel_run,
+    delete_run_record,
     list_recent_runs,
     pending_interrupts,
     start_resume_interrupt,
@@ -143,27 +145,71 @@ def _render_pending_workflow(engine: AssistantEngine, pending: AssistantTurn) ->
 
 
 def _render_chat_section(engine: AssistantEngine, cards: List[WorkflowCard]) -> None:
-    st.caption(
-        "Free conversation. If you ask for something matching a saved workflow, "
-        "the assistant will suggest it."
-    )
-    top_left, top_right = st.columns([3, 1])
+    modules_catalog = list_modules()
+    if "assistant_enabled_modules" not in st.session_state:
+        st.session_state["assistant_enabled_modules"] = default_enabled_modules()
+    if "assistant_context_mode" not in st.session_state:
+        st.session_state["assistant_context_mode"] = "auto"
+
+    top_left, top_mid, top_right = st.columns([2.2, 1.3, 1.0], vertical_alignment="center")
     with top_left:
-        auto_route = st.toggle(
-            "Automatically detect workflows",
-            value=True,
-            key="assistant_auto_route",
-            help="Triggers an extra model call only when the message looks like a workflow request.",
+        st.caption(
+            f"Modules: `{', '.join(st.session_state['assistant_enabled_modules']) or 'none'}` · "
+            f"Code: `{st.session_state['assistant_context_mode']}`"
         )
+    with top_mid:
+        with st.popover("⚙️ Modules & Context", use_container_width=True):
+            auto_route = st.toggle(
+                "Suggest matching workflows",
+                value=st.session_state.get("assistant_auto_route", True),
+                key="assistant_auto_route",
+                help="Fallback suggestion card only when no workflow was started directly by the assistant.",
+            )
+            st.selectbox(
+                "Code Context Engine",
+                options=["auto", "graphify", "repomix"],
+                key="assistant_context_mode",
+                format_func=lambda m: {
+                    "auto": "Auto (Graphify local / small Repomix)",
+                    "graphify": "Graphify (0 VRAM AST slices)",
+                    "repomix": "Repomix (Cloud / filtered pack)",
+                }.get(m, m),
+            )
+            st.markdown("**Active Modules:**")
+            chosen_modules: List[str] = []
+            current_set = set(st.session_state["assistant_enabled_modules"])
+            for mod in modules_catalog:
+                mid = mod["id"]
+                checked = st.checkbox(
+                    mod["label"],
+                    value=(mid in current_set),
+                    help=mod["description"],
+                    key=f"assistant_mod_cb_{mid}",
+                )
+                if checked:
+                    chosen_modules.append(mid)
+            st.session_state["assistant_enabled_modules"] = chosen_modules
     with top_right:
         if st.button("🧹 New chat", use_container_width=True):
             _reset_chat()
             st.rerun()
 
     messages = st.session_state.setdefault("assistant_messages", [])
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            started_rid = msg.get("started_run_id")
+            if started_rid:
+                st.caption(f"🚀 Run **#{started_rid}** started — switch to **🧩 Workflows** above or open **History & Monitoring** to inspect.")
+            for a_idx, act in enumerate(msg.get("actions") or []):
+                if act.get("type") == "open_workflow_assembler":
+                    if st.button(
+                        f"🧩 {act.get('label') or 'Open in Workflow Assembler'}",
+                        key=f"chat_act_{idx}_{a_idx}",
+                    ):
+                        if act.get("workflow_id"):
+                            st.session_state["editing_workflow_id"] = int(act["workflow_id"])
+                        st.info("Blueprint ready in **Workflow Assembler**.")
 
     pending = st.session_state.get("assistant_pending")
     if isinstance(pending, AssistantTurn):
@@ -176,15 +222,35 @@ def _render_chat_section(engine: AssistantEngine, cards: List[WorkflowCard]) -> 
     history = _history_for_model()
     messages.append({"role": "user", "content": prompt})
 
+    enabled_mods = list(st.session_state.get("assistant_enabled_modules") or [])
+    ctx_mode = str(st.session_state.get("assistant_context_mode") or "auto")
+    auto_route = bool(st.session_state.get("assistant_auto_route", True))
+
+    started_run_id: Optional[int] = None
+    msg_actions: List[Dict[str, Any]] = []
     try:
         with st.spinner("Thinking…"):
-            reply = engine.chat(prompt, history=history)
+            chat_res = engine.chat(
+                prompt,
+                history=history,
+                enabled_modules=enabled_mods,
+                context_mode=ctx_mode,
+            )
+        reply = str(chat_res)
+        started_run_id = getattr(chat_res, "started_run_id", None)
+        msg_actions = list(getattr(chat_res, "actions", []) or [])
     except Exception as exc:  # noqa: BLE001 - show the real error
         logger.exception("Assistant chat failed")
         reply = f"⚠️ Model error: {exc}"
 
     turn: Optional[AssistantTurn] = None
-    if auto_route and cards and should_route(prompt, cards):
+    if (
+        not started_run_id
+        and auto_route
+        and cards
+        and "workflows" in enabled_mods
+        and should_route(prompt, cards)
+    ):
         try:
             with st.spinner("Finding a matching workflow…"):
                 candidate = engine.decide(prompt, history=history)
@@ -195,7 +261,14 @@ def _render_chat_section(engine: AssistantEngine, cards: List[WorkflowCard]) -> 
         except Exception:
             logger.exception("Assistant routing failed (chat continues)")
 
-    messages.append({"role": "assistant", "content": reply or "(no response)"})
+    messages.append(
+        {
+            "role": "assistant",
+            "content": reply or "(no response)",
+            "started_run_id": started_run_id,
+            "actions": msg_actions,
+        }
+    )
     if turn is not None:
         st.session_state["assistant_pending"] = turn
     else:
@@ -256,54 +329,6 @@ def _render_manual_workflows(cards: List[WorkflowCard]) -> None:
         _run_and_report(selected, inputs)
 
 
-def _render_decided_workflows(cards: List[WorkflowCard], engine: AssistantEngine) -> None:
-    st.caption(
-        "Describe your goal: the decision agent picks a workflow and pre-fills inferred inputs. "
-        "You can edit them before running."
-    )
-    request = st.text_area(
-        "What would you like to do?",
-        key="assistant_request",
-        placeholder="e.g. analyze thermal documents and prepare an Excel report…",
-        height=100,
-    )
-    if st.button("🧠 Select workflow", key="assistant_decide_btn"):
-        if not request.strip():
-            st.warning("Please enter a request first.")
-        else:
-            try:
-                with st.spinner("Selecting matching workflow…"):
-                    st.session_state["assistant_decision"] = engine.decide(request)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Workflow decision failed")
-                st.error(f"Decision failed: {exc}")
-
-    turn = st.session_state.get("assistant_decision")
-    if not isinstance(turn, AssistantTurn):
-        return
-
-    if turn.text:
-        st.info(turn.text)
-
-    if turn.action != "run_workflow" or not turn.workflow_id:
-        return
-
-    by_id = {c.id: c for c in cards}
-    card = by_id.get(turn.workflow_id)
-    if not card:
-        st.warning("The selected workflow no longer exists.")
-        return
-
-    st.markdown(f"**Selected workflow:** {card.name}")
-    inputs = _render_inputs(card, "wf_decided", turn.inputs)
-    if turn.missing_inputs:
-        st.caption(
-            "To complete: " + ", ".join(f"`{k}`" for k in turn.missing_inputs)
-        )
-    if st.button("▶ Run selected workflow", type="primary", key=f"wf_decided_run_{card.id}"):
-        _run_and_report(card, inputs)
-
-
 def _render_recent_runs() -> None:
     st.divider()
     header_left, header_right = st.columns([3, 1])
@@ -326,12 +351,24 @@ def _render_recent_runs() -> None:
 
     names = _workflow_names()
     for run in runs:
+        rid = run.get("id")
         status = str(run.get("status") or "unknown").lower()
         icon = STATUS_ICON.get(status, "❓")
         name = names.get(run.get("workflow_id"), f"Workflow {run.get('workflow_id')}")
-        label = f"{icon} Run #{run.get('id')} · {name} · {status}"
+        label = f"{icon} Run #{rid} · {name} · {status}"
         with st.expander(label):
-            st.caption(f"Started: {run.get('started_at') or '—'} · Source: {run.get('source') or '—'}")
+            c_meta, c_act = st.columns([4, 1], vertical_alignment="center")
+            with c_meta:
+                st.caption(f"Started: {run.get('started_at') or '—'} · Source: {run.get('source') or '—'}")
+            with c_act:
+                if status in ("running", "paused", "waiting_human"):
+                    if st.button("⏹️ Cancel", key=f"wf_run_cancel_{rid}", use_container_width=True):
+                        cancel_run(int(rid))
+                        st.rerun()
+                else:
+                    if st.button("🗑️ Delete", key=f"wf_run_del_{rid}", use_container_width=True):
+                        delete_run_record(int(rid))
+                        st.rerun()
             if run.get("inputs"):
                 st.markdown("**Inputs**")
                 st.json(run["inputs"])
@@ -348,20 +385,10 @@ def _render_recent_runs() -> None:
 
 def _render_workflow_section(engine: AssistantEngine, cards: List[WorkflowCard]) -> None:
     if not cards:
-        st.info("No saved workflows. Create one in **Workflow Assembler**.")
+        st.info("No saved workflows. Create one in **Workflow Assembler** or ask **💬 Chat** to draft one.")
         return
 
-    mode = st.radio(
-        "Mode",
-        ["Manual selection", "Assistant decides"],
-        horizontal=True,
-        key="assistant_wf_mode",
-    )
-    if mode == "Manual selection":
-        _render_manual_workflows(cards)
-    else:
-        _render_decided_workflows(cards, engine)
-
+    _render_manual_workflows(cards)
     _render_recent_runs()
 
 

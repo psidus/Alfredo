@@ -2,17 +2,20 @@ import type {
   ChatMessage,
   ChatReply,
   ConnectionConfig,
+  ContextMode,
   Decision,
   FileListing,
   FilePreview,
   Interrupt,
   InterruptOutcome,
+  ModuleInfo,
   RunDetail,
   RunEventPage,
   RunFile,
   RunStart,
   RunSummary,
   ShareLink,
+  SkillInfo,
   SystemStatus,
   TranscriptionResult,
   UploadChunkStatus,
@@ -144,13 +147,28 @@ export const api = {
   workflows: (config: ConnectionConfig) =>
     request<WorkflowCard[]>(config, "GET", "/api/workflows"),
 
-  chat: (config: ConnectionConfig, message: string, history: ChatMessage[], autoRoute = true) =>
+  modules: (config: ConnectionConfig) =>
+    request<ModuleInfo[]>(config, "GET", "/api/modules"),
+
+  skills: (config: ConnectionConfig) =>
+    request<SkillInfo[]>(config, "GET", "/api/skills"),
+
+  chat: (
+    config: ConnectionConfig,
+    message: string,
+    history: ChatMessage[],
+    autoRoute = true,
+    enabledModules?: string[],
+    contextMode: ContextMode = "auto",
+  ) =>
     request<ChatReply>(config, "POST", "/api/assistant/chat", {
       message,
       history: history
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role, content: m.content })),
       auto_route: autoRoute,
+      ...(enabledModules !== undefined ? { enabled_modules: enabledModules } : {}),
+      context_mode: contextMode,
     }),
 
   decide: (config: ConnectionConfig, message: string, history: ChatMessage[]) =>

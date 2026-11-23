@@ -103,6 +103,7 @@ class PostgresManager:
                 backstory TEXT,
                 model_id INTEGER,
                 tools_json TEXT,
+                skills_json TEXT DEFAULT '[]',
                 FOREIGN KEY (model_id) REFERENCES models (id) ON DELETE SET NULL
             );
             """,
@@ -122,6 +123,7 @@ class PostgresManager:
                 max_output_tokens INTEGER DEFAULT 0,
                 output_pydantic TEXT,
                 tool_profile TEXT DEFAULT '',
+                skills_json TEXT DEFAULT '[]',
                 FOREIGN KEY (agent_id) REFERENCES agents (id) ON DELETE SET NULL,
                 FOREIGN KEY (model_id) REFERENCES models (id) ON DELETE SET NULL
             );
@@ -419,6 +421,17 @@ class PostgresManager:
             except psycopg2.Error:
                 self.conn.rollback()
 
+            # Migrations to add skills_json to agents and tasks
+            for _sql_skill_mig in (
+                "ALTER TABLE agents ADD COLUMN skills_json TEXT DEFAULT '[]';",
+                "ALTER TABLE tasks ADD COLUMN skills_json TEXT DEFAULT '[]';",
+            ):
+                try:
+                    self.cursor.execute(_sql_skill_mig)
+                    self.conn.commit()
+                except psycopg2.Error:
+                    self.conn.rollback()
+
         except psycopg2.Error as e:
             print(f"Error creating tables: {e}")
             self.conn.rollback()
@@ -440,6 +453,18 @@ class PostgresManager:
             except json.JSONDecodeError:
                 data['tools'] = [] 
             del data['tools_json']
+        if 'skills_json' in data:
+            raw_skills = data.get('skills_json')
+            if isinstance(raw_skills, list):
+                data['skills'] = raw_skills
+            elif raw_skills:
+                try:
+                    data['skills'] = json.loads(raw_skills)
+                except json.JSONDecodeError:
+                    data['skills'] = []
+            else:
+                data['skills'] = []
+            del data['skills_json']
         if 'task_ids_json' in data and data['task_ids_json']:
             try:
                 data['task_ids'] = json.loads(data['task_ids_json'])
@@ -540,10 +565,11 @@ class PostgresManager:
         return self.cursor.rowcount
 
     # --- Agents CRUD ---
-    def create_agent(self, name: str, role: str, backstory: str, model_id: Optional[int], tools: List[str]) -> int:
+    def create_agent(self, name: str, role: str, backstory: str, model_id: Optional[int], tools: List[str], skills: Optional[List[str]] = None) -> int:
         tools_json = json.dumps(tools)
-        sql = "INSERT INTO agents (name, role, backstory, model_id, tools_json) VALUES (%s, %s, %s, %s, %s) RETURNING id"
-        self.cursor.execute(sql, (name, role, backstory, model_id, tools_json))
+        skills_json = json.dumps(skills or [])
+        sql = "INSERT INTO agents (name, role, backstory, model_id, tools_json, skills_json) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"
+        self.cursor.execute(sql, (name, role, backstory, model_id, tools_json, skills_json))
         self.conn.commit()
         return self.cursor.fetchone()['id']
 
@@ -574,14 +600,23 @@ class PostgresManager:
             processed_rows.append(self._process_json_fields(agent_dict))
         return processed_rows
 
-    def update_agent(self, agent_id: int, name: str, role: str, backstory: str, model_id: Optional[int], tools: List[str]) -> int:
+    def update_agent(self, agent_id: int, name: str, role: str, backstory: str, model_id: Optional[int], tools: List[str], skills: Optional[List[str]] = None) -> int:
         tools_json = json.dumps(tools)
-        sql = """
-        UPDATE agents 
-        SET name = %s, role = %s, backstory = %s, model_id = %s, tools_json = %s 
-        WHERE id = %s
-        """
-        self.cursor.execute(sql, (name, role, backstory, model_id, tools_json, agent_id))
+        if skills is None:
+            sql = """
+            UPDATE agents 
+            SET name = %s, role = %s, backstory = %s, model_id = %s, tools_json = %s 
+            WHERE id = %s
+            """
+            self.cursor.execute(sql, (name, role, backstory, model_id, tools_json, agent_id))
+        else:
+            skills_json = json.dumps(skills)
+            sql = """
+            UPDATE agents 
+            SET name = %s, role = %s, backstory = %s, model_id = %s, tools_json = %s, skills_json = %s
+            WHERE id = %s
+            """
+            self.cursor.execute(sql, (name, role, backstory, model_id, tools_json, skills_json, agent_id))
         self.conn.commit()
         return self.cursor.rowcount
 
@@ -592,15 +627,16 @@ class PostgresManager:
         return self.cursor.rowcount
 
     # --- Tasks CRUD ---
-    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0, output_pydantic: Optional[str] = None, tool_profile: Optional[str] = None) -> int:
+    def create_task(self, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0, output_pydantic: Optional[str] = None, tool_profile: Optional[str] = None, skills: Optional[List[str]] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
+        skills_json = json.dumps(skills or [])
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
         vector_dbs_json = json.dumps(vector_dbs)
-        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name, model_id, human_validation, max_input_context, max_output_tokens, output_pydantic, tool_profile) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id"
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, output_pydantic, tool_profile or ""))
+        sql = "INSERT INTO tasks (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization, name, model_id, human_validation, max_input_context, max_output_tokens, output_pydantic, tool_profile, skills_json) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id"
+        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, output_pydantic, tool_profile or "", skills_json))
         self.conn.commit()
         return self.cursor.fetchone()['id']
 
@@ -623,19 +659,28 @@ class PostgresManager:
             processed_rows.append(self._process_json_fields(task_dict))
         return processed_rows
 
-    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0, output_pydantic: Optional[str] = None, tool_profile: Optional[str] = None) -> int:
+    def update_task(self, task_id: int, description: str, expected_output: str, agent_id: Optional[int], tools: List[str] = None, required_inputs: List[Dict[str, str]] = None, vector_dbs: List[str] = None, agent_specialization: Optional[str] = None, name: Optional[str] = None, model_id: Optional[int] = None, human_validation: bool = False, max_input_context: int = 0, max_output_tokens: int = 0, output_pydantic: Optional[str] = None, tool_profile: Optional[str] = None, skills: Optional[List[str]] = None) -> int:
         tools = tools or []
         required_inputs = required_inputs or []
         vector_dbs = vector_dbs or []
         tools_json = json.dumps(tools)
         required_inputs_json = json.dumps(required_inputs)
         vector_dbs_json = json.dumps(vector_dbs)
-        sql = """
-        UPDATE tasks 
-        SET description = %s, expected_output = %s, agent_id = %s, tools_json = %s, required_inputs_json = %s, vector_dbs_json = %s, agent_specialization = %s, name = %s, model_id = %s, human_validation = %s, max_input_context = %s, max_output_tokens = %s, output_pydantic = %s, tool_profile = %s
-        WHERE id = %s
-        """
-        self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, output_pydantic, tool_profile or "", task_id))
+        if skills is None:
+            sql = """
+            UPDATE tasks 
+            SET description = %s, expected_output = %s, agent_id = %s, tools_json = %s, required_inputs_json = %s, vector_dbs_json = %s, agent_specialization = %s, name = %s, model_id = %s, human_validation = %s, max_input_context = %s, max_output_tokens = %s, output_pydantic = %s, tool_profile = %s
+            WHERE id = %s
+            """
+            self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, output_pydantic, tool_profile or "", task_id))
+        else:
+            skills_json = json.dumps(skills)
+            sql = """
+            UPDATE tasks 
+            SET description = %s, expected_output = %s, agent_id = %s, tools_json = %s, required_inputs_json = %s, vector_dbs_json = %s, agent_specialization = %s, name = %s, model_id = %s, human_validation = %s, max_input_context = %s, max_output_tokens = %s, output_pydantic = %s, tool_profile = %s, skills_json = %s
+            WHERE id = %s
+            """
+            self.cursor.execute(sql, (description, expected_output, agent_id, tools_json, required_inputs_json, vector_dbs_json, agent_specialization or None, name or None, model_id, int(human_validation), max_input_context, max_output_tokens, output_pydantic, tool_profile or "", skills_json, task_id))
         self.conn.commit()
         return self.cursor.rowcount
 

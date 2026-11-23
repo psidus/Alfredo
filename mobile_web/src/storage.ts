@@ -1,8 +1,20 @@
-import type { ChatMessage, ConnectionConfig } from "./types";
+import type { ChatMessage, ConnectionConfig, ContextMode } from "./types";
 
 const CONFIG_KEY = "alfredo.config.v1";
 const CHAT_KEY = "alfredo.chat.v1";
+const CHAT_SETTINGS_KEY = "alfredo.chat_settings.v1";
 const MAX_CHAT_MESSAGES = 40;
+
+export const DEFAULT_ENABLED_MODULES: string[] = [
+  "workflows",
+  "files_code",
+  "memory_kb",
+];
+
+export interface ChatSettings {
+  enabledModules: string[];
+  contextMode: ContextMode;
+}
 
 function defaultBaseUrl(): string {
   const fromEnv = import.meta.env.VITE_ALFREDO_API_URL as string | undefined;
@@ -62,6 +74,36 @@ export function saveChat(messages: ChatMessage[]): void {
 export function clearChat(): void {
   try {
     localStorage.removeItem(CHAT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function loadChatSettings(): ChatSettings {
+  const fallback: ChatSettings = {
+    enabledModules: [...DEFAULT_ENABLED_MODULES],
+    contextMode: "auto",
+  };
+  try {
+    const raw = localStorage.getItem(CHAT_SETTINGS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<ChatSettings>;
+    const enabledModules = Array.isArray(parsed.enabledModules)
+      ? parsed.enabledModules.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      : fallback.enabledModules;
+    const contextMode: ContextMode =
+      parsed.contextMode === "graphify" || parsed.contextMode === "repomix" || parsed.contextMode === "auto"
+        ? parsed.contextMode
+        : "auto";
+    return { enabledModules, contextMode };
+  } catch {
+    return fallback;
+  }
+}
+
+export function saveChatSettings(settings: ChatSettings): void {
+  try {
+    localStorage.setItem(CHAT_SETTINGS_KEY, JSON.stringify(settings));
   } catch {
     // ignore
   }

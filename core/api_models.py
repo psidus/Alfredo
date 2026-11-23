@@ -78,6 +78,12 @@ class ChatRequest(BaseModel):
     auto_route: bool = Field(
         default=True, description="Also try to route the message to a saved workflow"
     )
+    enabled_modules: Optional[List[str]] = Field(
+        default=None, description="Optional list of active tool modules for chat"
+    )
+    context_mode: str = Field(
+        default="auto", description="Codebase context preference: auto | graphify | repomix"
+    )
 
 
 class WorkflowSuggestion(BaseModel):
@@ -94,6 +100,7 @@ class ChatResponse(BaseModel):
     workflow: Optional[WorkflowSuggestion] = None
     started_run_id: Optional[int] = None
     model: Optional[str] = None
+    actions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DecideRequest(BaseModel):
